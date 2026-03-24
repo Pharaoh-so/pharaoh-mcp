@@ -1,8 +1,10 @@
 # Pharaoh
 
+[![pharaoh MCP server](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh/badges/score.svg)](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh)
+
 **Codebase intelligence for AI agents. Your AI understands your architecture before it writes a single line.**
 
-[![Pharaoh MCP server](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh/badge)](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh)
+[![pharaoh MCP server](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh/badges/card.svg)](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh)
 
 [pharaoh.so](https://pharaoh.so)
 
