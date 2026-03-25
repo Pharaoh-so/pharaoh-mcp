@@ -1,104 +1,98 @@
-# Pharaoh
+# @pharaoh-so/mcp
 
 [![npm version](https://img.shields.io/npm/v/@pharaoh-so/mcp)](https://www.npmjs.com/package/@pharaoh-so/mcp)
-[![license](https://img.shields.io/github/license/Pharaoh-so/pharaoh-mcp)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io/)
-[![Pharaoh MCP server](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh/badge)](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh)
+[![license](https://img.shields.io/npm/l/@pharaoh-so/mcp)](https://github.com/Pharaoh-so/pharaoh-mcp/blob/main/LICENSE)
+[![node](https://img.shields.io/node/v/@pharaoh-so/mcp)](https://nodejs.org)
+[![pharaoh MCP server](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh/badges/score.svg)](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh)
 
-**Codebase intelligence for AI agents. Your AI understands your architecture before it writes a single line.**
+MCP proxy for [Pharaoh](https://pharaoh.so) — maps codebases into queryable knowledge graphs for AI agents.
 
-Pharaoh parses repositories using [tree-sitter](https://tree-sitter.github.io/) and maps structural metadata into a [Neo4j](https://neo4j.com/) knowledge graph — functions, modules, imports, exports, call chains, endpoints, complexity scores, all mapped as nodes and edges. AI agents query the graph via the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) for structured architectural context instead of reading files one at a time.
+Pharaoh gives AI coding assistants a complete architectural map of your codebase: every function, dependency, module, and connection. Instead of reading files one at a time, your AI agent queries the knowledge graph and gets instant answers about blast radius, unused code, dependency chains, and more.
 
-Deterministic analysis — no LLM in the pipeline, zero hallucination risk. **No source code stored.**
+This package enables [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) to connect to Pharaoh in **headless environments** (VPS, SSH, containers, CI) where a browser isn't available for OAuth. It acts as a stdio-to-SSE proxy, presenting itself as a local MCP server while relaying all communication to the remote Pharaoh server.
 
-[pharaoh.so](https://pharaoh.so) · [Documentation](https://docs.pharaoh.so) · [Report an Issue](https://github.com/Pharaoh-so/pharaoh-mcp/issues)
+## Quick Start
 
----
+### Step 1 — Authenticate
 
-## Quick Start (60 seconds)
-
-### Claude Code (Desktop — Browser Available)
+Run the proxy directly to trigger the device authorization flow:
 
 ```bash
-claude mcp add pharaoh --transport sse https://mcp.pharaoh.so/sse
+npx @pharaoh-so/mcp
 ```
 
-### Claude Code (Headless — VPS, SSH, CI)
+This displays a device code and a URL. Open the URL on **any device** (phone, laptop, tablet) and enter the code to authorize. Credentials are saved to `~/.pharaoh/credentials.json` and remain valid for 7 days, with automatic re-authorization when they expire.
+
+### Step 2 — Add to Claude Code
 
 ```bash
 claude mcp add pharaoh -- npx @pharaoh-so/mcp
 ```
 
-The `@pharaoh-so/mcp` npm package acts as a stdio-to-SSE proxy with [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628) device flow auth — no browser required on the machine running Claude Code. See the [npm package README](https://www.npmjs.com/package/@pharaoh-so/mcp) for details.
+Verify the connection:
 
-### Cursor
-
-Add to `.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "pharaoh": {
-      "url": "https://mcp.pharaoh.so/sse"
-    }
-  }
-}
+```bash
+claude mcp list
 ```
 
-### Windsurf
+You should see `pharaoh` listed as a **stdio** server.
 
-Add to your MCP configuration:
+### Switching from SSE
 
-```json
-{
-  "mcpServers": {
-    "pharaoh": {
-      "serverUrl": "https://mcp.pharaoh.so/sse"
-    }
-  }
-}
+If you previously added Pharaoh as an SSE server, remove it first:
+
+```bash
+claude mcp remove pharaoh
+claude mcp add pharaoh -- npx @pharaoh-so/mcp
 ```
 
-### Generic MCP Client
+### Desktop with Browser (Alternative)
 
-```json
-{
-  "mcpServers": {
-    "pharaoh": {
-      "transport": "sse",
-      "url": "https://mcp.pharaoh.so/sse"
-    }
-  }
-}
+If you have a browser available (desktop, laptop), you can connect directly via SSE instead:
+
+```bash
+claude mcp add --transport sse pharaoh https://mcp.pharaoh.so/sse
 ```
 
-### Setup
+This uses OAuth in the browser and doesn't require this package.
 
-1. Add the MCP URL to your client (see above)
-2. Authorize via OAuth — you'll be prompted to install the Pharaoh GitHub App on your org
-3. Repos are mapped automatically. Start querying.
+## How It Works
 
----
+```
+Claude Code ← stdio → @pharaoh-so/mcp ← SSE/HTTP → mcp.pharaoh.so
+```
 
-## Tools (19 Total)
+The proxy implements the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) specification:
+
+1. **Claude Code** launches the proxy as a child process and communicates via **stdio** (stdin/stdout)
+2. **The proxy** authenticates with Pharaoh using stored credentials (or triggers device flow)
+3. **All MCP messages** (tool calls, responses, notifications) are relayed to the remote Pharaoh server over **SSE** (Server-Sent Events)
+4. **Pharaoh** queries the knowledge graph and returns architectural data to the proxy
+5. **The proxy** forwards responses back to Claude Code via stdio
+
+Authentication uses [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628) (OAuth 2.0 Device Authorization Grant) — no browser is needed on the machine running Claude Code.
+
+## Available Tools
+
+Once connected, Pharaoh provides 19 MCP tools organized into four categories:
 
 ### Orient (Free)
 
 | Tool | What it answers |
 |------|----------------|
-| `get_codebase_map` | What modules exist and how do they relate? — **start here** |
+| `get_codebase_map` | What modules exist and how do they relate? |
 | `get_module_context` | What does this module look like before I modify it? |
 | `search_functions` | Does this function already exist somewhere? |
 | `get_design_system` | What UI components and tokens already exist? |
 
 ### Investigate (Free + Pro)
 
-| Tool | Tier | What it answers |
-|------|------|----------------|
-| `get_blast_radius` | Free | What breaks if I change this function/file/module? |
-| `query_dependencies` | Free | How are these two modules connected? |
-| `check_reachability` | Pro | Is this function actually reachable from entry points? |
-| `get_vision_docs` | Pro | Is there a PRD or spec for this? |
+| Tool | What it answers |
+|------|----------------|
+| `get_blast_radius` | What breaks if I change this function/file/module? |
+| `query_dependencies` | How are these two modules connected? |
+| `check_reachability` | Is this function actually reachable from entry points? |
+| `get_vision_docs` | Is there a PRD or spec for this? |
 
 ### Audit (Pro)
 
@@ -113,173 +107,168 @@ Add to your MCP configuration:
 
 ### Manage (Free)
 
-| Tool | What it does |
-|------|-------------|
+| Tool | What it answers |
+|------|----------------|
 | `request_upload` | Map a local repo without installing the GitHub App |
 | `setup_environment` | Install recommended development plugins |
 | `pharaoh_account` | Check plan, toggle PR Guard, trigger refresh |
 | `pharaoh_feedback` | Report false positives or tool issues |
 | `pharaoh_admin` | Org-level administration |
 
----
+## Inspect Mode
 
-## Example Sessions
-
-### Blast Radius Before Refactoring
-
-```
-You: "What breaks if I rename formatMessage?"
-
-Pharaoh → get_blast_radius
-  Risk: HIGH
-  Direct callers: 4 (across 3 modules)
-  Transitive impact: 12 functions
-  Affected endpoints: POST /api/notifications/send, POST /api/slack/webhook
-  Affected cron: daily-digest (09:00 UTC)
-```
-
-### Avoiding Duplicate Code
-
-```
-You: "Is there already a retry wrapper?"
-
-Pharaoh → search_functions
-  Found: withRetry() in src/utils/resilience.ts:42
-  Exported: yes | Async: yes | Complexity: 8
-  Used by 6 callers across 3 modules
-  → Agent imports existing function instead of writing a new one.
-```
-
-### Dead Code Cleanup
-
-```
-You: "What code can I safely delete?"
-
-Pharaoh → get_unused_code
-  Dead (safe to remove): 23 functions across 8 files
-  Likely dead (verify first): 5 functions with dynamic-only references
-  Estimated LOC reduction: ~450 lines
-```
-
-### Pre-Change Risk Assessment
-
-```
-You: "How risky is changing the auth middleware?"
-
-Pharaoh → get_regression_risk
-  Risk: CRITICAL (score: 92/100)
-  Reason: 47 downstream callers, 3 entry points, complexity 24
-  Recommendation: staged rollout with integration tests
-```
-
----
-
-## How It Works
-
-```
-GitHub App (install) → Pharaoh → tree-sitter parse → Neo4j knowledge graph
-GitHub App (push)    → Pharaoh → incremental refresh → graph updated
-AI Agent (query)     → MCP → Cypher query → structured response
-```
-
-- **Tree-sitter parsing** — deterministic AST analysis, no LLM involved
-- **Neo4j knowledge graph** — functions, files, modules, dependencies mapped as nodes and edges
-- **GitHub webhook** — auto-refreshes the graph on every push to the default branch
-- **~60 seconds** to map a 50K LOC TypeScript project
-- **Structural metadata only** — function names, file paths, dependency relationships, complexity scores, export signatures. **Never source code.**
-
-### Supported Languages
-
-| Language | Status |
-|----------|--------|
-| TypeScript / JavaScript | Full support (functions, classes, imports, exports, JSX) |
-| Python | Full support (functions, classes, imports, decorators) |
-| More languages | Planned via tree-sitter grammar support |
-
----
-
-## npm Package (`@pharaoh-so/mcp`)
-
-For headless environments where a browser isn't available for OAuth:
+Use `--inspect` to dump the full tool manifest as JSON (useful for MCP registry validation and debugging):
 
 ```bash
-# Authenticate (run once — opens device flow)
-npx @pharaoh-so/mcp
-
-# Add to Claude Code
-claude mcp add pharaoh -- npx @pharaoh-so/mcp
+npx @pharaoh-so/mcp --inspect
 ```
 
-The package is a thin stdio-to-SSE proxy (~25KB). One dependency (`@modelcontextprotocol/sdk`). Credentials stored at `~/.pharaoh/credentials.json` with `0600` permissions.
+This outputs the complete list of tools with their schemas and exits immediately, without connecting to the server.
+
+## CLI Options
 
 ```
-Claude Code ← stdio → @pharaoh-so/mcp ← SSE/HTTP → mcp.pharaoh.so
+Usage: pharaoh-mcp [options]
+
+Options:
+  --server <url>   Pharaoh server URL (default: https://mcp.pharaoh.so)
+  --logout         Clear stored credentials and exit
+  --inspect        Output tool manifest as JSON and exit
+  --help           Show help
+  --version        Show version number
 ```
 
-See the [npm package page](https://www.npmjs.com/package/@pharaoh-so/mcp) for full documentation.
+## Configuration
 
----
+### Credentials
+
+Credentials are stored at `~/.pharaoh/credentials.json` with `0600` permissions (owner-read/write only). The file contains:
+
+- **Access token** — used to authenticate MCP requests
+- **Refresh token** — used to obtain new access tokens when they expire
+- **Expiry timestamp** — tokens are refreshed automatically before expiration
+
+To clear credentials:
+
+```bash
+npx @pharaoh-so/mcp --logout
+```
+
+### Custom Server
+
+For self-hosted Pharaoh instances or development:
+
+```bash
+claude mcp add pharaoh -- npx @pharaoh-so/mcp --server https://your-pharaoh-instance.com
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHARAOH_SERVER_URL` | `https://mcp.pharaoh.so` | Pharaoh server URL (alternative to `--server`) |
+
+## Requirements
+
+- **Node.js** >= 18
+- **Claude Code** or any MCP-compatible AI client
+- A **Pharaoh account** — sign up at [pharaoh.so](https://pharaoh.so)
 
 ## Security
 
-- **No source code stored** — only structural metadata in the knowledge graph
-- **Tenant isolation** — every query is repo-anchored and ownership-verified via two independent layers
-- **Encrypted at rest** — GitHub tokens and sensitive graph properties use AES-256-GCM with per-tenant HKDF-derived keys
-- **Webhook verification** — all GitHub and Stripe webhooks are HMAC-verified
-- **Token security** — tokens stored as SHA-256 hashes, never plaintext
-- **Rate limiting** — per-tenant rate limiting prevents abuse
-- **Org membership** — re-checked on every token refresh (max 1hr staleness)
+- Credentials are stored with restrictive file permissions (`0600` — owner-read/write only)
+- Authentication uses the [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628) device authorization flow — no secrets are embedded in the package
+- All communication with the Pharaoh server uses HTTPS/TLS
+- No source code is ever transmitted — Pharaoh maps structural metadata (function names, file paths, dependency relationships) into a knowledge graph. Your code never leaves your machine.
+- Tokens expire after 7 days and are refreshed automatically
+- Only use trusted server URLs — the proxy sends your auth token to the configured server
 
-See [SECURITY.md](SECURITY.md) for the full security policy and vulnerability reporting.
+### Reporting Vulnerabilities
 
----
+If you discover a security vulnerability, please report it responsibly by emailing [security@pharaoh.so](mailto:security@pharaoh.so). Do not open a public issue.
 
-## FAQ
+## Troubleshooting
 
-**Does Pharaoh store my source code?**
-No. The graph contains function names, file paths, dependency relationships, complexity scores, and export signatures. Never source code.
+### "Connection refused" or "ECONNREFUSED"
 
-**What languages are supported?**
-TypeScript and Python today. Tree-sitter makes adding languages straightforward.
+The Pharaoh server may be temporarily unavailable. Check [status.pharaoh.so](https://pharaoh.so) or try again in a few minutes.
 
-**How does it stay current?**
-GitHub webhook fires on every push. Your graph is always up to date.
+### "Token expired" or "401 Unauthorized"
 
-**Can I use it with private repos?**
-Yes. Read-only access via the GitHub App. Tenant-isolated — your data is never visible to other customers.
+Re-authenticate by running the proxy directly:
 
-**How is this different from Sourcegraph / CodeScene / SonarQube?**
-Sourcegraph answers "where is it?" — text search across repos. CodeScene analyzes behavioral patterns from git history. SonarQube does line-level static analysis and linting. Pharaoh answers "what breaks if I change this?" — structural and architectural intelligence built for AI agents, not dashboards.
+```bash
+npx @pharaoh-so/mcp
+```
 
-**What MCP clients are supported?**
-Any MCP-compatible client: Claude Code, Cursor, Windsurf, Cline, Continue, and any client that supports SSE transport.
+Or clear credentials and start fresh:
 
-**Is there a free tier?**
-Yes. The Orient tools (`get_codebase_map`, `get_module_context`, `search_functions`, `get_design_system`) and core Investigate tools (`get_blast_radius`, `query_dependencies`) are free. Pro tools require a subscription.
+```bash
+npx @pharaoh-so/mcp --logout
+npx @pharaoh-so/mcp
+```
 
-**How do I map repos without the GitHub App?**
-Use the `request_upload` tool to map local repositories directly.
+### "pharaoh" not showing in `claude mcp list`
 
----
+Make sure you added it with the correct command:
+
+```bash
+claude mcp add pharaoh -- npx @pharaoh-so/mcp
+```
+
+Note the `--` separator between `pharaoh` and `npx`.
+
+### Device code not working
+
+- Ensure you're opening the URL on a device with browser access
+- The device code expires after 15 minutes — request a new one by re-running the command
+- Check that you're logged into GitHub when authorizing
+
+### Slow startup
+
+The first run after installation may take a moment as npm downloads the package. Subsequent runs use the cached version. To pre-install globally:
+
+```bash
+npm install -g @pharaoh-so/mcp
+claude mcp add pharaoh -- pharaoh-mcp
+```
+
+## How Pharaoh Works
+
+Pharaoh parses your repositories using [tree-sitter](https://tree-sitter.github.io/) and maps structural metadata into a [Neo4j](https://neo4j.com/) knowledge graph. The graph contains:
+
+- **Functions** — names, signatures, complexity scores, export visibility
+- **Files** — paths, module membership, language classification
+- **Modules** — logical groupings detected from directory structure
+- **Dependencies** — import/export relationships, call chains, module connections
+- **Vision specs** — PRD/spec documents linked to implementation
+
+No source code is stored — only structural metadata. When an AI agent queries Pharaoh, it gets architectural facts in minimal tokens, not raw code dumps. This means your AI assistant can understand your entire codebase architecture without consuming its context window reading files one by one.
+
+## Supported Languages
+
+- **TypeScript / JavaScript** — full support (functions, classes, imports, exports, JSX)
+- **Python** — full support (functions, classes, imports, decorators)
+- More languages planned via tree-sitter grammar support
 
 ## Contributing
 
-We welcome contributions. Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before getting started.
+Contributions are welcome. Please open an issue first to discuss what you'd like to change.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) -- Pharaoh, Inc.
 
 ## Links
 
-- [Website](https://pharaoh.so)
+- [Pharaoh website](https://pharaoh.so)
 - [Documentation](https://docs.pharaoh.so)
-- [npm Package](https://www.npmjs.com/package/@pharaoh-so/mcp)
-- [MCP Specification](https://modelcontextprotocol.io/)
-- [Report an Issue](https://github.com/Pharaoh-so/pharaoh-mcp/issues)
-- [Security Policy](SECURITY.md)
-- [Changelog](CHANGELOG.md)
-
----
-
-Built by a dev who got tired of AI agents breaking things they couldn't see.
+- [MCP specification](https://modelcontextprotocol.io/)
+- [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code)
+- [Report an issue](https://github.com/Pharaoh-so/pharaoh-mcp/issues)
