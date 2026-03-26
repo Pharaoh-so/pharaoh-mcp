@@ -26,7 +26,7 @@ This displays a device code and a URL. Open the URL on **any device** (phone, la
 ### Step 2 — Add to Claude Code
 
 ```bash
-claude mcp add pharaoh -- npx @pharaoh-so/mcp
+npx @pharaoh-so/mcp --setup
 ```
 
 Verify the connection:
@@ -43,18 +43,8 @@ If you previously added Pharaoh as an SSE server, remove it first:
 
 ```bash
 claude mcp remove pharaoh
-claude mcp add pharaoh -- npx @pharaoh-so/mcp
+npx @pharaoh-so/mcp --setup
 ```
-
-### Desktop with Browser (Alternative)
-
-If you have a browser available (desktop, laptop), you can connect directly via SSE instead:
-
-```bash
-claude mcp add --transport sse --scope user pharaoh https://mcp.pharaoh.so/sse
-```
-
-This uses OAuth in the browser and doesn't require this package.
 
 ## How It Works
 
@@ -156,10 +146,10 @@ npx @pharaoh-so/mcp --logout
 
 ### Custom Server
 
-For self-hosted Pharaoh instances or development:
+For self-hosted Pharaoh instances or development, register manually:
 
 ```bash
-claude mcp add pharaoh -- npx @pharaoh-so/mcp --server https://your-pharaoh-instance.com
+claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp --server https://your-pharaoh-instance.com
 ```
 
 ### Environment Variables
@@ -213,7 +203,7 @@ npx @pharaoh-so/mcp
 Make sure you added it with the correct command:
 
 ```bash
-claude mcp add pharaoh -- npx @pharaoh-so/mcp
+npx @pharaoh-so/mcp --setup
 ```
 
 Note the `--` separator between `pharaoh` and `npx`.
@@ -230,7 +220,7 @@ The first run after installation may take a moment as npm downloads the package.
 
 ```bash
 npm install -g @pharaoh-so/mcp
-claude mcp add pharaoh -- pharaoh-mcp
+claude mcp add --scope user pharaoh -- pharaoh-mcp
 ```
 
 ## How Pharaoh Works
