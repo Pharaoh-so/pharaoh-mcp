@@ -26,7 +26,7 @@ This displays a device code and a URL. Open the URL on **any device** (phone, la
 ### Step 2 — Add to Claude Code
 
 ```bash
-npx @pharaoh-so/mcp --setup
+npx @pharaoh-so/mcp
 ```
 
 Verify the connection:
@@ -43,7 +43,7 @@ If you previously added Pharaoh as an SSE server, remove it first:
 
 ```bash
 claude mcp remove pharaoh
-npx @pharaoh-so/mcp --setup
+npx @pharaoh-so/mcp
 ```
 
 ## How It Works
@@ -203,7 +203,7 @@ npx @pharaoh-so/mcp
 Make sure you added it with the correct command:
 
 ```bash
-npx @pharaoh-so/mcp --setup
+npx @pharaoh-so/mcp
 ```
 
 Note the `--` separator between `pharaoh` and `npx`.
