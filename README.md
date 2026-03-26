@@ -51,7 +51,7 @@ claude mcp add pharaoh -- npx @pharaoh-so/mcp
 If you have a browser available (desktop, laptop), you can connect directly via SSE instead:
 
 ```bash
-claude mcp add --transport sse pharaoh https://mcp.pharaoh.so/sse
+claude mcp add --transport sse --scope user pharaoh https://mcp.pharaoh.so/sse
 ```
 
 This uses OAuth in the browser and doesn't require this package.
