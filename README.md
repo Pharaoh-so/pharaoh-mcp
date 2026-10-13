@@ -64,45 +64,29 @@ Authentication uses [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628) (O
 
 ## Available Tools
 
-Once connected, Pharaoh provides 19 MCP tools organized into four categories:
+Once connected, Pharaoh provides these MCP tools:
 
-### Orient (Free)
+### Orient
 
 | Tool | What it answers |
 |------|----------------|
 | `get_codebase_map` | What modules exist and how do they relate? |
 | `get_module_context` | What does this module look like before I modify it? |
 | `search_functions` | Does this function already exist somewhere? |
-| `get_design_system` | What UI components and tokens already exist? |
+| `pharaoh_recon` | Map, module context, search and blast radius in one call |
 
-### Investigate (Free + Pro)
+### Investigate
 
 | Tool | What it answers |
 |------|----------------|
 | `get_blast_radius` | What breaks if I change this function/file/module? |
-| `query_dependencies` | How are these two modules connected? |
-| `check_reachability` | Is this function actually reachable from entry points? |
-| `get_vision_docs` | Is there a PRD or spec for this? |
 
-### Audit (Pro)
-
-| Tool | What it answers |
-|------|----------------|
-| `get_vision_gaps` | What's specified but not built? What's built but not specified? |
-| `get_cross_repo_audit` | Are shared dependencies drifting between repos? |
-| `get_consolidation_opportunities` | Where is duplicate or overlapping logic? |
-| `get_unused_code` | What code is never called and safe to delete? |
-| `get_test_coverage` | Which modules/functions lack test coverage? |
-| `get_regression_risk` | How risky is this change to production? |
-
-### Manage (Free)
+### Manage
 
 | Tool | What it answers |
 |------|----------------|
 | `request_upload` | Map a local repo without installing the GitHub App |
-| `setup_environment` | Install recommended development plugins |
 | `pharaoh_account` | Check plan, toggle PR Guard, trigger refresh |
-| `pharaoh_feedback` | Report false positives or tool issues |
 | `pharaoh_admin` | Org-level administration |
 
 ## Inspect Mode
