@@ -85,7 +85,6 @@ Once connected, Pharaoh provides these MCP tools:
 
 | Tool | What it answers |
 |------|----------------|
-| `request_upload` | Map a local repo without installing the GitHub App |
 | `pharaoh_account` | Check plan, toggle PR Guard, trigger refresh |
 | `pharaoh_admin` | Org-level administration |
 
