@@ -152,7 +152,7 @@ claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp --server https://your
 - Credentials are stored with restrictive file permissions (`0600` — owner-read/write only)
 - Authentication uses the [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628) device authorization flow — no secrets are embedded in the package
 - All communication with the Pharaoh server uses HTTPS/TLS
-- No source code is ever transmitted — Pharaoh maps structural metadata (function names, file paths, dependency relationships) into a knowledge graph. Your code never leaves your machine.
+- The proxy never reads or sends your local files. Pharaoh reads your code from GitHub through its GitHub App, maps it into a knowledge graph of structural metadata (function names, file paths, dependency relationships), and deletes the clone when mapping ends.
 - Tokens expire after 7 days and are refreshed automatically
 - Only use trusted server URLs — the proxy sends your auth token to the configured server
 
