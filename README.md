@@ -129,10 +129,10 @@ npx @pharaoh-so/mcp --logout
 
 ### Custom Server
 
-For self-hosted Pharaoh instances or development, register manually:
+For self-hosted Pharaoh instances or development, register manually, pinned to a version (`npx @pharaoh-so/mcp --version` prints the one you have):
 
 ```bash
-claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp --server https://your-pharaoh-instance.com
+claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp@<version> --server https://your-pharaoh-instance.com
 ```
 
 ### Environment Variables
@@ -155,6 +155,33 @@ claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp --server https://your
 - The proxy never reads or sends your local files. Pharaoh reads your code from GitHub through its GitHub App, maps it into a knowledge graph of structural metadata (function names, file paths, dependency relationships), and deletes the clone when mapping ends.
 - Tokens expire after 7 days and are refreshed automatically
 - Only use trusted server URLs — the proxy sends your auth token to the configured server
+- No telemetry. The proxy's only network calls are the device flow, token refresh, the MCP connection, and one registry lookup during interactive setup (below).
+
+### What the installer writes on your machine
+
+`npx @pharaoh-so/mcp` in a terminal is the interactive setup. Every later proxy start (Claude Code launching the server) repeats the plugin, skill and command steps so a new version takes effect, and nothing else.
+
+| Path | Mode | When | What |
+|------|------|------|------|
+| `~/.pharaoh/` | `0700`, set again on every start | Always | Credentials and the Claude Code plugin marketplace |
+| `~/.pharaoh/credentials.json` | `0600` | After sign-in | Access token, refresh token, expiry |
+| `~/.pharaoh/claude-marketplace/` | — | `~/.claude/` exists | The one-plugin marketplace Claude Code installs as `pharaoh@pharaoh`: the skills and the Grep routing hook. Rewritten when the package version changes |
+| `~/.claude/commands/plan.md`, `review.md`, `sessions.md` | — | `~/.claude/` exists | Slash commands. A file is written only when it is absent or is Pharaoh's: it carries the front-matter comment `# managed-by: pharaoh-mcp`, or has the exact header and `$ARGUMENTS` footer of a Pharaoh command from 0.3.46 or earlier. Any other file with that name is yours: it is kept, a symlink is never followed, and the setup output names it. Rename your file to keep both |
+| `~/.claude.json` | — | Interactive setup | Removes earlier `pharaoh` entries, then `claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp@<version>` |
+| `~/.claude/settings.json` | — | Interactive setup, and only if the file already exists | Adds to `permissions.allow`, each by full name: `mcp__pharaoh__get_codebase_map`, `mcp__pharaoh__get_module_context`, `mcp__pharaoh__search_functions`, `mcp__pharaoh__get_blast_radius`, `mcp__pharaoh__get_unused_code`, `mcp__pharaoh__pharaoh_recon`, `mcp__pharaoh__pharaoh_account`. The setup prints a line saying what it did. The proxy never creates this file and never touches it on a start |
+| `~/.openclaw/skills/`, `~/.openclaw/openclaw.json` | — | `~/.openclaw/` exists | Skills prefixed `pharaoh-`, and an `mcpServers.pharaoh` entry running `npx @pharaoh-so/mcp@<version>`. An entry that is not an `npx @pharaoh-so/mcp` command is left alone |
+
+Versions 0.3.46 and earlier wrote one rule, `mcp__pharaoh`, on every proxy start. That prefix auto-approved every Pharaoh tool, including account deletion and `pharaoh_admin`, so a prompt injection could run them without a human prompt. The next interactive setup replaces that rule with the list above; account deletion, `pharaoh_admin` and any tool not listed prompt before they run. To take the blanket rule out by hand, delete `mcp__pharaoh` from `permissions.allow`.
+
+### Pinned version and upgrades
+
+Every registration the setup writes runs the exact version that wrote it (`npx @pharaoh-so/mcp@<version>`). A new release on npm changes nothing on your machine until you upgrade:
+
+```bash
+npx @pharaoh-so/mcp@latest
+```
+
+This signs you in again, rewrites the registration with the new version and refreshes the plugin. The interactive setup asks the npm registry for the newest version and prints a one-line hint when there is one; proxy starts never check.
 
 ### Reporting Vulnerabilities
 
