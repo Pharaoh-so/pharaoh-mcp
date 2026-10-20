@@ -1,0 +1,25 @@
+{
+	"name": "pharaoh",
+	"version": "0.2.3",
+	"description": "Codebase knowledge graph with focused development workflow skills. Query architecture, dependencies, blast radius, and more instead of reading files one at a time.",
+	"author": {
+		"name": "Pharaoh",
+		"email": "hello@pharaoh.so",
+		"url": "https://pharaoh.so"
+	},
+	"homepage": "https://pharaoh.so",
+	"repository": "https://github.com/Pharaoh-so/pharaoh-mcp",
+	"license": "MIT",
+	"keywords": [
+		"code-intelligence",
+		"architecture",
+		"mcp",
+		"knowledge-graph",
+		"dependencies",
+		"blast-radius",
+		"dead-code",
+		"code-review",
+		"refactoring",
+		"test-coverage"
+	]
+}

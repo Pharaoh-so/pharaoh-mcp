@@ -1,0 +1,121 @@
+name: Publish MCP proxy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Every main release is serialized through verification and tagging. Reruns may
+# resume an identical npm version; the registry guard rejects older versions.
+concurrency:
+  group: mcp-proxy-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PHARAOH_MCP_DISABLE_BROWSER: "1"
+      BROWSER: none
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      manifest-sha256: ${{ steps.pack.outputs.manifest-sha256 }}
+      version: ${{ steps.pack.outputs.version }}
+      should-publish: ${{ steps.intent.outputs.should-publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.15.0
+      - name: Pin npm
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@12.2.0 --ignore-scripts
+      - name: Check explicit release intent from immutable prior source
+        id: intent
+        run: node scripts/release.mjs intent
+      - name: Frozen standalone install
+        run: npm ci --ignore-scripts
+      - name: Lint, typecheck, build and all proxy tests
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run build
+          npm test
+          node --test test/release.test.mjs
+      - name: Verify source boundary and pack the release once
+        id: pack
+        run: node scripts/release.mjs prepare release
+      - name: Upload immutable same-run release
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish verified tarball
+    needs: quality
+    if: needs.quality.outputs.should-publish == 'true' && github.repository == 'Pharaoh-so/pharaoh-mcp' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: npm-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.15.0
+      - name: Pin npm without project dependencies or lifecycle scripts
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@12.2.0 --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.quality.outputs.artifact-id }}
+          path: release
+          merge-multiple: true
+      - name: Validate immutable handoff, publish if absent, verify registry bytes and provenance
+        env:
+          RELEASE_MANIFEST_SHA256: ${{ needs.quality.outputs.manifest-sha256 }}
+        run: node scripts/release.mjs publish release "$GITHUB_SHA" "$RELEASE_MANIFEST_SHA256"
+
+  tag:
+    name: Record verified public release
+    needs: [quality, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.15.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.quality.outputs.artifact-id }}
+          path: release
+          merge-multiple: true
+      - name: Tag only the verified package and retain its source manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MANIFEST_SHA256: ${{ needs.quality.outputs.manifest-sha256 }}
+        run: node scripts/tag-release.mjs release "$GITHUB_SHA" "$RELEASE_MANIFEST_SHA256"

@@ -1,0 +1,273 @@
+{
+  "version": 1,
+  "repository": "Pharaoh-so/pharaoh",
+  "commit": "dd34d3ea44d007b77d3c795bbf309a8910c2d58c",
+  "payloadSha256": "d9a18003b354f133abb8d7a5963f8afa7f7b0a0a827e0a7d5aa212f3cef8de00",
+  "files": [
+    {
+      "path": ".claude-plugin/plugin.json",
+      "sha256": "dba4c8a4f704e3c5cc4ad718822b1f98e79de26e07aedd7802d3692ed638921c",
+      "mode": "100644"
+    },
+    {
+      "path": ".mcp.json",
+      "sha256": "2604daa2aeeb5a0b20e97fde68e69be5d02e18c5d221b10ce0a4f77cc5a95e7e",
+      "mode": "100644"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "b04555bb7954babda211781804f1d8e5688856076de9ec0138c2cccb024c8bda",
+      "mode": "100644"
+    },
+    {
+      "path": "clawhub/pharaoh/SKILL.md",
+      "sha256": "5719c1d3c99e8b03940dbae620bb66b6cd7afcdeb69340bec1614ad63cb38e9c",
+      "mode": "100644"
+    },
+    {
+      "path": "commands/plan.md",
+      "sha256": "6035cbf695d30bc85393fa3e7511579385a8e218aa7e5626e1205c1bddd34a60",
+      "mode": "100644"
+    },
+    {
+      "path": "commands/review.md",
+      "sha256": "f011c1d759a8cefa897a457d66618b772a383e15e60cfb4f11a878c587e4aba9",
+      "mode": "100644"
+    },
+    {
+      "path": "commands/sessions.md",
+      "sha256": "98e83cb51c9b896be867b0d37e5700d17248f9d1664a564742ba5944cca0b2d5",
+      "mode": "100644"
+    },
+    {
+      "path": "hooks/hooks.json",
+      "sha256": "d3b67b9e07c18597b9741f0915572f56065c5a148a9ca9a4f73ed373cfc38d20",
+      "mode": "100644"
+    },
+    {
+      "path": "hooks/route-grep.mjs",
+      "sha256": "d6cabcd6f5d503e77e44fb12e10fb327c48e7aca0150b8cd017fa71eca8c93fe",
+      "mode": "100644"
+    },
+    {
+      "path": "inspect-tools.json",
+      "sha256": "73f1d42eb152e97d239009153e58cd42a6a33e9487456b0163ad2681e15d0e28",
+      "mode": "100644"
+    },
+    {
+      "path": "package.json",
+      "sha256": "e1cff266b0308a96abaf1cc6c425ebef2cdb057247d9cca595a099665fdc48d6",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/stamp-build.mjs",
+      "sha256": "3c507fc0fd8ef55fcdad349c92954c97894852c71a794eaea60916b6553c2511",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/brainstorm/SKILL.md",
+      "sha256": "0831539d4e659f981031831d50769506bb37af2aceda212a08b26ff6b55f2262",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/debug/SKILL.md",
+      "sha256": "d0f16b61cb4c8db4945a3de3d691c0dac896fadeff744bc246b91fc88c2f5cd1",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/parallel/SKILL.md",
+      "sha256": "a62f83fe0dd4945cbfce5233e4651f30dd17da8a1e9fe5b4f30ad04653341617",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/pharaoh/SKILL.md",
+      "sha256": "e557348ba7f557fa05dbf69d13ec66618363aac8580e51ec015d03845add2db6",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/plan/SKILL.md",
+      "sha256": "92f5d8b0f8aea4b62e5529893f1f432d5f17ca12c9d9a7d5caa327f1cc8cfe81",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/refactor/SKILL.md",
+      "sha256": "091ccfbf43cc3ec0147233c351cd7366de1690e5f832b692be2ba1589f2d699c",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/review/SKILL.md",
+      "sha256": "9fe090b1d166db3cf7d75aeeacb44fa7912dc8f15ccb185835df235684904cb7",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/sessions/SKILL.md",
+      "sha256": "5bd0ae38209bffdfa39784fb9c61f9139918a56143e95afeedde04c1b833a17e",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/tdd/SKILL.md",
+      "sha256": "eb722f5c1a0b85d4d7895596b20cb89fb4a4090d8abd3688a1dbc6650dc5540d",
+      "mode": "100644"
+    },
+    {
+      "path": "skills/verify/SKILL.md",
+      "sha256": "6c6b9051013b6de820c748c345c66e48f996f7694c763124625946464fa19dff",
+      "mode": "100644"
+    },
+    {
+      "path": "src/auth.ts",
+      "sha256": "b8b581568d9a92ba10e3de3513005285b8b256f2b0f949b795da917ccf06686c",
+      "mode": "100644"
+    },
+    {
+      "path": "src/backend.ts",
+      "sha256": "66628748259d6907da431308f80bb3f63fad9685cf1f68cbdfa336a4472db6d0",
+      "mode": "100644"
+    },
+    {
+      "path": "src/catalog.ts",
+      "sha256": "9fa5d8545702038f8f75c0a7042d5a896d5106b539f945535c6c4a93a7941fa3",
+      "mode": "100644"
+    },
+    {
+      "path": "src/credentials.ts",
+      "sha256": "f9e7a27182a0838072f3b32ed309aff6c25c5de8301d470a78ef57f247e78f61",
+      "mode": "100644"
+    },
+    {
+      "path": "src/gateway.ts",
+      "sha256": "569681a8244675fcf6d72d97a395dd8d40aa2a9066a13284439ed684e28f75e3",
+      "mode": "100644"
+    },
+    {
+      "path": "src/helpers.ts",
+      "sha256": "8ee4ebe2ad356677f239a8bf4463ccdf7b01bb81d71d9ddf1d1a3d8e2f37ad21",
+      "mode": "100644"
+    },
+    {
+      "path": "src/index.ts",
+      "sha256": "6e50afb3bc3d468544089927386c9d7e5dc3579724e202b9734ded2610fcdcdc",
+      "mode": "100644"
+    },
+    {
+      "path": "src/inspect.ts",
+      "sha256": "cb29e7bafc0353c34e8a169afef6c40d0c8e9fa2b8618a0a703e6f643ca2b58d",
+      "mode": "100644"
+    },
+    {
+      "path": "src/install-skills.ts",
+      "sha256": "44a423332afcb0aff97d3686bb92188c859627650338d295b083f51af6992b97",
+      "mode": "100644"
+    },
+    {
+      "path": "src/lifecycle.ts",
+      "sha256": "7b278c197e8723e7066e11d2f878141302d6c112945202efea92616e4aea9523",
+      "mode": "100644"
+    },
+    {
+      "path": "src/proxy-server.ts",
+      "sha256": "00b3a75964e27cbd319f344f51335b84f3c403d8e55c0e9e485722f44a975f11",
+      "mode": "100644"
+    },
+    {
+      "path": "src/proxy.ts",
+      "sha256": "331f91fd2fec72840f868ff50e6b0b394a883f78ef444e391ddd8a6922b020fc",
+      "mode": "100644"
+    },
+    {
+      "path": "src/refresh.ts",
+      "sha256": "35ec91f81af52f8786bb8ddbffe50fc366841568809a35f9e92d98b8e76f61cd",
+      "mode": "100644"
+    },
+    {
+      "path": "src/setup.ts",
+      "sha256": "0444a8d71c76604cd567ba1ba89e0fce05c4024b8b9bda7c519547e0dcb656d7",
+      "mode": "100644"
+    },
+    {
+      "path": "src/trace-resource.ts",
+      "sha256": "b2fc8e3ee0ea1e4c55d3366df66dfcb1e41bcff3e15cd89680254f872d121456",
+      "mode": "100644"
+    },
+    {
+      "path": "src/version.ts",
+      "sha256": "73dfdd5184c7bd2e2a553560432e76a636b16d755eb15706450a1ee2bbec71b3",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/auth-flow-e2e.integration.test.ts",
+      "sha256": "3fea78d2b6b70edea6e8d157104469c9b08c7673f2fd09de3aa336541e37c7e0",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/backend-reconnect.test.ts",
+      "sha256": "1dd10485967ba2efe0da0a6e9a607ef3161ef56c51249a4f4fd4f4d71e845a19",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/backend.integration.test.ts",
+      "sha256": "c5f134de5c7884367e7e610b108a8254fe2058311e7aeb71fa5d31a99f546b1f",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/gateway.integration.test.ts",
+      "sha256": "d17ab7e600f438c8c57784970aec9e33dfe28871f876004a34ad36134c9fd113",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/install-skills.test.ts",
+      "sha256": "0cac4ad448f0de215a77658decc617f84c6a19debee48760e0b5bfc7d97a4aef",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/lifecycle.integration.test.ts",
+      "sha256": "42b6eb7ed32624b4604e3a28be9623585b069d3d16cb89b066445ffd6ad041c7",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/proxy-headless.test.ts",
+      "sha256": "8cc4c6dbd574674d5e2f431a736ee0ecb2395c8b7456850da91b5c3f353cbbd2",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/refresh.integration.test.ts",
+      "sha256": "391181c21bff8cfbfa05d64dc3a9bcaf1340e377f2d1c47b9179494bf73b76ab",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/route-grep-hook.test.ts",
+      "sha256": "7164f4000186e8794db644fa0f1f8faafd0ff5882167c84759cb9f3857c067f3",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/setup.test.ts",
+      "sha256": "6ad0511b5cb55688bafcd5c06dcd32a757d793a29738aa6d94fb12c1146dbc79",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/skill-validation.test.ts",
+      "sha256": "e836b55b1791213b745eab86acfe832ad7f36ea217e7e9b27b5f85e3d1fc2385",
+      "mode": "100644"
+    },
+    {
+      "path": "trace-app.html",
+      "sha256": "d0bff26ec358fff3f25db5f4849751bf56f74685d81278d93ad6b240822ee88e",
+      "mode": "100644"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "05b1fee80468e3cec229bb35dd70f4c691650d4564055212d34157fc65c769ea",
+      "mode": "100644"
+    },
+    {
+      "path": "tsconfig.test.json",
+      "sha256": "c0f0b3debe587b152bd3629d072a508494ffcb76a1baf06385ff84a1f4e611a9",
+      "mode": "100644"
+    }
+  ]
+}

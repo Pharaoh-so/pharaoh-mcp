@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Pharaoh Trace</title>
+  <style>
+    :root { color-scheme:dark; --bg:#171813; --text:#e5e6d8; --muted:#aaa995; --gold:#d4ad51; --yellow:#edc54c; --rule:#414236; --hover:#22251c; --error:#e3a18d; font:400 12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace; background:var(--bg); color:var(--text); }
+    :root[data-theme="light"] { color-scheme:light; --bg:#faf8f1; --text:#292b20; --muted:#656553; --gold:#866315; --yellow:#926700; --rule:#d8d4c5; --hover:#efede2; --error:#a13929; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-width:0; }
+    #trace { border-left:2px solid var(--gold); padding:14px 18px 12px; min-width:0; }
+    header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:3px 14px; color:var(--muted); font-size:10px; }
+    #tool { overflow-wrap:anywhere; min-width:0; }
+    #status { white-space:nowrap; }
+    #status[data-state="ok"] { color:#4ade80; }
+    #status[data-state="pending"],.filled { color:var(--yellow); }
+    #status[data-state="error"] { color:var(--error); }
+    #trace[data-pending="true"] #status { animation:pending 1.4s ease-in-out infinite alternate; }
+    @keyframes pending { from { opacity:.55; } to { opacity:1; } }
+    #repo { font-size:14px; margin:9px 0 0; overflow-wrap:anywhere; }
+    #provenance { color:var(--muted); font-size:10px; overflow-wrap:anywhere; margin-top:2px; }
+    h1 { font-size:14px; line-height:1.5; font-weight:500; margin:13px 0 0; overflow-wrap:anywhere; }
+    #summary { margin:4px 0 0; color:var(--muted); overflow-wrap:anywhere; }
+    ul { list-style:none; padding:0; margin:8px 0 0; min-width:0; }
+    li { min-width:0; }
+    summary,.row { display:grid; grid-template-columns:18px minmax(0,1fr) auto; gap:6px; align-items:baseline; padding:6px 0; min-width:0; }
+    summary { list-style:none; border-bottom:1px solid var(--rule); cursor:pointer; }
+    summary::-webkit-details-marker { display:none; }
+    summary:hover { background:var(--hover); }
+    summary:focus-visible { outline:2px solid var(--gold); outline-offset:2px; }
+    .branch { color:var(--gold); white-space:pre; }
+    details>summary .branch::after { content:"+"; }
+    details[open]>summary .branch::after { content:"−"; }
+    .label,.detail,.badge { overflow-wrap:anywhere; white-space:pre-wrap; min-width:0; unicode-bidi:plaintext; }
+    details[open]>summary .label { color:var(--gold); }
+    .detail { display:block; color:var(--muted); font-size:10px; margin-top:2px; }
+    .badge { color:var(--muted); font-size:10px; text-align:right; }
+    .badge[data-state="ok"] { color:#4ade80; }
+    .badge[data-state="warning"],.badge[data-state="pending"] { color:var(--yellow); }
+    .badge[data-state="error"] { color:var(--error); }
+    .children { margin:0 0 6px 17px; border-left:1px solid var(--rule); padding-left:9px; }
+    .meter { display:block; color:var(--muted); font-size:11px; margin:4px 0; overflow-wrap:anywhere; }
+    #notes { border-top:1px solid var(--rule); margin-top:10px; padding-top:8px; color:var(--muted); font-size:10px; }
+    #notes p { margin:3px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
+    #fallback { font:inherit; font-size:11px; margin:10px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
+    [hidden] { display:none; }
+    @media(max-width:400px) { #trace { padding:12px 10px 10px; } summary,.row { grid-template-columns:15px minmax(0,1fr); gap:4px; } .badge { grid-column:2; text-align:left; } .children { margin-left:9px; padding-left:7px; } }
+    @media(prefers-reduced-motion:reduce) { #trace[data-pending="true"] #status { animation:none; } }
+  </style>
+</head>
+<body>
+  <main id="trace" data-pending="false">
+    <header><span id="tool">Pharaoh result</span><span id="status" role="status" aria-live="polite" aria-atomic="true">waiting</span></header>
+    <div id="repo" hidden></div>
+    <div id="provenance" hidden></div>
+    <h1 id="title">Waiting for a tool result</h1>
+    <p id="summary" hidden></p>
+    <ul id="tree" aria-label="Result evidence" hidden></ul>
+    <pre id="fallback">The tool's text response remains available in chat.</pre>
+    <div id="notes" hidden></div>
+  </main>
+  <script>
+    (() => {
+      "use strict";
+      const META_KEY = "so.pharaoh/trace";
+      const PROTOCOL_VERSION = "2026-01-26";
+      // Kept in parity with TRACE_LIMITS in trace-contract.ts by the resource test.
+      const LIMITS = { bytes:65536, nodes:120, depth:6, label:512, detail:2048, badge:128, summary:1024, notes:16, note:1024, repo:256 };
+      const MAX_TEXT = 32768;
+      const root = document.getElementById("trace");
+      const fields = Object.fromEntries(["tool","status","repo","provenance","title","summary","tree","fallback","notes"].map(id => [id,document.getElementById(id)]));
+      const initId = "pharaoh-trace-initialize";
+      let ready = false;
+      let closed = false;
+      let cancelled = false;
+      let resizeFrame = 0;
+      let lastHeight = 0;
+      let lastWidth = 0;
+      const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+      const string = (value,max) => typeof value === "string" && value.length <= max;
+      const send = message => { if (!closed) window.parent.postMessage({jsonrpc:"2.0",...message},"*"); };
+      function status(label,state) {
+        fields.status.textContent = label;
+        fields.status.dataset.state = state;
+        root.dataset.pending = String(state === "pending");
+      }
+      function display(field,text) {
+        fields[field].textContent = text || "";
+        fields[field].hidden = !text;
+      }
+      function notes(items) {
+        fields.notes.replaceChildren();
+        for (const text of items) {
+          const paragraph = document.createElement("p");
+          paragraph.textContent = text;
+          fields.notes.append(paragraph);
+        }
+        fields.notes.hidden = items.length === 0;
+      }
+      function clearResult() {
+        fields.tree.replaceChildren();
+        fields.tree.hidden = true;
+        display("summary","");
+        display("provenance","");
+        notes([]);
+      }
+      function fallback(title,text,notice,state="neutral") {
+        clearResult();
+        fields.title.textContent = title;
+        display("fallback",text);
+        status(state === "error" ? "[!] error" : state === "cancelled" ? "[||] cancelled" : "response received",state);
+        if (notice) notes([notice]);
+      }
+      function readableText(result) {
+        if (!record(result) || !Array.isArray(result.content)) return {text:"No readable text was returned. Read the tool response in chat.",omitted:false};
+        let text = "";
+        let omitted = result.content.length > 64;
+        for (const block of result.content.slice(0,64)) {
+          if (!record(block) || block.type !== "text" || typeof block.text !== "string") continue;
+          const remaining = MAX_TEXT - text.length;
+          const separator = text ? 2 : 0;
+          if (remaining <= separator) { omitted = true; break; }
+          const part = block.text.slice(0,remaining - separator);
+          if (text) text += "\n\n";
+          text += part;
+          if (part.length < block.text.length) { omitted = true; break; }
+        }
+        return {text:text || "No readable text was returned. Read the tool response in chat.",omitted};
+      }
+      function validView(view) {
+        try {
+          if (!record(view) || view.version !== 1 || !string(view.title,LIMITS.label) || !view.title.trim() || !Array.isArray(view.nodes)) return false;
+          if (new TextEncoder().encode(JSON.stringify(view)).byteLength > LIMITS.bytes) return false;
+          if (view.repo !== undefined && !string(view.repo,LIMITS.repo)) return false;
+          if (view.summary !== undefined && !string(view.summary,LIMITS.summary)) return false;
+          if (view.notes !== undefined && (!Array.isArray(view.notes) || view.notes.length > LIMITS.notes || !view.notes.every(note => string(note,LIMITS.note)))) return false;
+          if (view.freshness !== undefined) {
+            const value = view.freshness;
+            if (!record(value) || !string(value.status,80) || !(value.mappedCommit === null || string(value.mappedCommit,160)) || !(value.lastAnalyzed === null || string(value.lastAnalyzed,160))) return false;
+          }
+          let count = 0;
+          const visit = (node,depth) => {
+            if (++count > LIMITS.nodes || depth > LIMITS.depth || !record(node) || !string(node.label,LIMITS.label) || !node.label.trim()) return false;
+            if (node.detail !== undefined && !string(node.detail,LIMITS.detail)) return false;
+            if (node.badge !== undefined && !string(node.badge,LIMITS.badge)) return false;
+            if (node.status !== undefined && !["ok","pending","warning","error"].includes(node.status)) return false;
+            if (node.meter !== undefined && (!record(node.meter) || !Number.isFinite(node.meter.value) || !Number.isFinite(node.meter.total) || node.meter.total <= 0 || node.meter.value < 0 || node.meter.value > node.meter.total)) return false;
+            return node.children === undefined || (Array.isArray(node.children) && node.children.every(child => visit(child,depth + 1)));
+          };
+          return view.nodes.every(node => visit(node,1));
+        } catch { return false; }
+      }
+      function element(tag,className,text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      }
+      function renderNode(node,last,open=false) {
+        const item = element("li");
+        const group = Array.isArray(node.children) && node.children.length > 0;
+        const container = group ? element("details") : item;
+        if (group && open) container.open = true;
+        const row = element(group ? "summary" : "div",group ? "" : "row");
+        const branch = element("span","branch",group ? "" : last ? "└─" : "├─");
+        branch.setAttribute("aria-hidden","true");
+        const label = element("span","label",node.label);
+        if (node.detail) label.append(element("span","detail",node.detail));
+        const symbol = {ok:"[ok]",pending:"[...]",warning:"[!]",error:"[!]"}[node.status] || "";
+        const badge = element("span","badge",[symbol,node.badge].filter(Boolean).join(" "));
+        if (node.status) badge.dataset.state = node.status;
+        row.append(branch,label,badge);
+        container.append(row);
+        if (node.meter) {
+          const filled = Math.round(node.meter.value / node.meter.total * 12);
+          const meter = element("span","meter");
+          meter.append("[",element("span","filled","#".repeat(filled)),`${".".repeat(12-filled)}] ${node.meter.value} / ${node.meter.total}`);
+          label.append(meter);
+        }
+        if (group) {
+          const children = element("ul","children");
+          node.children.forEach((child,index) => { children.append(renderNode(child,index === node.children.length-1)); });
+          container.append(children);
+          item.append(container);
+        }
+        return item;
+      }
+      function renderView(view) {
+        clearResult();
+        fields.title.textContent = view.title;
+        display("repo",view.repo);
+        display("summary",view.summary);
+        display("fallback","");
+        if (view.freshness) {
+          const freshness = view.freshness;
+          display("provenance",[freshness.mappedCommit ? `mapped ${freshness.mappedCommit}` : "mapped commit unknown",freshness.lastAnalyzed ? `as of ${freshness.lastAnalyzed}` : "map time unknown",`status: ${freshness.status}`].join(" · "));
+        }
+        const firstGroup = view.nodes.findIndex(node => node.children?.length);
+        view.nodes.forEach((node,index) => { fields.tree.append(renderNode(node,index === view.nodes.length-1,index === firstGroup)); });
+        fields.tree.hidden = view.nodes.length === 0;
+        notes(view.notes || []);
+        status("[ok] result","ok");
+      }
+      function input(params) {
+        cancelled = false;
+        clearResult();
+        display("fallback","Waiting for the tool response.");
+        fields.title.textContent = "Request in progress";
+        display("repo",record(params.arguments) && string(params.arguments.repo,LIMITS.repo) ? params.arguments.repo : "");
+        status("[>] working","pending");
+      }
+      function result(params) {
+        if (cancelled) return;
+        const text = readableText(params);
+        const omission = text.omitted ? "Text shortened for this view. The full tool response remains in chat." : "";
+        if (params.isError === true) {
+          fallback("Request failed",text.text,omission,"error");
+          return;
+        }
+        const view = record(params._meta) ? params._meta[META_KEY] : undefined;
+        if (validView(view)) renderView(view);
+        else fallback("Tool response",text.text,[view === undefined ? "" : "Trace metadata could not be displayed; showing the tool's text response.",omission].filter(Boolean).join(" "));
+      }
+      function context(params) {
+        if (params.theme === "dark" || params.theme === "light") document.documentElement.dataset.theme = params.theme;
+        const name = params.toolInfo?.tool?.name;
+        if (string(name,128)) fields.tool.textContent = name;
+      }
+      function size() {
+        if (!ready || closed || resizeFrame) return;
+        resizeFrame = requestAnimationFrame(() => {
+          resizeFrame = 0;
+          const height = Math.ceil(root.getBoundingClientRect().height);
+          const width = Math.ceil(document.documentElement.clientWidth);
+          if (height !== lastHeight || width !== lastWidth) {
+            lastHeight = height;
+            lastWidth = width;
+            send({method:"ui/notifications/size-changed",params:{height,width}});
+          }
+        });
+      }
+      const observer = typeof ResizeObserver === "function" ? new ResizeObserver(size) : null;
+      observer?.observe(root);
+      root.addEventListener("toggle",size,true);
+      window.addEventListener("resize",size);
+      function receive(event) {
+        if (closed || event.source !== window.parent || !record(event.data) || event.data.jsonrpc !== "2.0") return;
+        const message = event.data;
+        if (message.id === initId && message.method === undefined) {
+          if (ready) return;
+          if (!record(message.result) || message.result.protocolVersion !== PROTOCOL_VERSION || message.error) {
+            clearTimeout(initTimeout);
+            fallback("Text response available","Read the tool response in chat.","This host could not initialize Trace.");
+            return;
+          }
+          ready = true;
+          clearTimeout(initTimeout);
+          if (record(message.result.hostContext)) context(message.result.hostContext);
+          send({method:"ui/notifications/initialized",params:{}});
+          size();
+          return;
+        }
+        const request = typeof message.id === "string" || typeof message.id === "number";
+        if (request) {
+          if (message.method === "ping") send({id:message.id,result:{}});
+          else if (message.method === "ui/resource-teardown") {
+            send({id:message.id,result:{}});
+            closed = true;
+            clearTimeout(initTimeout);
+            cancelAnimationFrame(resizeFrame);
+            observer?.disconnect();
+            root.dataset.pending = "false";
+            window.removeEventListener("message",receive);
+          } else send({id:message.id,error:{code:-32601,message:"Unsupported request"}});
+          return;
+        }
+        if (!ready || !record(message.params)) return;
+        if (message.method === "ui/notifications/tool-input") input(message.params);
+        else if (message.method === "ui/notifications/tool-result") result(message.params);
+        else if (message.method === "ui/notifications/tool-cancelled") {
+          cancelled = true;
+          fallback("Request cancelled",string(message.params.reason,LIMITS.detail) ? message.params.reason : "The host cancelled this tool request.","","cancelled");
+        } else if (message.method === "ui/notifications/host-context-changed") context(message.params);
+        size();
+      }
+      window.addEventListener("message",receive);
+      const initTimeout = setTimeout(() => {
+        if (!ready && !closed) fallback("Text response available","Read the tool response in chat.","Trace has not received a host connection.");
+      },10000);
+      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.1.0"},appCapabilities:{availableDisplayModes:["inline"]},protocolVersion:PROTOCOL_VERSION}});
+    })();
+  </script>
+</body>
+</html>
