@@ -23,7 +23,7 @@ We will acknowledge receipt within 48 hours and provide a detailed response with
 
 ## Security Model
 
-- **No source code stored** — Pharaoh maps structural metadata (function names, file paths, dependencies, complexity scores) into a knowledge graph. Your source code never leaves your machine.
+- **Structural metadata stored** — Pharaoh's hosted service reads authorized repositories from GitHub, maps function names, file paths, dependencies and complexity into a knowledge graph, and removes the working clone after mapping. The graph does not store source-code bodies. The npm proxy does not upload your local repository files.
 - **Tenant isolation** — every query is repo-anchored and ownership-verified. Two independent layers prevent cross-tenant data access.
 - **Encrypted at rest** — GitHub tokens and sensitive graph properties use AES-256-GCM with per-tenant HKDF-derived keys.
 - **Webhook verification** — all GitHub and Stripe webhooks are HMAC-verified on every request.

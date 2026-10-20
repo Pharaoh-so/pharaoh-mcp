@@ -21,13 +21,15 @@ Open an issue describing:
 
 ### Feedback
 
-Use the `pharaoh_feedback` MCP tool directly from your AI client to report false positives, tool issues, or suggestions. This creates a tracked issue automatically.
+Open an issue in this repository to report false positives, tool issues, or suggestions. Include the tool name, the behavior you expected, and a reproducible example without private repository data.
 
 ## Development
 
-The Pharaoh MCP server is a hosted service at `mcp.pharaoh.so`. The `@pharaoh-so/mcp` npm package is a thin stdio-to-SSE proxy that enables headless environments.
+The Pharaoh MCP server is a hosted service at `mcp.pharaoh.so`. The `@pharaoh-so/mcp` npm package is a stdio-to-hosted-MCP proxy that enables headless environments.
 
 ### npm Package (`@pharaoh-so/mcp`)
+
+Use the Node and npm versions pinned in the [release workflow](.github/workflows/publish-mcp-proxy.yml) for development and validation.
 
 ```bash
 # Clone
@@ -35,7 +37,7 @@ git clone https://github.com/Pharaoh-so/pharaoh-mcp.git
 cd pharaoh-mcp
 
 # Install
-npm install
+npm ci --ignore-scripts
 
 # Build
 npm run build

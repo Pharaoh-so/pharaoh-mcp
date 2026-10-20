@@ -5,6 +5,12 @@ All notable changes to `@pharaoh-so/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.49] - 2026-10-20
+
+### Changed
+- Publish from the standalone public source repository with npm provenance, after the reviewed source passes its required checks.
+- Include the test runtime needed to validate the package independently.
+
 ## [0.3.48] - 2026-10-20
 
 ### Added
