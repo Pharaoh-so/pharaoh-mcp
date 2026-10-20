@@ -24,6 +24,7 @@ import {
 	REPOSITORY,
 	readPackResult,
 	releaseDecision,
+	retryRegistryVerification,
 	shouldPublish,
 	validateArtifact,
 	verifyPackPaths,
@@ -289,6 +290,46 @@ test("publication resumes identical versions and rejects changed bytes or older/
 	} finally {
 		item.clean();
 	}
+});
+
+test("keeps verifying when npm processing takes longer than six attempts", async () => {
+	let attempts = 0;
+	const waits = [];
+	const result = await retryRegistryVerification(
+		async () => {
+			attempts++;
+			if (attempts < 9) throw new Error("npm is still processing the accepted publication");
+			return "verified bytes and provenance";
+		},
+		async (ms) => {
+			waits.push(ms);
+		},
+	);
+	assert.equal(result, "verified bytes and provenance");
+	assert.equal(attempts, 9);
+	assert.deepEqual(waits, [5_000, 5_000, 5_000, 5_000, 5_000, 5_000, 5_000, 5_000]);
+});
+
+test("fails closed with the verification error after 72 attempts and no final extra wait", async () => {
+	let attempts = 0;
+	let waits = 0;
+	const failure = new Error("Published provenance does not match the release");
+	await assert.rejects(
+		() =>
+			retryRegistryVerification(
+				async () => {
+					attempts++;
+					throw failure;
+				},
+				async (ms) => {
+					assert.equal(ms, 5_000);
+					waits++;
+				},
+			),
+		(error) => error === failure,
+	);
+	assert.equal(attempts, 72);
+	assert.equal(waits, 71);
 });
 
 test("rerunning an older failed tag job cannot replace a newer GitHub Latest release", () => {
