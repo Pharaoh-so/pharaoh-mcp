@@ -1,0 +1,73 @@
+{
+	"name": "@pharaoh-so/mcp",
+	"mcpName": "so.pharaoh/pharaoh",
+	"version": "0.3.49",
+	"description": "MCP proxy for Pharaoh — maps codebases into queryable knowledge graphs for AI agents. Enables Claude Code in headless environments (VPS, SSH, CI) via device flow auth.",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "./dist/index.d.ts",
+	"bin": {
+		"pharaoh-mcp": "./dist/index.js"
+	},
+	"scripts": {
+		"build": "tsc && node scripts/stamp-build.mjs",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"lint": "biome check src/"
+	},
+	"files": [
+		"dist",
+		"skills",
+		"commands",
+		"hooks",
+		".claude-plugin",
+		".mcp.json",
+		"inspect-tools.json",
+		"trace-app.html",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	],
+	"keywords": [
+		"mcp",
+		"model-context-protocol",
+		"pharaoh",
+		"codebase",
+		"knowledge-graph",
+		"code-analysis",
+		"architecture",
+		"ai-agent",
+		"claude",
+		"claude-code",
+		"developer-tools",
+		"static-analysis",
+		"dependency-graph"
+	],
+	"author": "Pharaoh <hello@pharaoh.so> (https://pharaoh.so)",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Pharaoh-so/pharaoh-mcp.git"
+	},
+	"homepage": "https://pharaoh.so",
+	"bugs": {
+		"url": "https://github.com/Pharaoh-so/pharaoh-mcp/issues"
+	},
+	"funding": {
+		"type": "individual",
+		"url": "https://pharaoh.so"
+	},
+	"engines": {
+		"node": ">=18"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.26.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.3.15",
+		"@types/node": "^25.2.3",
+		"tsx": "^4.21.0",
+		"typescript": "^5.9.3",
+		"vitest": "^4.0.18"
+	}
+}

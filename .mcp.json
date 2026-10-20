@@ -1,0 +1,10 @@
+{
+	"mcpServers": {
+		"pharaoh": {
+			"command": "npx",
+			"args": [
+				"@pharaoh-so/mcp@0.3.49"
+			]
+		}
+	}
+}
