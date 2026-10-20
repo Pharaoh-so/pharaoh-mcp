@@ -339,7 +339,11 @@ export async function registryPackument() {
 /** Check registry bytes, then use npm's supported verifier without installing or executing package code. */
 async function verifyRegistry(manifest) {
 	const packument = await registryPackument();
-	assert.equal(releaseDecision(packument, manifest), "resume");
+	assert.equal(
+		releaseDecision(packument, manifest),
+		"resume",
+		`${PACKAGE}@${manifest.version} is not yet visible in npm; publication may still be processing.`,
+	);
 	const dist = packument.versions[manifest.version].dist;
 	const url = new URL(dist.tarball);
 	assert.equal(url.origin, REGISTRY);
@@ -390,6 +394,21 @@ async function verifyRegistry(manifest) {
 		verifyProvenance(report, manifest);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
+	}
+}
+
+/** Allow npm's asynchronous processing up to 72 complete verification attempts, five seconds apart. */
+export async function retryRegistryVerification(
+	verify,
+	wait = (ms) => new Promise((done) => setTimeout(done, ms)),
+) {
+	for (let attempt = 0; attempt < 72; attempt++) {
+		try {
+			return await verify();
+		} catch (error) {
+			if (attempt === 71) throw error;
+			await wait(5_000);
+		}
 	}
 }
 
@@ -465,20 +484,9 @@ async function main() {
 			}
 		}
 		if (command !== "validate") {
-			// Registry replication can lag a successful publish briefly. Every retry
+			// npm can process an accepted publication for several minutes. Every retry
 			// repeats integrity, signature, certificate identity and source checks.
-			let lastError;
-			for (let attempt = 0; attempt < 6; attempt++) {
-				try {
-					await verifyRegistry(manifest);
-					lastError = undefined;
-					break;
-				} catch (error) {
-					lastError = error;
-					if (attempt < 5) await new Promise((done) => setTimeout(done, 5_000));
-				}
-			}
-			if (lastError) throw lastError;
+			await retryRegistryVerification(() => verifyRegistry(manifest));
 		}
 		output("version", manifest.version);
 		output("public-commit", manifest.publicCommit);
