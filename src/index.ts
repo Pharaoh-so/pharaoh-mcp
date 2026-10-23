@@ -68,6 +68,12 @@ async function main(): Promise<void> {
 		process.exit(0);
 	}
 
+	// Stdout, alone on its line, so a script can capture the version to pin
+	if (args.includes("--version") || args.includes("-v")) {
+		process.stdout.write(`${getPackageVersion()}\n`);
+		return;
+	}
+
 	// Inspect mode — serve tool schemas over stdio for Glama directory inspection
 	if (args.includes("--inspect")) {
 		const { runInspect } = await import("./inspect.js");

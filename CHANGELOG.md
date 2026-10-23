@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `sessions` and `parallel` skills, the `/sessions` slash command and their MCP prompts (`session-decomposition`, `parallel-agents`). Claude Code and Codex now run subagents and parallel sessions on their own.
 - The installer deletes the `~/.claude/commands/sessions.md` it wrote, only while it carries the `# managed-by: pharaoh-mcp` marker. A file of your own with that name, or a symlink, is kept.
 
+### Fixed
+- `npx @pharaoh-so/mcp --version` (or `-v`) prints the version and exits, as README § Custom Server says. It used to start setup: in a terminal it deleted saved credentials and signed in again against mcp.pharaoh.so; on a pipe it started the proxy.
+
 ## [0.3.51] - 2026-10-23
 
 ### Added

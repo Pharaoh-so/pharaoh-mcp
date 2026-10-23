@@ -2,12 +2,15 @@
  * Tests for the pieces of setup that decide which proxy runs on the user's
  * machine (security review 2026-10-17, SC-2 and SC-9): the `claude mcp add`
  * registration, the shipped `.mcp.json`, the package's `repository` field,
- * and the version check behind the upgrade hint. Every registration names the
- * version that wrote it; `npx @pharaoh-so/mcp@latest` is the deliberate upgrade.
+ * the version check behind the upgrade hint, and `--version`, which a manual
+ * registration pins. Every registration names the version that wrote it;
+ * `npx @pharaoh-so/mcp@latest` is the deliberate upgrade.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runSetup } from "../src/setup.js";
 import { fetchLatestVersion, getPackageVersion, isNewerVersion } from "../src/version.js";
@@ -52,6 +55,24 @@ describe("SC-2: the installed command is pinned to the running version", () => {
 			command: "npx",
 			args: [`@pharaoh-so/mcp@${getPackageVersion()}`],
 		});
+	});
+
+	// A manual registration pins what `--version` prints. Unhandled, the flag ran
+	// setup: proxy mode on a pipe, and in a terminal a sign-in that deleted saved
+	// credentials. PATH holds only node, so a regression reaches no `claude` CLI.
+	it.each(["--version", "-v"])("%s prints the version and exits before setup", (flag) => {
+		const tsx = createRequire(import.meta.url).resolve("tsx/cli");
+		const res = spawnSync(process.execPath, [tsx, join(PKG_ROOT, "src", "index.ts"), flag], {
+			input: "",
+			encoding: "utf-8",
+			timeout: 20_000,
+			env: { HOME: home, PATH: dirname(process.execPath), PHARAOH_MCP_DISABLE_BROWSER: "1" },
+		});
+		const { version } = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf-8"));
+
+		expect(res.stdout).toBe(`${version}\n`);
+		expect(res.status).toBe(0);
+		expect(readdirSync(home)).toEqual([".claude"]);
 	});
 });
 
