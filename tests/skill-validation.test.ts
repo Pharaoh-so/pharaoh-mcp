@@ -14,7 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SKILLS_DIR = join(__dirname, "..", "skills");
 
 /** Expected total number of skill directories. */
-const EXPECTED_SKILL_COUNT = 10;
+const EXPECTED_SKILL_COUNT = 8;
 
 /**
  * Graph-powered skills that must have a corresponding MCP prompt name.
@@ -22,7 +22,7 @@ const EXPECTED_SKILL_COUNT = 10;
  *
  * Only kept skills appear here — skills removed from the bundle (audit-tests,
  * debt, execute, explore, finish, health, investigate, onboard, orchestrate,
- * pr, review-codex, review-receive, wiring, worktree) are no longer part of
+ * parallel, pr, review-codex, review-receive, sessions, wiring, worktree) are no longer part of
  * the Pharaoh toolkit and their prompt-name mappings are dropped.
  */
 const GRAPH_SKILL_TO_PROMPT: Record<string, string> = {
