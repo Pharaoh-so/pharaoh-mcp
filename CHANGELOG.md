@@ -5,6 +5,12 @@ All notable changes to `@pharaoh-so/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- With no `claude` CLI on PATH, `npx @pharaoh-so/mcp` stops before sign-in and says why: setup registers Pharaoh through that CLI, and the Claude desktop app's built-in Claude Code isn't on PATH. The message gives the CLI installer. It used to link the desktop app download, write the slash commands anyway and end with "Pharaoh is ready".
+- When `claude mcp add` fails, setup ends without "Pharaoh is ready" and names the `claude mcp add` command to run by hand.
+
 ## [0.3.52] - 2026-10-23
 
 ### Added
