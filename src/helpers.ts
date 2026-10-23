@@ -69,6 +69,7 @@ export function printUsage(): void {
 		"  --logout          Clear credentials, MCP config and the Claude Code plugin, then exit",
 		"  --clean           Remove Pharaoh's MCP entries and plugin from Claude Code config",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
+		"  --version, -v     Print the version",
 		"  --help, -h        Show this help",
 		"",
 		"Get started:",
