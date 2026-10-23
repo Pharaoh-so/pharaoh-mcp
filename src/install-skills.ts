@@ -112,7 +112,7 @@ function detectCodex(home = homedir()): boolean {
  * @param home - Home directory override (defaults to os.homedir()).
  * @returns True if ~/.openclaw/ exists.
  */
-export function detectOpenClaw(home = homedir()): boolean {
+function detectOpenClaw(home = homedir()): boolean {
 	return existsSync(join(home, ".openclaw"));
 }
 
@@ -519,6 +519,14 @@ function cleanupRemovedSkills(
  */
 export const PHARAOH_COMMAND_MARKER = "# managed-by: pharaoh-mcp";
 
+/**
+ * Commands an earlier installer wrote that this version no longer ships. Each
+ * is deleted only while it is still Pharaoh's marked file; a user's own file
+ * or a symlink with the name stays. A pre-marker copy (0.3.46 and earlier) is
+ * left too: without the bundled file there is nothing to prove it is ours.
+ */
+const RETIRED_COMMANDS: readonly string[] = ["sessions.md"];
+
 /** The full marker line, with the one thing a reader of the file needs to know. */
 const COMMAND_MARKER_LINE = `${PHARAOH_COMMAND_MARKER} (rewritten by npx ${PACKAGE_NAME} on upgrade; rename this file to keep your own version)`;
 
@@ -552,13 +560,18 @@ function isPharaohCommand(existing: string, bundled: string): boolean {
  * Install the bundled slash commands (`.md` files in the package's `commands/`
  * directory) to `~/.claude/commands/`. A destination that is missing or is
  * Pharaoh's own file is written; anything else (the user's file, or a symlink,
- * which is never followed) is kept and reported.
+ * which is never followed) is kept and reported. Pharaoh's copies of
+ * `RETIRED_COMMANDS` are removed.
  *
  * @param home - Home directory override (defaults to os.homedir()).
- * @returns How many commands were written, and the names of the files kept.
+ * @returns How many commands were written, and the names of the files kept and removed.
  */
-function installClaudeCodeCommands(home: string): { installed: number; kept: string[] } {
-	const result = { installed: 0, kept: [] as string[] };
+function installClaudeCodeCommands(home: string): {
+	installed: number;
+	kept: string[];
+	removed: string[];
+} {
+	const result = { installed: 0, kept: [] as string[], removed: [] as string[] };
 	if (!existsSync(BUNDLED_COMMANDS_DIR)) return result;
 
 	const commandsDst = join(home, ".claude", "commands");
@@ -578,6 +591,14 @@ function installClaudeCodeCommands(home: string): { installed: number; kept: str
 		}
 		writeFileSync(dst, markCommand(bundled));
 		result.installed++;
+	}
+
+	for (const name of RETIRED_COMMANDS) {
+		const dst = join(commandsDst, name);
+		if (!lstatSync(dst, { throwIfNoEntry: false })?.isFile()) continue;
+		if (!readFileSync(dst, "utf-8").includes(PHARAOH_COMMAND_MARKER)) continue;
+		rmSync(dst);
+		result.removed.push(name);
 	}
 
 	return result;
@@ -871,6 +892,7 @@ export function runInstallSkills(
 							]
 						: []),
 					...(keptLine ? [`  → ${keptLine}`] : []),
+					...commands.removed.map((name) => `  → Removed retired ~/.claude/commands/${name}`),
 					"",
 				].join("\n"),
 			);

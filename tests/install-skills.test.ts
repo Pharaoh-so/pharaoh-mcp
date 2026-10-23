@@ -15,12 +15,11 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseArgs } from "../src/helpers.js";
 import {
 	allowReadTools,
-	detectOpenClaw,
 	installSkills,
 	mergeOpenClawConfig,
 	PHARAOH_ALLOW_RULES,
@@ -182,9 +181,8 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		expect(existsSync(commandsDir)).toBe(true);
 		expect(existsSync(join(commandsDir, "plan.md"))).toBe(true);
 		expect(existsSync(join(commandsDir, "review.md"))).toBe(true);
-		expect(existsSync(join(commandsDir, "sessions.md"))).toBe(true);
 
-		// All three slash commands ship as "fat" inline bodies — their full
+		// Both slash commands ship as "fat" inline bodies — their full
 		// skill content is inlined so the command expansion becomes the user
 		// prompt directly, rather than a thin wrapper that calls the Skill
 		// tool. Thin wrappers were a ship mode we retired in 2026-04-10 after
@@ -210,17 +208,6 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		expect(reviewCmd).toContain("Phase 0");
 		expect(reviewCmd).toContain("$ARGUMENTS");
 		expect(reviewCmd).not.toMatch(/Invoke the `pharaoh-review` skill/);
-
-		// sessions.md must carry the full decomposition workflow — worktree
-		// discipline, parallelism test, and the distinctive "atomic commits"
-		// phrasing from the skill body.
-		const sessionsCmd = readFileSync(join(commandsDir, "sessions.md"), "utf-8");
-		expect(sessionsCmd).toContain("Session Decomposition");
-		expect(sessionsCmd).toContain("git worktree");
-		expect(sessionsCmd).toContain("atomic commits");
-		expect(sessionsCmd).toContain("Here is the task to decompose into sessions:");
-		expect(sessionsCmd).toContain("$ARGUMENTS");
-		expect(sessionsCmd).not.toMatch(/Invoke the `pharaoh-sessions` skill/);
 	});
 
 	it("SC-7: keeps a user-authored ~/.claude/commands/plan.md and reports it", () => {
@@ -270,12 +257,33 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		mkdirSync(commandsDir, { recursive: true });
 		const target = join(home, "elsewhere.md");
 		writeFileSync(target, `${PHARAOH_COMMAND_MARKER}\nLINK TARGET\n`);
-		symlinkSync(target, join(commandsDir, "sessions.md"));
+		symlinkSync(target, join(commandsDir, "review.md"));
 
 		const result = runInstallSkills(home, NO_CLI);
 
 		expect(readFileSync(target, "utf-8")).toContain("LINK TARGET");
-		expect(result.keptCommands).toEqual(["sessions.md"]);
+		expect(result.keptCommands).toEqual(["review.md"]);
+	});
+
+	it("SC-7: removes its own retired sessions.md, never a user's file or a symlink", () => {
+		const commandsDir = join(home, ".claude", "commands");
+		const sessions = join(commandsDir, "sessions.md");
+		mkdirSync(commandsDir, { recursive: true });
+		writeFileSync(sessions, `---\ndescription: old\n${PHARAOH_COMMAND_MARKER}\n---\nbody\n`);
+
+		runInstallSkills(home, NO_CLI);
+		expect(existsSync(sessions)).toBe(false);
+
+		writeFileSync(sessions, "# my own /sessions\nUSER CONTENT\n");
+		runInstallSkills(home, NO_CLI);
+		expect(readFileSync(sessions, "utf-8")).toContain("USER CONTENT");
+
+		rmSync(sessions);
+		const target = join(home, "elsewhere.md");
+		writeFileSync(target, `${PHARAOH_COMMAND_MARKER}\nLINK TARGET\n`);
+		symlinkSync(target, sessions);
+		runInstallSkills(home, NO_CLI);
+		expect(readFileSync(sessions, "utf-8")).toContain("LINK TARGET");
 	});
 
 	it("SC-8: creates ~/.pharaoh with mode 0700 and repairs a looser mode on the next run", () => {
@@ -413,29 +421,6 @@ describe("uninstallClaudePlugin", () => {
 	});
 });
 
-// ── OpenClaw detection ──────────────────────────────────────────────
-
-describe("detectOpenClaw", () => {
-	let home: string;
-
-	beforeEach(() => {
-		home = makeTempHome();
-	});
-
-	afterEach(() => {
-		rmSync(home, { recursive: true, force: true });
-	});
-
-	it("returns false when ~/.openclaw/ does not exist", () => {
-		expect(detectOpenClaw(home)).toBe(false);
-	});
-
-	it("returns true when ~/.openclaw/ exists", () => {
-		mkdirSync(join(home, ".openclaw"));
-		expect(detectOpenClaw(home)).toBe(true);
-	});
-});
-
 // ── OpenClaw skill install ──────────────────────────────────────────
 
 describe("installSkills", () => {
@@ -450,29 +435,28 @@ describe("installSkills", () => {
 		rmSync(home, { recursive: true, force: true });
 	});
 
-	it("copies all 10 skill directories to ~/.openclaw/skills/ with pharaoh- prefix", () => {
-		const count = installSkills(home);
-		expect(count).toBe(10);
-
+	it("copies all 8 skill directories to ~/.openclaw/skills/ with pharaoh- prefix", () => {
 		const skillsDir = join(home, ".openclaw", "skills");
-		expect(existsSync(skillsDir)).toBe(true);
-		// Core skill stays unprefixed.
-		expect(existsSync(join(skillsDir, "pharaoh"))).toBe(true);
-		// Other skills get the prefix.
-		expect(existsSync(join(skillsDir, "pharaoh-plan"))).toBe(true);
-		expect(existsSync(join(skillsDir, "pharaoh-tdd"))).toBe(true);
+		expect(existsSync(skillsDir)).toBe(false);
+		const count = installSkills(home);
+		expect(count).toBe(8);
+
+		// Core skill stays unprefixed (no pharaoh-pharaoh); the others get the prefix.
+		const core = readFileSync(join(skillsDir, "pharaoh", "SKILL.md"), "utf-8");
+		expect(core).toMatch(/^---\n[\s\S]*?name:\s*pharaoh\n/);
+		expect(existsSync(join(skillsDir, "pharaoh-pharaoh"))).toBe(false);
+		expect(existsSync(join(skillsDir, "pharaoh-tdd", "SKILL.md"))).toBe(true);
+		// Only `name:` is rewritten; prompt-name and the body are copied verbatim.
+		const plan = readFileSync(join(skillsDir, "pharaoh-plan", "SKILL.md"), "utf-8");
+		const source = readFileSync(join(__dirname, "..", "skills", "plan", "SKILL.md"), "utf-8");
+		const stripName = (s: string) => s.replace(/^name:\s*.+$/m, "");
+		expect(plan).toMatch(/^---\n[\s\S]*?name:\s*pharaoh-plan\n/);
+		expect(stripName(plan)).toBe(stripName(source));
 		// The vision skill was removed with the vision tools.
 		expect(existsSync(join(skillsDir, "pharaoh-vision"))).toBe(false);
 		// Bare-name variants must not exist.
 		expect(existsSync(join(skillsDir, "plan"))).toBe(false);
 		expect(existsSync(join(skillsDir, "tdd"))).toBe(false);
-	});
-
-	it("copies SKILL.md into each skill directory", () => {
-		installSkills(home);
-		const skillsDir = join(home, ".openclaw", "skills");
-		expect(existsSync(join(skillsDir, "pharaoh", "SKILL.md"))).toBe(true);
-		expect(existsSync(join(skillsDir, "pharaoh-plan", "SKILL.md"))).toBe(true);
 	});
 
 	it("overwrites existing skill files on reinstall", () => {
@@ -484,14 +468,6 @@ describe("installSkills", () => {
 
 		installSkills(home);
 		expect(readFileSync(skillFile, "utf-8")).not.toBe("tampered content");
-	});
-
-	it("creates ~/.openclaw/skills/ if it does not exist", () => {
-		const skillsDir = join(home, ".openclaw", "skills");
-		expect(existsSync(skillsDir)).toBe(false);
-
-		installSkills(home);
-		expect(existsSync(skillsDir)).toBe(true);
 	});
 });
 
@@ -808,25 +784,10 @@ describe("manifest-based cleanup — first run (no manifest)", () => {
 		expect(manifest.skills).toContain("plan");
 		expect(manifest.skills).toContain("review");
 		expect(manifest.skills).not.toContain("pharaoh-plan");
-	});
 
-	it("does NOT touch unrelated plugin dirs alongside the skills dir", () => {
-		// Simulates the common case: user has another skill plugin installed
-		// (e.g. superpowers-writing-skills) in the same skills dir. The
-		// manifest-based cleanup must never delete anything it didn't install.
-		const skillsDir = claudeCodeSkillsDir(home);
-		mkdirSync(join(skillsDir, "superpowers-writing-skills"), { recursive: true });
-		writeFileSync(
-			join(skillsDir, "superpowers-writing-skills", "SKILL.md"),
-			"---\nname: superpowers-writing-skills\n---\n",
-		);
-
+		// A repeat install with no source change keeps the same skill set.
 		runInstallSkills(home, NO_CLI);
-
-		expect(existsSync(join(skillsDir, "superpowers-writing-skills", "SKILL.md"))).toBe(true);
-		expect(
-			readFileSync(join(skillsDir, "superpowers-writing-skills", "SKILL.md"), "utf-8"),
-		).toContain("superpowers-writing-skills");
+		expect(readManifestOrThrow(home).skills).toEqual(manifest.skills);
 	});
 
 	it("missing manifest + stale bare-name skill from legacy layout → legacy cleanup still runs", () => {
@@ -838,11 +799,16 @@ describe("manifest-based cleanup — first run (no manifest)", () => {
 		const skillsDir = claudeCodeSkillsDir(home);
 		mkdirSync(join(skillsDir, "plan"), { recursive: true });
 		writeFileSync(join(skillsDir, "plan", "SKILL.md"), "---\nname: plan\n---\n");
+		// Another plugin's skill in the same dir: with no manifest, nothing says it is ours.
+		const unrelated = join(skillsDir, "superpowers-writing-skills", "SKILL.md");
+		mkdirSync(dirname(unrelated), { recursive: true });
+		writeFileSync(unrelated, "unrelated plugin content");
 
 		runInstallSkills(home, NO_CLI);
 
 		expect(existsSync(join(skillsDir, "plan"))).toBe(false);
 		expect(existsSync(join(skillsDir, "pharaoh-plan", "SKILL.md"))).toBe(true);
+		expect(readFileSync(unrelated, "utf-8")).toBe("unrelated plugin content");
 		// Manifest gets written even though only legacy cleanup ran
 		expect(existsSync(join(skillsDir, ".pharaoh-manifest.json"))).toBe(true);
 	});
@@ -894,67 +860,24 @@ describe("manifest-based cleanup — cut skills between versions", () => {
 		return { skillsDir, manifestPath };
 	}
 
-	it("removes prefixed variants of cut skills on next install", () => {
-		const { skillsDir } = simulatePriorInstallWithCuts(["debt"]);
-		mkdirSync(join(skillsDir, "pharaoh-debt"), { recursive: true });
-		writeFileSync(
-			join(skillsDir, "pharaoh-debt", "SKILL.md"),
-			"---\nname: pharaoh-debt\n---\nStale content from the 24-skill bundle.\n",
-		);
-
-		runInstallSkills(home, NO_CLI);
-
-		expect(existsSync(join(skillsDir, "pharaoh-debt"))).toBe(false);
-		// New manifest reflects the current source (no "debt")
-		const manifest = readManifestOrThrow(home);
-		expect(manifest.skills).not.toContain("debt");
-	});
-
-	it("removes bare-name variants of cut skills on next install", () => {
-		// Dan's issue body lists 14 bare-name dead dirs. Cover that shape.
-		const { skillsDir } = simulatePriorInstallWithCuts(["execute"]);
-		mkdirSync(join(skillsDir, "execute"), { recursive: true });
-		writeFileSync(join(skillsDir, "execute", "SKILL.md"), "---\nname: execute\n---\n");
-
-		runInstallSkills(home, NO_CLI);
-
-		expect(existsSync(join(skillsDir, "execute"))).toBe(false);
-	});
-
-	it("removes BOTH bare and prefixed variants of the same cut skill in one pass", () => {
-		const { skillsDir } = simulatePriorInstallWithCuts(["wiring"]);
-		mkdirSync(join(skillsDir, "wiring"), { recursive: true });
-		writeFileSync(join(skillsDir, "wiring", "SKILL.md"), "---\nname: wiring\n---\n");
-		mkdirSync(join(skillsDir, "pharaoh-wiring"), { recursive: true });
-		writeFileSync(
-			join(skillsDir, "pharaoh-wiring", "SKILL.md"),
-			"---\nname: pharaoh-wiring\n---\n",
-		);
-
-		runInstallSkills(home, NO_CLI);
-
-		expect(existsSync(join(skillsDir, "wiring"))).toBe(false);
-		expect(existsSync(join(skillsDir, "pharaoh-wiring"))).toBe(false);
-	});
-
-	it("removes multiple cut skills in one install", () => {
-		const cuts = ["debt", "execute", "explore", "worktree"];
-		const { skillsDir } = simulatePriorInstallWithCuts(cuts);
-		for (const name of cuts) {
-			mkdirSync(join(skillsDir, `pharaoh-${name}`), { recursive: true });
-			writeFileSync(
-				join(skillsDir, `pharaoh-${name}`, "SKILL.md"),
-				`---\nname: pharaoh-${name}\n---\n`,
-			);
+	it("removes bare and prefixed copies of every cut or renamed skill, and nothing else", () => {
+		// `planning-v2` stands for a rename: the old name is cut, the new one (plan) installed.
+		const { skillsDir } = simulatePriorInstallWithCuts(["debt", "execute", "planning-v2"]);
+		const stale = ["debt", "pharaoh-debt", "execute", "pharaoh-planning-v2"];
+		for (const dir of stale) {
+			mkdirSync(join(skillsDir, dir), { recursive: true });
+			writeFileSync(join(skillsDir, dir, "SKILL.md"), `---\nname: ${dir}\n---\n`);
 		}
+		const unrelated = join(skillsDir, "superpowers-writing-skills", "SKILL.md");
+		mkdirSync(dirname(unrelated), { recursive: true });
+		writeFileSync(unrelated, "unrelated plugin content");
 
 		runInstallSkills(home, NO_CLI);
 
-		for (const name of cuts) {
-			expect(existsSync(join(skillsDir, `pharaoh-${name}`))).toBe(false);
-		}
-		// Current skills still present after cleanup
+		for (const dir of stale) expect(existsSync(join(skillsDir, dir)), dir).toBe(false);
+		expect(readFileSync(unrelated, "utf-8")).toBe("unrelated plugin content");
 		expect(existsSync(join(skillsDir, "pharaoh-plan", "SKILL.md"))).toBe(true);
+		expect(readManifestOrThrow(home).skills).not.toContain("debt");
 	});
 
 	it("refuses to delete the pharaoh flagship even if listed as cut", () => {
@@ -975,69 +898,5 @@ describe("manifest-based cleanup — cut skills between versions", () => {
 		runInstallSkills(home, NO_CLI);
 
 		expect(existsSync(join(skillsDir, "pharaoh", "SKILL.md"))).toBe(true);
-	});
-
-	it("never touches unrelated plugin dirs even when cleaning up cuts", () => {
-		const { skillsDir } = simulatePriorInstallWithCuts(["debt"]);
-		mkdirSync(join(skillsDir, "superpowers-writing-skills"), { recursive: true });
-		writeFileSync(
-			join(skillsDir, "superpowers-writing-skills", "SKILL.md"),
-			"unrelated plugin content",
-		);
-		mkdirSync(join(skillsDir, "pharaoh-debt"), { recursive: true });
-		writeFileSync(join(skillsDir, "pharaoh-debt", "SKILL.md"), "---\nname: pharaoh-debt\n---\n");
-
-		runInstallSkills(home, NO_CLI);
-
-		expect(existsSync(join(skillsDir, "superpowers-writing-skills"))).toBe(true);
-		expect(readFileSync(join(skillsDir, "superpowers-writing-skills", "SKILL.md"), "utf-8")).toBe(
-			"unrelated plugin content",
-		);
-		expect(existsSync(join(skillsDir, "pharaoh-debt"))).toBe(false);
-	});
-
-	it("handles the rename case: old name removed, new name installed", () => {
-		// Rename is just "cut old + add new" transitively, but worth covering
-		// explicitly because it's the third case Dan called out in the issue.
-		const { skillsDir } = simulatePriorInstallWithCuts(["planning-v2"]);
-		mkdirSync(join(skillsDir, "pharaoh-planning-v2"), { recursive: true });
-		writeFileSync(
-			join(skillsDir, "pharaoh-planning-v2", "SKILL.md"),
-			"---\nname: pharaoh-planning-v2\n---\n",
-		);
-
-		runInstallSkills(home, NO_CLI);
-
-		// Old renamed dir is gone
-		expect(existsSync(join(skillsDir, "pharaoh-planning-v2"))).toBe(false);
-		// New name (current source) is installed
-		expect(existsSync(join(skillsDir, "pharaoh-plan", "SKILL.md"))).toBe(true);
-	});
-});
-
-describe("manifest-based cleanup — idempotency", () => {
-	let home: string;
-
-	beforeEach(() => {
-		home = makeTempHome();
-		mkdirSync(join(home, ".openclaw"), { recursive: true });
-	});
-
-	afterEach(() => {
-		rmSync(home, { recursive: true, force: true });
-	});
-
-	it("repeated installs with no changes keep the skill set stable", () => {
-		runInstallSkills(home, NO_CLI);
-		const firstManifest = readManifestOrThrow(home);
-		const firstSkills = [...firstManifest.skills].sort();
-
-		runInstallSkills(home, NO_CLI);
-		const secondManifest = readManifestOrThrow(home);
-		const secondSkills = [...secondManifest.skills].sort();
-
-		expect(secondSkills).toEqual(firstSkills);
-		// The manifest version stays at 1 across idempotent runs
-		expect(secondManifest.version).toBe(1);
 	});
 });
