@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "da019c687072089935a46162296b23cf1dcc29d5",
-  "payloadSha256": "764d58014c9ab287b2685c4ab649f9c4fac694910fcfcf7ede2fb5fed2a08703",
+  "commit": "4837d5b6130b909d71cef6134b020dca85eac806",
+  "payloadSha256": "5020f4a5253963394ba791a0a86c89011dbe0247af1e2fe9a9b48b31ebb379e5",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "881bb6365d2ff433f9cafb043e37a8bda865b43715c85db580b06d58e1d083fc",
+      "sha256": "c219408507045d6faf49cb32fd02cb95b6c5f11d8d6e68848ffa352402f6a90d",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "356d6da3d0af342bacc29e4afafc2d1faa15a48e3b9b2ceeb5d165f57cc2fdbf",
+      "sha256": "8a97fdef73f1c15372380ed532d01fcc83e7ae26c586ed375db1c33131ee9f48",
       "mode": "100644"
     },
     {
@@ -31,7 +31,7 @@
     },
     {
       "path": "commands/review.md",
-      "sha256": "4eddfd67b20f8c431479a2ddcc04345f1f1dd51ac414767bf4e0c014be57cf1f",
+      "sha256": "c2d73bd85e10ca24af1d794d7477c3ce5931de1a1c5ed582c4bd3a8aac6465e8",
       "mode": "100644"
     },
     {
@@ -56,7 +56,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "c9dc85f7abae68f1abc8dac782bdd359ebcc797e15f3f491a46dd4d8f46e2614",
+      "sha256": "27cb3df1a9679e8ec305b14ee969de0b5a18708e6e52a99b73d9fdfd54ef197f",
       "mode": "100644"
     },
     {
@@ -101,7 +101,7 @@
     },
     {
       "path": "skills/review/SKILL.md",
-      "sha256": "2c471d7a8499310f6d6a1b34ed500ef61fd71336e02ba3d52d6c939bc7f1b288",
+      "sha256": "94e677fce0c8cf1ca84d3a9e0311a4b278a0181d5a28808e4880fc7ff323c76f",
       "mode": "100644"
     },
     {
@@ -251,7 +251,7 @@
     },
     {
       "path": "tests/skill-validation.test.ts",
-      "sha256": "52a5201547d9de4066790032997619698afa766ae6d85edc6e2f8373d2789c46",
+      "sha256": "15f8efedff6fc4781ee99ee490c55460331d8319609d36bb57b9f9f5185ab6d2",
       "mode": "100644"
     },
     {

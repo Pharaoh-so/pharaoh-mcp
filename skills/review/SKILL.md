@@ -2,7 +2,7 @@
 name: review
 prompt-name: review-with-pharaoh
 description: "The definitive code review, for any codebase. Five-phase workflow: git context detection (worktree, branch, base, changed files), Pharaoh recon (architecture map, module context, blast radius in one call, with a fallback when the repo isn't mapped), parallel specialized agent dispatch (code quality, security against the project's own rules, error handling, test coverage, type design), adversarial review by the other model (Codex from Claude Code, Claude from Codex) for security-sensitive changes, and a final synthesized verdict of SHIP / SHIP WITH CHANGES / BLOCK. Architecture-aware wherever Pharaoh maps the repo, always branch-aware."
-version: 0.5.0
+version: 0.5.1
 homepage: https://pharaoh.so
 user-invocable: true
 metadata: {"emoji": "☥", "tags": ["code-review", "pull-request", "architecture", "pharaoh", "multi-agent", "adversarial-review", "cross-model", "regression-risk", "spec-alignment"]}
@@ -11,6 +11,8 @@ metadata: {"emoji": "☥", "tags": ["code-review", "pull-request", "architecture
 # Review with Pharaoh
 
 The definitive code review, for any codebase. Architecture-aware, branch-aware, multi-agent, adversarial. Five phases that combine Pharaoh's knowledge graph with parallel specialized reviewers and an independent second opinion from a different model. Every phase works without Pharaoh too; Pharaoh makes the architecture picture exact and cheap where it maps the repo.
+
+A review always reaches a verdict. When a phase needs something your client doesn't have (Pharaoh, a shell, subagents, a second model), it says how to carry on without it: do that, and name what was missing in the review output. Ask the user only when someone is there to answer.
 
 Final verdict: **SHIP** / **SHIP WITH CHANGES** / **BLOCK**
 
@@ -23,6 +25,8 @@ Before merging any branch. Before opening any PR. When reviewing changes that to
 ## Phase 0 — Git Context
 
 **Goal:** Know exactly what changed and where you are. This phase is mandatory and runs before anything else.
+
+No shell, or no git? Review the diff you were given (a file, a pasted patch, a pull request's changes): take the changed files and touched modules from it, skip to step 5, and say in the review output that branch context wasn't available.
 
 1. Detect the current environment:
    ```bash
@@ -41,7 +45,7 @@ Before merging any branch. Before opening any PR. When reviewing changes that to
    done
    BASE=$(git merge-base HEAD "$TARGET") && echo "base: $BASE"
    ```
-   If no base comes out, stop and ask which branch this merges into. An empty base makes every diff below come out empty, and the review would report no changes. If your shell doesn't keep variables between commands, set `BASE` to the printed commit at the start of each one.
+   If no base comes out, ask which branch this merges into (with no one to ask, review the uncommitted changes from step 4 and say the base was unknown). An empty base makes every diff below come out empty, and the review would report no changes. If your shell doesn't keep variables between commands, set `BASE` to the printed commit at the start of each one.
 
 3. Collect the full changeset from the base:
    ```bash
@@ -98,7 +102,7 @@ Then read `docs/VISION.md` if the repo has one — the repo's architectural cont
 
 ## Phase 2 — Parallel Specialized Review
 
-**Goal:** Deep-dive the actual code changes from multiple expert angles simultaneously. Launch these as **parallel subagents** — they are independent and should run concurrently.
+**Goal:** Deep-dive the actual code changes from multiple expert angles simultaneously. Launch these as **parallel subagents** — they are independent and should run concurrently. If your client can't start subagents, run each reviewer's pass yourself, one after another, with the same inputs.
 
 ### Determine which reviewers to dispatch
 
@@ -190,7 +194,7 @@ If none of these triggers are met, **skip Phase 3** and proceed to Phase 4. When
 | Codex | Claude Code | `claude auth status --json` shows `"authMethod": "claude.ai"` |
 | Any other client | A fresh same-model subagent | — |
 
-Only a subscription login counts: a review never bills an API key. If the other CLI is missing, signed out or signed in with an API key, give the same package to a fresh same-model subagent instead, and say so in the review output. Do the same when the user or the project's rules limit which AI vendors may see the code.
+Only a subscription login counts: a review never bills an API key. If the other CLI is missing, signed out or signed in with an API key, give the same package to a fresh same-model subagent instead, and say so in the review output. Do the same when the user or the project's rules limit which AI vendors may see the code. If you can't start a subagent either, review the package yourself as a separate pass after Phase 2, and say in the review output that this second opinion wasn't independent.
 
 ### Prepare a review package
 
@@ -301,7 +305,7 @@ If the command fails, times out or leaves no verdict lines in `review.md`, give 
 - [Vision gaps introduced or resolved]
 
 ## Adversarial Review
-- Reviewer: [Codex / Claude / same-model subagent, and why the other model couldn't run]
+- Reviewer: [Codex / Claude / same-model subagent / your own separate pass (not independent), and why the other model couldn't run]
 - [Phase 3 results, or "Skipped — no security-sensitive changes detected"]
 
 ---

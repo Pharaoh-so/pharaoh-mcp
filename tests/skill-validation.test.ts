@@ -215,6 +215,13 @@ describe("skill-validation", () => {
 					expect(cmd, `${cli} must not have ${flag}`).not.toContain(flag);
 			}
 		});
+		// Breaks when a phase that dispatches subagents gives a client that can't start one
+		// no way through: /review must still reach a verdict there.
+		it("Phases 2 and 3 say what to do without subagents", () => {
+			const phase2 = review.slice(review.indexOf("## Phase 2"), review.indexOf("## Phase 3"));
+			for (const phase of [phase2, phase3]) expect(phase).toMatch(/can't start (?:a )?subagents?/i);
+		});
+
 		// Breaks when the settings file the Claude reviewer reads isn't written first: claude -p
 		// then exits "Settings file not found" and every review falls back to the same model.
 		it("writes $REVIEW_DIR/settings.json before the Claude reviewer reads it", () => {
