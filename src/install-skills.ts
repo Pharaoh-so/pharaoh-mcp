@@ -2,8 +2,9 @@
  * --install-skills implementation for the Pharaoh MCP proxy CLI.
  *
  * Installs Pharaoh's Claude Code plugin (skills plus the Grep routing hook,
- * through `claude plugin`) and OpenClaw skills in ~/.openclaw/skills/. Also
- * merges the Pharaoh MCP server config into the target platform.
+ * through `claude plugin`), the review skill for Codex in ~/.agents/skills/,
+ * and OpenClaw skills in ~/.openclaw/skills/. Also merges the Pharaoh MCP
+ * server config into OpenClaw.
  */
 import {
 	cpSync,
@@ -93,6 +94,16 @@ interface OpenClawConfig {
  */
 function detectClaudeCode(home = homedir()): boolean {
 	return existsSync(join(home, ".claude"));
+}
+
+/**
+ * Detect whether Codex is installed by checking for ~/.codex/.
+ *
+ * @param home - Home directory override (defaults to os.homedir()).
+ * @returns True if ~/.codex/ exists.
+ */
+function detectCodex(home = homedir()): boolean {
+	return existsSync(join(home, ".codex"));
 }
 
 /**
@@ -283,9 +294,15 @@ export function uninstallClaudePlugin(
  * @param srcDir - Source skills directory (bundled with the package).
  * @param dstDir - Destination skills directory (inside the plugin path).
  * @param prefix - Namespace prefix to apply (e.g., `"pharaoh-"`).
+ * @param only   - Source skill names to copy; every skill when omitted.
  * @returns Number of skill directories installed.
  */
-function installPrefixedSkills(srcDir: string, dstDir: string, prefix: string): number {
+function installPrefixedSkills(
+	srcDir: string,
+	dstDir: string,
+	prefix: string,
+	only?: readonly string[],
+): number {
 	if (!existsSync(srcDir)) return 0;
 
 	mkdirSync(dstDir, { recursive: true });
@@ -298,7 +315,7 @@ function installPrefixedSkills(srcDir: string, dstDir: string, prefix: string): 
 	let count = 0;
 
 	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
+		if (!entry.isDirectory() || (only && !only.includes(entry.name))) continue;
 		const srcSkill = join(srcDir, entry.name);
 		const srcSkillMd = join(srcSkill, "SKILL.md");
 		if (!existsSync(srcSkillMd)) continue;
@@ -577,6 +594,33 @@ export function formatKeptCommands(kept: readonly string[]): string | null {
 	return `Pharaoh: kept your own ~/.claude/commands/${kept.join(", ")} (not Pharaoh's file). Delete one and re-run to take Pharaoh's version.`;
 }
 
+// ── Codex installer ─────────────────────────────────────────────────
+
+/**
+ * Skills installed for Codex. Only review: Codex lists every installed skill
+ * in each session's context, and the others lean on Claude Code features and
+ * are untested in Codex. Add a skill here once it is proven there.
+ */
+const CODEX_SKILLS: readonly string[] = ["review"];
+
+/**
+ * Install `CODEX_SKILLS` to `~/.agents/skills/` (where Codex reads personal
+ * skills) as `pharaoh-<name>`, overwriting on reinstall. Other tools share that
+ * directory, so the OpenClaw path's bare-name and manifest cleanups never run
+ * here: they would delete a user's own `review` or `plan` skill.
+ *
+ * @param home - Home directory override (defaults to os.homedir()).
+ * @returns Number of skill directories copied.
+ */
+function installCodexSkills(home: string): number {
+	return installPrefixedSkills(
+		BUNDLED_SKILLS_DIR,
+		join(home, ".agents", "skills"),
+		SKILL_PREFIX,
+		CODEX_SKILLS,
+	);
+}
+
 // ── OpenClaw installer ──────────────────────────────────────────────
 
 /**
@@ -777,8 +821,8 @@ export interface InstallResult {
 /**
  * Main entry point for --install-skills, also run on every proxy start.
  *
- * Detection priority: Claude Code > OpenClaw > manual instructions.
- * Installs to all detected platforms (a user may use both). Never touches
+ * Detection priority: Claude Code > OpenClaw > Codex > manual instructions.
+ * Installs to all detected platforms (a user may use several). Never touches
  * Claude Code permissions: that is `allowReadTools`, interactive setup only.
  *
  * @param home - Home directory override (defaults to os.homedir()).
@@ -857,6 +901,24 @@ export function runInstallSkills(
 		installed = true;
 	}
 
+	// ── Codex ──
+	if (detectCodex(home)) {
+		try {
+			const count = installCodexSkills(home);
+			if (!silent) {
+				process.stderr.write(
+					`Pharaoh: installed ${count} skill to ~/.agents/skills/ for Codex ($pharaoh-review)\n\n`,
+				);
+			}
+		} catch (err) {
+			// ALLOWED-CATCH: a directory other tools share must not stop setup before the SC-6
+			// permission migration; the reason is printed even when silent.
+			const msg = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`Pharaoh: couldn't install the review skill for Codex — ${msg}\n`);
+		}
+		installed = true;
+	}
+
 	// ── Neither detected ──
 	if (!installed && !silent) {
 		process.stderr.write(
@@ -865,6 +927,7 @@ export function runInstallSkills(
 				"",
 				"Supported platforms:",
 				"  • Claude Code — install from https://claude.ai/download",
+				"  • Codex      — install from https://developers.openai.com/codex",
 				"  • OpenClaw   — install from https://openclaw.dev/install",
 				"",
 				"Once installed, re-run: npx @pharaoh-so/mcp",
