@@ -11,7 +11,8 @@
  * Here we substitute a stub Backend so the test stays fast and deterministic.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -22,7 +23,7 @@ import {
 	ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthRequiredBackend, type Backend } from "../src/backend.js";
+import { AuthRequiredBackend, type Backend, type DownstreamClient } from "../src/backend.js";
 import { loadBundledCatalog } from "../src/catalog.js";
 
 // Stub openBrowser — this test uses a stub gateway so the real import is
@@ -293,6 +294,37 @@ describe("ProxyServer.setBackend swap", () => {
 		expect(changeCount).toBe(2);
 
 		await closeAll();
+	});
+
+	// A swap still starting when the client initializes (token recovery racing
+	// `initialize`) must name the client to the new backend once it is up.
+	// Breaks when setBackend reads the client before the new backend starts.
+	it("names the client to a backend whose start was still running when the client initialized", async () => {
+		const identified: DownstreamClient[] = [];
+		let finishStart = () => {};
+		const next = Object.assign(new StubBackend([], { content: [] }), {
+			start: () => new Promise<void>((resolve) => (finishStart = resolve)),
+			identifyClient: (d: DownstreamClient) => identified.push(d),
+		});
+		// No ~/.claude/settings.json in this HOME, so the plugin reads as absent.
+		const home = process.env.HOME;
+		process.env.HOME = mkdtempSync(join(tmpdir(), "pharaoh-race-"));
+		const proxy = new ProxyServer(new StubBackend([], { content: [] }));
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		// biome-ignore lint/suspicious/noExplicitAny: InMemoryTransport implements Transport
+		await proxy.startWithTransport(serverTransport as any);
+		const swap = proxy.setBackend(next);
+		const client = new Client({ name: "claude-code", version: "2.1.3" });
+		await client.connect(clientTransport);
+		await client.ping();
+		finishStart();
+		await swap;
+		process.env.HOME = home;
+		expect(identified).toEqual([
+			{ client: { name: "claude-code", version: "2.1.3" }, plugin: "absent" },
+		]);
+		await client.close();
+		await proxy.stop();
 	});
 
 	it("does not swap the active backend if next.start() rejects", async () => {

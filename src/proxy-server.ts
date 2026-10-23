@@ -30,10 +30,16 @@ import {
 	type ClientCapabilities,
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { AuthRequiredBackend, type Backend, createSseBackend } from "./backend.js";
+import {
+	AuthRequiredBackend,
+	type Backend,
+	createSseBackend,
+	type DownstreamClient,
+} from "./backend.js";
 import { loadBundledCatalog } from "./catalog.js";
 import type { Credentials } from "./credentials.js";
 import { createGateway, type DeviceFlowGateway } from "./gateway.js";
+import { claudePluginState } from "./install-skills.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { registerTraceResource } from "./trace-resource.js";
 import { getPackageVersion } from "./version.js";
@@ -50,6 +56,7 @@ export class ProxyServer {
 	private stopping = false;
 	private clientCapabilities: ClientCapabilities = {};
 	private clientInitialized = false;
+	private downstream: DownstreamClient | null = null;
 	private capabilityUpdate: Promise<void> = Promise.resolve();
 	private transportClosed: Promise<void>;
 	private transportClosedResolve!: () => void;
@@ -75,9 +82,21 @@ export class ProxyServer {
 		this.server.oninitialized = () => {
 			if (this.clientInitialized) return;
 			this.clientInitialized = true;
+			const info = this.server.getClientVersion();
+			const downstream: DownstreamClient = {
+				client: { name: info?.name, version: info?.version },
+				plugin: claudePluginState(),
+			};
+			this.downstream = downstream;
 			this.clientCapabilities = this.server.getClientCapabilities() ?? {};
 			const next = this.backend.withClientCapabilities?.(this.clientCapabilities) ?? this.backend;
-			if (next === this.backend) return;
+			// Only the backend that serves this client is told about it: a warm
+			// session replaced below never takes a tool call. setBackend names the
+			// client to its replacement once that has started.
+			if (next === this.backend) {
+				this.backend.identifyClient?.(downstream);
+				return;
+			}
 			// Warm startup happens before the frontend initializes. Replace that
 			// conservative connection only when real UI support is negotiated.
 			this.capabilityUpdate = this.setBackend(next).catch((error) => {
@@ -85,6 +104,7 @@ export class ProxyServer {
 					throw error;
 				// UI negotiation is optional: keep the already-started plain-text
 				// backend healthy when its replacement hits a transient failure.
+				this.backend.identifyClient?.(downstream);
 				process.stderr.write(
 					"Pharaoh: compact UI negotiation unavailable; continuing with text responses.\n",
 				);
@@ -213,6 +233,8 @@ export class ProxyServer {
 			return;
 		}
 		this.backend = next;
+		// Read the client after start: it may have initialized during the await.
+		if (this.downstream) next.identifyClient?.(this.downstream);
 		this.capabilityUpdate = Promise.resolve();
 		// Fire the notification after the swap so a client that races a list
 		// request against it sees the new catalog.
