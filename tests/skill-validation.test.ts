@@ -160,6 +160,70 @@ describe("skill-validation", () => {
 		});
 	});
 
+	// Breaks when review's second reviewer gets write access, a shell or web tool beyond
+	// Codex's read-only sandbox, MCP servers or connected apps (Gmail, Stripe…), or can
+	// bill an API key instead of the subscription login. Each flag was checked live
+	// (codex-cli 0.163.0, Claude Code 2.1.304).
+	describe("review Phase 3: the other model reviews read-only", () => {
+		const review = readFileSync(join(SKILLS_DIR, "review", "SKILL.md"), "utf-8");
+		const phase3 = review.slice(review.indexOf("## Phase 3"), review.indexOf("## Phase 4"));
+		const commands = [...phase3.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) =>
+			m[1].replaceAll("\\\n", " "),
+		);
+		const blocks = (cli: string) => commands.filter((c) => c.includes(cli));
+		it.each([
+			{
+				cli: "codex exec",
+				required: [
+					"env -u OPENAI_API_KEY",
+					"-u CODEX_API_KEY",
+					"-u CODEX_ACCESS_TOKEN",
+					"--sandbox read-only",
+					"--ephemeral",
+					"--ignore-user-config",
+					"--ignore-rules",
+					"--disable apps",
+					"--disable plugins",
+					"--disable hooks",
+					"web_search=disabled",
+					'- < "$REVIEW_DIR/package.md"',
+				],
+				forbidden: ["workspace-write", "danger-full-access", "--full-auto", "--dangerously"],
+			},
+			{
+				cli: "claude -p",
+				required: [
+					"env -u ANTHROPIC_API_KEY",
+					"-u ANTHROPIC_AUTH_TOKEN",
+					"--safe-mode",
+					"--restricted",
+					"--tools Read,Grep,Glob ",
+					"--strict-mcp-config",
+					`--mcp-config '{"mcpServers":{}}'`,
+					"--disable-slash-commands",
+					"--no-session-persistence",
+					'--settings "$REVIEW_DIR/settings.json"',
+					'< "$REVIEW_DIR/package.md"',
+				],
+				forbidden: ["--allowedTools", "--add-dir", "--bare", "Bash", "WebFetch", "--dangerously"],
+			},
+		])("$cli", ({ cli, required, forbidden }) => {
+			expect(blocks(cli).length, `no ${cli} command`).toBeGreaterThan(0);
+			for (const cmd of blocks(cli)) {
+				for (const flag of required) expect(cmd, `${cli} needs ${flag}`).toContain(flag);
+				for (const flag of forbidden)
+					expect(cmd, `${cli} must not have ${flag}`).not.toContain(flag);
+			}
+		});
+		// Breaks when the settings file the Claude reviewer reads isn't written first: claude -p
+		// then exits "Settings file not found" and every review falls back to the same model.
+		it("writes $REVIEW_DIR/settings.json before the Claude reviewer reads it", () => {
+			const writes = commands.findIndex((c) => c.includes('> "$REVIEW_DIR/settings.json"'));
+			expect(writes, "no command writes $REVIEW_DIR/settings.json").toBeGreaterThanOrEqual(0);
+			expect(writes).toBeLessThan(commands.findIndex((c) => c.includes("claude -p")));
+		});
+	});
+
 	describe("graph-powered skill → MCP prompt consistency", () => {
 		for (const [skillName, expectedPrompt] of Object.entries(GRAPH_SKILL_TO_PROMPT)) {
 			it(`${skillName} references MCP prompt '${expectedPrompt}'`, () => {

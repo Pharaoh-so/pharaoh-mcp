@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "60b7aa31d6a6be4314f1404825534331dcfdea63",
-  "payloadSha256": "a7fbba39035562c1e7b85182b7207de753513c278eb9a93b0d5a605669b6a79e",
+  "commit": "da019c687072089935a46162296b23cf1dcc29d5",
+  "payloadSha256": "764d58014c9ab287b2685c4ab649f9c4fac694910fcfcf7ede2fb5fed2a08703",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -16,7 +16,7 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "501ce4724d55266e74e38fa9bd8fb1254821cc75bd7fbef81bff3c30cc48879b",
+      "sha256": "356d6da3d0af342bacc29e4afafc2d1faa15a48e3b9b2ceeb5d165f57cc2fdbf",
       "mode": "100644"
     },
     {
@@ -31,7 +31,7 @@
     },
     {
       "path": "commands/review.md",
-      "sha256": "f011c1d759a8cefa897a457d66618b772a383e15e60cfb4f11a878c587e4aba9",
+      "sha256": "4eddfd67b20f8c431479a2ddcc04345f1f1dd51ac414767bf4e0c014be57cf1f",
       "mode": "100644"
     },
     {
@@ -101,7 +101,7 @@
     },
     {
       "path": "skills/review/SKILL.md",
-      "sha256": "9fe090b1d166db3cf7d75aeeacb44fa7912dc8f15ccb185835df235684904cb7",
+      "sha256": "2c471d7a8499310f6d6a1b34ed500ef61fd71336e02ba3d52d6c939bc7f1b288",
       "mode": "100644"
     },
     {
@@ -161,7 +161,7 @@
     },
     {
       "path": "src/install-skills.ts",
-      "sha256": "44a423332afcb0aff97d3686bb92188c859627650338d295b083f51af6992b97",
+      "sha256": "3a5cb4f985882a11848249c4ec420beac4c730470469b97754a971de0f6c283e",
       "mode": "100644"
     },
     {
@@ -221,7 +221,7 @@
     },
     {
       "path": "tests/install-skills.test.ts",
-      "sha256": "0cac4ad448f0de215a77658decc617f84c6a19debee48760e0b5bfc7d97a4aef",
+      "sha256": "305203ad3bb3ae625ec621f057df3c0ac580a963afe14abac4893ff057aedab7",
       "mode": "100644"
     },
     {
@@ -251,7 +251,7 @@
     },
     {
       "path": "tests/skill-validation.test.ts",
-      "sha256": "e836b55b1791213b745eab86acfe832ad7f36ea217e7e9b27b5f85e3d1fc2385",
+      "sha256": "52a5201547d9de4066790032997619698afa766ae6d85edc6e2f8373d2789c46",
       "mode": "100644"
     },
     {

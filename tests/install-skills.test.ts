@@ -325,6 +325,47 @@ describe("runInstallSkills — both platforms", () => {
 	});
 });
 
+// Breaks when the Codex install writes more than review, keeps the bare `name:`, or runs
+// the OpenClaw path's bare-name cleanup in ~/.agents/skills/, which other tools share.
+describe("runInstallSkills — Codex", () => {
+	let home: string;
+
+	beforeEach(() => {
+		home = makeTempHome();
+		mkdirSync(join(home, ".codex"));
+		for (const own of ["review", "plan"]) {
+			mkdirSync(join(home, ".agents", "skills", own), { recursive: true });
+			writeFileSync(join(home, ".agents", "skills", own, "SKILL.md"), "the user's own skill");
+		}
+	});
+
+	afterEach(() => {
+		rmSync(home, { recursive: true, force: true });
+	});
+
+	it("installs only review, as pharaoh-review, and leaves the user's skills alone", () => {
+		runInstallSkills(home, NO_CLI);
+
+		const skills = join(home, ".agents", "skills");
+		expect(readFileSync(join(skills, "pharaoh-review", "SKILL.md"), "utf-8")).toMatch(
+			/^---\nname: pharaoh-review\n/,
+		);
+		expect(existsSync(join(skills, "pharaoh-plan"))).toBe(false);
+		expect(existsSync(join(skills, "pharaoh"))).toBe(false);
+		expect(readFileSync(join(skills, "review", "SKILL.md"), "utf-8")).toBe("the user's own skill");
+		expect(readFileSync(join(skills, "plan", "SKILL.md"), "utf-8")).toBe("the user's own skill");
+	});
+
+	// Breaks when a Codex install error escapes: interactive setup would stop before
+	// it replaces the blanket mcp__pharaoh permission rule (SC-6).
+	it("reports a Codex install error instead of throwing", () => {
+		rmSync(join(home, ".agents"), { recursive: true, force: true });
+		writeFileSync(join(home, ".agents"), "not a directory");
+
+		expect(() => runInstallSkills(home, { ...NO_CLI, silent: true })).not.toThrow();
+	});
+});
+
 describe("runInstallSkills — no platform", () => {
 	let home: string;
 
@@ -341,6 +382,7 @@ describe("runInstallSkills — no platform", () => {
 
 		expect(existsSync(join(home, ".claude"))).toBe(false);
 		expect(existsSync(join(home, ".openclaw"))).toBe(false);
+		expect(existsSync(join(home, ".agents"))).toBe(false);
 		expect(existsSync(join(home, ".pharaoh"))).toBe(false);
 	});
 });
