@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseArgs } from "../src/helpers.js";
 import {
 	allowReadTools,
+	claudePluginState,
 	installSkills,
 	mergeOpenClawConfig,
 	PHARAOH_ALLOW_RULES,
@@ -134,6 +135,21 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		runInstallSkills(home, { claude: claude.run });
 
 		expect(claude.calls).toEqual([]);
+	});
+
+	// The proxy reports this state to Pharaoh. Breaks when a disabled plugin reads
+	// as enabled, or a settings file that doesn't list it (or none) reads as anything but absent.
+	it("reads the plugin's state from settings.json", () => {
+		const settings = join(home, ".claude", "settings.json");
+		const states = [claudePluginState(home)];
+		writeFileSync(settings, JSON.stringify({ permissions: { allow: [] } }));
+		states.push(claudePluginState(home));
+		writeFileSync(settings, JSON.stringify({ enabledPlugins: { "pharaoh@pharaoh": false } }));
+		states.push(claudePluginState(home));
+		writeFileSync(settings, JSON.stringify({ enabledPlugins: { "pharaoh@pharaoh": true } }));
+		states.push(claudePluginState(home));
+
+		expect(states).toEqual(["absent", "absent", "disabled", "enabled"]);
 	});
 
 	it("still writes the plugin when the claude CLI can't install it", () => {

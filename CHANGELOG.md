@@ -5,7 +5,10 @@ All notable changes to `@pharaoh-so/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.52] - 2026-10-23
+
+### Added
+- The proxy tells Pharaoh which client it serves (its `initialize` name and version) and whether Pharaoh's Claude Code plugin is enabled in `~/.claude/settings.json`, once per upstream session. Pharaoh stores it with that session, to compare adoption with and without the plugin. Nothing else is sent.
 
 ### Removed
 - The `sessions` and `parallel` skills, the `/sessions` slash command and their MCP prompts (`session-decomposition`, `parallel-agents`). Claude Code and Codex now run subagents and parallel sessions on their own.

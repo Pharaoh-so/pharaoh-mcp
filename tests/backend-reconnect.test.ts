@@ -25,6 +25,25 @@ describe("SseProxyBackend reconnect retry budget", () => {
 		vi.restoreAllMocks();
 	});
 
+	// A transport that dies on an auth error leaves the loop through its catch,
+	// and recovery swaps backends; the dead client must get no report meanwhile.
+	// Breaks when the connected client is cleared only after a clean close.
+	it("reports nothing on a client whose transport failed with an auth error", async () => {
+		const backend = new SseProxyBackend("http://fake.local/sse", "fake-token");
+		const notification = vi.fn().mockResolvedValue(undefined);
+		const transport: { onclose?: () => void; onerror?: (e: Error) => void } = {};
+		Object.assign(backend, {
+			client: { notification },
+			connectedClient: { notification },
+			transport,
+		});
+		const closed = (backend as unknown as { waitForClose(): Promise<void> }).waitForClose();
+		transport.onerror?.(Object.assign(new Error("Unauthorized"), { code: 401 }));
+		await expect(closed).rejects.toBeInstanceOf(TokenExpiredError);
+		backend.identifyClient({ client: { name: "claude-code" }, plugin: "absent" });
+		expect(notification).not.toHaveBeenCalled();
+	});
+
 	it("calls reconnectAfter exactly BACKOFF_MS.length times before giving up", async () => {
 		const backend = new SseProxyBackend("http://fake.local/sse", "fake-token");
 

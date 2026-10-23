@@ -1,7 +1,7 @@
 {
 	"name": "@pharaoh-so/mcp",
 	"mcpName": "so.pharaoh/pharaoh",
-	"version": "0.3.51",
+	"version": "0.3.52",
 	"description": "MCP proxy for Pharaoh — maps codebases into queryable knowledge graphs for AI agents. Enables Claude Code in headless environments (VPS, SSH, CI) via device flow auth.",
 	"type": "module",
 	"main": "dist/index.js",

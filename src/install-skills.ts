@@ -221,6 +221,18 @@ function pluginSetting(home: string): boolean | undefined {
 }
 
 /**
+ * Pharaoh's Claude Code plugin as ~/.claude/settings.json lists it. The proxy
+ * reports this to Pharaoh, so adoption can be compared with and without it.
+ *
+ * @param home - Home directory override (defaults to os.homedir()).
+ */
+export function claudePluginState(home = homedir()): "enabled" | "disabled" | "absent" {
+	const setting = pluginSetting(home);
+	if (setting === undefined) return "absent";
+	return setting ? "enabled" : "disabled";
+}
+
+/**
  * Install the plugin through Claude Code's CLI (both commands are idempotent).
  * Skipped when it's already enabled, and when the user disabled it: that choice stands.
  */

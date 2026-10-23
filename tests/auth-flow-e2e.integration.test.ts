@@ -51,6 +51,25 @@ function iso(offsetMs: number): string {
 	return new Date(Date.now() + offsetMs).toISOString();
 }
 
+/** Signed-in credentials for alice@acme, pointing the proxy at the mock server. */
+function writeValidCredentials(homeDir: string, serverUrl: string): void {
+	writeFileSync(
+		join(homeDir, ".pharaoh", "credentials.json"),
+		JSON.stringify({
+			version: 2,
+			access_token: "phat_initial",
+			refresh_token: "phrt_initial",
+			expires_at: iso(3600_000),
+			refresh_expires_at: iso(180 * 86_400_000),
+			expires_in: 3600,
+			sse_url: `${serverUrl}/sse`,
+			github_login: "alice",
+			tenant_name: "acme",
+			repos: [],
+		}),
+	);
+}
+
 // ── Mock Pharaoh server ────────────────────────────────────────────────────
 
 /**
@@ -73,6 +92,12 @@ interface MockState {
 	issuedAccessTokens: string[];
 	/** Capabilities actually negotiated by each upstream MCP connection. */
 	initializedCapabilities: ClientCapabilities[];
+	/** Params of each notifications/pharaoh/client the proxy sent, in order. */
+	clientReports: unknown[];
+	/** The upstream session each of those reports arrived on. */
+	clientReportSessions: string[];
+	/** If set, the server rejects notifications/pharaoh/client with a 500. */
+	failClientReport: boolean;
 }
 
 interface MockServer {
@@ -101,6 +126,9 @@ async function startMockServer(): Promise<MockServer> {
 		sseGetCount: 0,
 		issuedAccessTokens: [],
 		initializedCapabilities: [],
+		clientReports: [],
+		clientReportSessions: [],
+		failClientReport: false,
 	};
 
 	const ctx: { mcpSession: MockServer["mcpSession"]; baseUrl: string } = {
@@ -211,6 +239,11 @@ async function startMockServer(): Promise<MockServer> {
 					mcp.oninitialized = () => {
 						state.initializedCapabilities.push(mcp.getClientCapabilities() ?? {});
 					};
+					mcp.fallbackNotificationHandler = async (n) => {
+						if (n.method !== "notifications/pharaoh/client") return;
+						state.clientReports.push(n.params);
+						state.clientReportSessions.push(transport.sessionId);
+					};
 					mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 						tools: [
 							{
@@ -252,7 +285,13 @@ async function startMockServer(): Promise<MockServer> {
 						return;
 					}
 					// Hand-parse the body JSON (we already drained the stream above)
-					await ctx.mcpSession.transport.handlePostMessage(req, res, JSON.parse(body));
+					const message = JSON.parse(body);
+					if (state.failClientReport && message.method === "notifications/pharaoh/client") {
+						res.statusCode = 500;
+						res.end("report rejected");
+						return;
+					}
+					await ctx.mcpSession.transport.handlePostMessage(req, res, message);
 					return;
 				}
 
@@ -409,16 +448,13 @@ function spawnProxy(opts: { serverUrl: string; homeDir: string }): ProxyHarness 
 async function initializeProxy(
 	harness: ProxyHarness,
 	capabilities: ClientCapabilities = {},
+	clientInfo = { name: "e2e-test", version: "0.0.0" },
 ): Promise<Record<string, unknown>> {
 	harness.writeMessage({
 		jsonrpc: "2.0",
 		id: 0,
 		method: "initialize",
-		params: {
-			protocolVersion: "2024-11-05",
-			capabilities,
-			clientInfo: { name: "e2e-test", version: "0.0.0" },
-		},
+		params: { protocolVersion: "2024-11-05", capabilities, clientInfo },
 	});
 	const res = await harness.waitForResponse(0);
 	expect(res.result).toBeDefined();
@@ -533,6 +569,10 @@ describe("auth-flow E2E", () => {
 		expect(list.tools.find((t) => t.name === "get_codebase_map")?._meta).toEqual({
 			"anthropic/alwaysLoad": true,
 		});
+		// The backend swapped in after sign-in names the client to its session.
+		expect(mockServer.state.clientReports).toEqual([
+			{ client: { name: "e2e-test", version: "0.0.0" }, plugin: "absent" },
+		]);
 	}, 30_000);
 
 	// A warm proxy connects upstream before front initialization. It must not
@@ -540,32 +580,33 @@ describe("auth-flow E2E", () => {
 	it.each([
 		true,
 		false,
-	])("negotiates warm UI support=%s and retains it across reconnect", async (ui) => {
+	])("negotiates warm UI support=%s, names its client upstream, and keeps both across reconnect", async (ui) => {
+		// Pharaoh sees the proxy as pharaoh-proxy, so each upstream session that
+		// serves the client (negotiated, then reconnected) hears which client the
+		// proxy serves and whether Pharaoh's Claude Code plugin is enabled. Breaks
+		// when a serving session misses that report, a replaced warm session gets
+		// one, or the plugin state is misread.
+		writeValidCredentials(homeDir, mockServer.url);
+		mkdirSync(join(homeDir, ".claude"), { recursive: true });
 		writeFileSync(
-			join(homeDir, ".pharaoh", "credentials.json"),
-			JSON.stringify({
-				version: 2,
-				access_token: "phat_initial",
-				refresh_token: "phrt_initial",
-				expires_at: iso(3600_000),
-				refresh_expires_at: iso(180 * 86_400_000),
-				expires_in: 3600,
-				sse_url: `${mockServer.url}/sse`,
-				github_login: "alice",
-				tenant_name: "acme",
-				repos: [],
-			}),
+			join(homeDir, ".claude", "settings.json"),
+			JSON.stringify({ enabledPlugins: { "pharaoh@pharaoh": true } }),
 		);
+		const report = { client: { name: "claude-code", version: "2.1.3" }, plugin: "enabled" };
 		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
-		await initializeProxy(harness, {
-			extensions: {
-				"io.modelcontextprotocol/ui": {
-					mimeTypes: [ui ? "text/html;profile=mcp-app" : "text/html"],
+		await initializeProxy(
+			harness,
+			{
+				extensions: {
+					"io.modelcontextprotocol/ui": {
+						mimeTypes: [ui ? "text/html;profile=mcp-app" : "text/html"],
+					},
+					"not-forwarded": {},
 				},
-				"not-forwarded": {},
+				sampling: {},
 			},
-			sampling: {},
-		});
+			report.client,
+		);
 		// Duplicate initialized notifications must not fan out upstream sessions
 		// while the first negotiated connection is still being established.
 		harness.writeMessage({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -589,12 +630,17 @@ describe("auth-flow E2E", () => {
 			: undefined;
 		expect(result._meta).toEqual(resultMeta);
 		expect(mockServer.state.initializedCapabilities).toEqual(ui ? [{}, negotiated] : [{}]);
+		// Only the session that serves the client hears about it: the warm one a UI
+		// swap replaces never takes a tool call, so reporting it would halve pickup.
+		await expect.poll(() => mockServer.state.clientReports).toEqual([report]);
 
 		await mockServer.mcpSession?.transport.close();
 		await expect
 			.poll(() => mockServer.state.initializedCapabilities.length, { timeout: 8000 })
 			.toBe(ui ? 3 : 2);
 		expect(mockServer.state.initializedCapabilities.at(-1)).toEqual(negotiated);
+		await expect.poll(() => mockServer.state.clientReports).toEqual([report, report]);
+		expect(new Set(mockServer.state.clientReportSessions).size).toBe(2);
 		harness.writeMessage({
 			jsonrpc: "2.0",
 			id: 2,
@@ -664,21 +710,7 @@ describe("auth-flow E2E", () => {
 	}, 30_000);
 
 	it("recovers a 401 during warm UI negotiation without disconnecting stdio", async () => {
-		writeFileSync(
-			join(homeDir, ".pharaoh", "credentials.json"),
-			JSON.stringify({
-				version: 2,
-				access_token: "phat_initial",
-				refresh_token: "phrt_initial",
-				expires_at: iso(3600_000),
-				refresh_expires_at: iso(180 * 86_400_000),
-				expires_in: 3600,
-				sse_url: `${mockServer.url}/sse`,
-				github_login: "alice",
-				tenant_name: "acme",
-				repos: [],
-			}),
-		);
+		writeValidCredentials(homeDir, mockServer.url);
 		mockServer.state.failSseGetAttempt = 2;
 		mockServer.state.refreshInvalidGrant = true;
 		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
@@ -700,21 +732,7 @@ describe("auth-flow E2E", () => {
 	});
 
 	it("keeps a healthy warm text backend when the optional UI connection fails", async () => {
-		writeFileSync(
-			join(homeDir, ".pharaoh", "credentials.json"),
-			JSON.stringify({
-				version: 2,
-				access_token: "phat_initial",
-				refresh_token: "phrt_initial",
-				expires_at: iso(3600_000),
-				refresh_expires_at: iso(180 * 86_400_000),
-				expires_in: 3600,
-				sse_url: `${mockServer.url}/sse`,
-				github_login: "alice",
-				tenant_name: "acme",
-				repos: [],
-			}),
-		);
+		writeValidCredentials(homeDir, mockServer.url);
 		mockServer.state.failSseGetAttempt = 2;
 		mockServer.state.failSseGetStatus = 500;
 		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
@@ -741,7 +759,31 @@ describe("auth-flow E2E", () => {
 		await new Promise((resolve) => setTimeout(resolve, 3300));
 		expect(mockServer.state.sseGetCount).toBe(2);
 		expect(mockServer.state.initializedCapabilities).toEqual([{}]);
+		// The warm backend that keeps serving names the client after all.
+		expect(mockServer.state.clientReports).toEqual([
+			{ client: { name: "e2e-test", version: "0.0.0" }, plugin: "absent" },
+		]);
 	});
+
+	// The SDK hands a failed POST to the transport's onerror, which reconnects,
+	// and every new session would report (and fail) again. Breaks when the proxy
+	// keeps reporting after the server rejected a report.
+	it("costs one reconnect, not a loop, when the server rejects the client report", async () => {
+		writeValidCredentials(homeDir, mockServer.url);
+		mockServer.state.failClientReport = true;
+		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
+		await initializeProxy(harness);
+		await new Promise((resolve) => setTimeout(resolve, 5000));
+		expect(mockServer.state.sseGetCount).toBe(2);
+		harness.writeMessage({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "get_codebase_map", arguments: {} },
+		});
+		const result = (await harness.waitForResponse(1)).result as Record<string, unknown>;
+		expect(result.content).toEqual([{ type: "text", text: "mock pharaoh: tool=get_codebase_map" }]);
+	}, 30_000);
 
 	it("scenario 3 — mid-session 401 swaps to auth-required and back to SSE without disconnecting", async () => {
 		// Valid creds + mock server configured to 401 the NEXT SSE GET after

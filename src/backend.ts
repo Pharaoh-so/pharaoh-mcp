@@ -25,6 +25,21 @@ import { classifySSEError, TenantSuspendedError, TokenExpiredError } from "./pro
 import { TRACE_MIME_TYPE } from "./trace-resource.js";
 import { getPackageVersion } from "./version.js";
 
+/**
+ * Notification that tells Pharaoh which client the proxy serves. Pharaoh sees
+ * the proxy itself as `pharaoh-proxy`; this lands on the session's row.
+ * Mirrors PROXY_CLIENT_NOTIFICATION in src/mcp/server.ts.
+ */
+export const CLIENT_NOTIFICATION = "notifications/pharaoh/client";
+
+/** What the proxy reports about the client behind it. */
+export type DownstreamClient = {
+	/** The client's own `initialize` clientInfo (e.g. claude-code 2.1.3). */
+	client: { name?: string; version?: string };
+	/** Pharaoh's Claude Code plugin as ~/.claude/settings.json lists it. */
+	plugin: "enabled" | "disabled" | "absent";
+};
+
 /** The contract ProxyServer uses to delegate tool handling. */
 export interface Backend {
 	readonly name: "auth-required" | "sse";
@@ -42,6 +57,8 @@ export interface Backend {
 	waitForExit?(): Promise<void>;
 	/** Return an unstarted replacement only if the negotiated UI support changed. */
 	withClientCapabilities?(capabilities: ClientCapabilities): Backend;
+	/** Report the client behind the proxy to every upstream session, reconnects included. */
+	identifyClient?(downstream: DownstreamClient): void;
 }
 
 /**
@@ -168,6 +185,11 @@ export class SseProxyBackend implements Backend {
 	private stopped = false;
 	private reconnectPromise: Promise<void> | null = null;
 	private readonly clientCapabilities: ClientCapabilities;
+	private downstream: DownstreamClient | null = null;
+	/** The client whose `connect` has finished; null while connecting or after its transport closed. */
+	private connectedClient: Client | null = null;
+	/** Set once a report fails; see reportClient. */
+	private reportsOff = false;
 
 	constructor(
 		private readonly sseUrl: string,
@@ -183,6 +205,30 @@ export class SseProxyBackend implements Backend {
 			Array.isArray(ui?.mimeTypes) && ui.mimeTypes.includes(TRACE_MIME_TYPE)
 				? { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: [TRACE_MIME_TYPE] } } }
 				: {};
+	}
+
+	identifyClient(downstream: DownstreamClient): void {
+		this.downstream = downstream;
+		void this.reportClient();
+	}
+
+	/**
+	 * Tell the connected session which client the proxy serves. Never awaited.
+	 * The SDK also hands a failed POST to the transport's onerror, which
+	 * reconnects, so after one failure this backend stops reporting: a server
+	 * that rejects reports costs one reconnect, not a loop.
+	 */
+	private async reportClient(): Promise<void> {
+		const client = this.connectedClient;
+		if (!client || !this.downstream || this.reportsOff) return;
+		await client
+			.notification({ method: CLIENT_NOTIFICATION, params: this.downstream })
+			.catch((error: unknown) => {
+				// ALLOWED-CATCH: telemetry; reportsOff bounds the reconnect a failed POST triggers
+				this.reportsOff = true;
+				const msg = error instanceof Error ? error.message : String(error);
+				process.stderr.write(`Pharaoh: client report not sent, not retrying (${msg})\n`);
+			});
 	}
 
 	withClientCapabilities(capabilities: ClientCapabilities): Backend {
@@ -237,6 +283,12 @@ export class SseProxyBackend implements Backend {
 			if (error instanceof Error) classifySSEError(error);
 			throw error;
 		}
+		// A stop or a newer connect while this one was in flight owns the backend now.
+		if (this.stopped || this.client !== client) return;
+		this.connectedClient = client;
+		// Every new upstream session (reconnects too) hears which client this is,
+		// without holding up startup or reconnect supervision.
+		void this.reportClient();
 	}
 
 	/** Wait for the current transport to close, then decide what to do. */
@@ -247,8 +299,14 @@ export class SseProxyBackend implements Backend {
 				return;
 			}
 			const sse = this.transport;
-			sse.onclose = () => resolve();
+			// The client is gone the moment its transport closes or errors,
+			// whichever way the loop then leaves (backoff or typed recovery).
+			sse.onclose = () => {
+				this.connectedClient = null;
+				resolve();
+			};
 			sse.onerror = (err) => {
+				this.connectedClient = null;
 				try {
 					classifySSEError(err);
 				} catch (typed) {
@@ -333,6 +391,7 @@ export class SseProxyBackend implements Backend {
 
 	async stop(): Promise<void> {
 		this.stopped = true;
+		this.connectedClient = null;
 		if (this.transport) {
 			await this.transport.close().catch(() => {});
 			this.transport = null;
