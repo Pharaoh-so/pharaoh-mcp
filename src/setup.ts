@@ -15,18 +15,56 @@ import { pinnedPackageSpec } from "./version.js";
 /** Runs one `claude` CLI command; true on success. */
 export type ClaudeCli = (args: string[]) => boolean;
 
-/** Check if `claude` CLI is available in PATH. */
-function hasClaude(): boolean {
+/** Anthropic's Claude Code CLI install page: every platform and install method. */
+export const CLAUDE_CLI_SETUP_URL = "https://code.claude.com/docs/en/setup";
+
+/** Pharaoh's setup guide for agents other than Claude Code (stdio server, sign-in on first call). */
+const HEADLESS_SETUP_URL = "https://pharaoh.so/docs/connect/headless";
+
+/**
+ * Whether a `claude` CLI on PATH starts. It is launched the way `runClaude`
+ * launches it, so the check and the commands agree, with no `which` (minimal
+ * containers lack it). The Claude desktop app's bundled copy isn't on PATH.
+ *
+ * @returns True when `claude --version` runs.
+ */
+export function hasClaude(): boolean {
 	try {
-		const which = process.platform === "win32" ? "where" : "which";
-		execFileSync(which, ["claude"], {
-			encoding: "utf-8",
-			stdio: ["pipe", "pipe", "pipe"],
-		});
+		execFileSync("claude", ["--version"], { stdio: "pipe", timeout: 10_000 });
 		return true;
 	} catch {
+		// A `claude` that can't be started is one setup can't use either.
 		return false;
 	}
+}
+
+/**
+ * What setup prints when no `claude` CLI is on PATH: npx registers everything
+ * through that CLI, the desktop app's copy doesn't count, and the CLI shares
+ * ~/.claude with the desktop app, so installing it covers the Code tab too.
+ *
+ * @param platform - Picks the one-line installer (PowerShell on Windows).
+ * @returns The lines to print.
+ */
+export function claudeCliMissing(platform: NodeJS.Platform = process.platform): string[] {
+	// The shell goes in the label: anything after the command gets pasted with it.
+	const [shell, installer] =
+		platform === "win32"
+			? [" (PowerShell)", "irm https://claude.ai/install.ps1 | iex"]
+			: ["", "curl -fsSL https://claude.ai/install.sh | bash"];
+	return [
+		"Pharaoh: the claude command isn't on your PATH, so setup stopped.",
+		"",
+		"npx adds Pharaoh to Claude Code through the Claude Code CLI. The desktop app runs its own copy of Claude Code, and that copy isn't on your PATH.",
+		"",
+		`  Install the CLI${shell}: ${installer}`,
+		`  Other ways: ${CLAUDE_CLI_SETUP_URL}`,
+		`  Then, in a new terminal: ${NPX_COMMAND}`,
+		"",
+		"The CLI and the desktop app share ~/.claude, so the desktop app's Code tab gets Pharaoh too.",
+		`Not using Claude Code? OpenClaw: ${NPX_COMMAND} --install-skills. Other agents: ${HEADLESS_SETUP_URL}`,
+		"",
+	];
 }
 
 /** Run a claude CLI command, returning true on success. Surfaces stderr on failure. */
@@ -155,13 +193,7 @@ export function runSetup(options?: {
 	const home = options?.home ?? homedir();
 
 	if (!options?.claude && !hasClaude()) {
-		printLines(
-			"Pharaoh: Claude Code CLI not found.",
-			"",
-			"Install Claude Code first: https://claude.ai/download",
-			`Then re-run: ${NPX_COMMAND}`,
-			"",
-		);
+		printLines(...claudeCliMissing());
 		return false;
 	}
 	const claude = options?.claude ?? claudeCliFor(home);
@@ -178,10 +210,14 @@ export function runSetup(options?: {
 
 	// Step 3: Register as global stdio MCP server, pinned to the running version
 	const spec = pinnedPackageSpec();
-	const added = claude(["mcp", "add", "--scope", "user", "pharaoh", "--", "npx", spec]);
+	const addArgs = ["mcp", "add", "--scope", "user", "pharaoh", "--", "npx", spec];
 
-	if (!added) {
-		printLines("Pharaoh: failed to register MCP server.", `Try manually: ${NPX_COMMAND}`, "");
+	if (!claude(addArgs)) {
+		printLines(
+			"Pharaoh: failed to register MCP server.",
+			`Try manually: claude ${addArgs.join(" ")}`,
+			"",
+		);
 		return false;
 	}
 

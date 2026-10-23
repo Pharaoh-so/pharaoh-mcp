@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePharaohHome } from "./credentials.js";
-import { type ClaudeCli, claudeCliFor } from "./setup.js";
+import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
 import { getPackageVersion, PACKAGE_NAME, pinnedPackageSpec } from "./version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -960,7 +960,7 @@ export function runInstallSkills(
 				"Pharaoh: no supported skill platform detected.",
 				"",
 				"Supported platforms:",
-				"  • Claude Code — install from https://claude.ai/download",
+				`  • Claude Code — install the CLI from ${CLAUDE_CLI_SETUP_URL}`,
 				"  • Codex      — install from https://developers.openai.com/codex",
 				"  • OpenClaw   — install from https://openclaw.dev/install",
 				"",

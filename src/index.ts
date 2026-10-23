@@ -119,6 +119,14 @@ async function main(): Promise<void> {
 	if (isInteractive) {
 		process.stderr.write(`${BANNER}\n`);
 
+		// Setup registers everything through the `claude` CLI on PATH. Without it,
+		// stop before sign-in: nothing is written and saved credentials stay.
+		const { claudeCliMissing, hasClaude, runSetup } = await import("./setup.js");
+		if (!hasClaude()) {
+			printLines(...claudeCliMissing());
+			process.exit(1);
+		}
+
 		// Always re-authenticate for a fresh session
 		deleteCredentials();
 		const deviceCode = await requestDeviceCode(server);
@@ -145,10 +153,10 @@ async function main(): Promise<void> {
 			token.repos?.length ?? 0,
 		);
 
-		// Register MCP server + install skills (silent — user doesn't need internals)
+		// Register MCP server + install skills (silent — user doesn't need internals).
+		// runSetup has printed the failure and the command to run by hand; no success line.
+		if (!runSetup({ silent: true })) process.exit(1);
 		process.stderr.write("  Setting up...");
-		const { runSetup } = await import("./setup.js");
-		runSetup({ silent: true });
 		const { keptCommands } = runInstallSkills(undefined, { silent: true });
 		process.stderr.write(" done.\n");
 
