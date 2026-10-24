@@ -7,10 +7,13 @@
  * server config into OpenClaw.
  */
 import {
+	closeSync,
+	constants,
 	cpSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
 	renameSync,
@@ -276,8 +279,9 @@ function removeLegacyClaudePlugin(home: string): void {
 const LEGACY_PLUGIN_ID = "pharaoh@pharaoh-so";
 
 /**
- * Uninstall Pharaoh's Claude Code plugin: through the CLI, then the local
- * marketplace directory and any pre-marketplace install.
+ * Uninstall Pharaoh's Claude Code plugin (through the CLI, then the local
+ * marketplace directory and any pre-marketplace install) and its block in
+ * ~/.claude/CLAUDE.md. Run by --clean and --logout.
  *
  * @param home - Home directory override (defaults to os.homedir()).
  * @param claude - `claude` CLI runner (defaults to the real CLI for `home`).
@@ -290,6 +294,7 @@ export function uninstallClaudePlugin(
 	claude(["plugin", "marketplace", "remove", MARKETPLACE_NAME]);
 	rmSync(claudeMarketplaceDir(home), { recursive: true, force: true });
 	removeLegacyClaudePlugin(home);
+	removeClaudeMdBlock(home);
 }
 
 /**
@@ -840,6 +845,245 @@ export function describeAllowReadTools(result: AllowReadToolsResult): string {
 			return "Pharaoh: no ~/.claude/settings.json yet, so Pharaoh's tools ask before they run. The rules to allow the read-only tools are in the README (Security).";
 		case "error":
 			return "Pharaoh: ~/.claude/settings.json is not valid JSON; left as is. Pharaoh's tools ask before they run.";
+	}
+}
+
+// ── Claude Code instructions (~/.claude/CLAUDE.md) ──────────────────
+//
+// Agents acted on the Pharaoh-first line only from a CLAUDE.md, not from server
+// instructions or a hook (benchmarks/adoption/results/2026-10-23-everyday-auto-line.md).
+// The file is the user's: the interactive setup adds the line on a yes, inside
+// markers, and --clean/--logout remove exactly what it wrote.
+
+/** The Pharaoh-first line; same text as PHARAOH_SCOPED_LINE in scripts/adoption-grade.ts. */
+const PHARAOH_CLAUDE_MD_LINE =
+	"In repos Pharaoh has mapped, before searching or reading files, ask Pharaoh where the relevant code is, what calls it, and whether what you need already exists.";
+
+/** What the interactive setup asks before writing the line. */
+export const CLAUDE_MD_QUESTION = `Pharaoh: add one line to ~/.claude/CLAUDE.md so Claude checks Pharaoh before searching your code?\n  "${PHARAOH_CLAUDE_MD_LINE}"\n[Y/n] `;
+
+/** File under ~/.pharaoh holding the user's answer, so setup asks once. */
+const CLAUDE_MD_ANSWER_FILE = "claude-md-answer";
+
+/**
+ * Open flags that refuse a symlink even if one is swapped in after the check
+ * (SC-7; O_NOFOLLOW is undefined on Windows). A new block is appended, so the
+ * user's bytes are never rewritten; a stale block or a removal rewrites the file.
+ */
+const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+const APPEND_NO_FOLLOW = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW;
+const REWRITE_NO_FOLLOW = constants.O_WRONLY | constants.O_TRUNC | NO_FOLLOW;
+
+/** Write `text` to `path` opened with `flags` (APPEND_NO_FOLLOW or REWRITE_NO_FOLLOW). */
+function writeNoFollow(path: string, text: string, flags: number): void {
+	const fd = openSync(path, flags);
+	try {
+		writeFileSync(fd, text);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * Pharaoh's block. `pharaoh-mcp:start+nl` records that the installer also added
+ * the newline before it (the file didn't end in one), so removal takes it back too.
+ */
+function claudeMdBlock(addedNewline: boolean): string {
+	const start = `<!-- pharaoh-mcp:start${addedNewline ? "+nl" : ""} (managed by npx ${PACKAGE_NAME}; --clean or --logout removes it) -->`;
+	return `${start}\n${PHARAOH_CLAUDE_MD_LINE}\n<!-- pharaoh-mcp:end -->\n`;
+}
+
+/** Where Pharaoh's block sits in CLAUDE.md, as offsets into its text. */
+interface ClaudeMdBlock {
+	/** Start of the start-marker line. */
+	from: number;
+	/** Start of the line after the start marker. */
+	body: number;
+	/** Start of the end-marker line. */
+	to: number;
+	/** Just past the end marker and its newline. */
+	through: number;
+	/** The start marker is `pharaoh-mcp:start+nl`: the newline before it is Pharaoh's too. */
+	addedNewline: boolean;
+}
+
+/**
+ * Find the one Pharaoh block in `text`: null when there is none, "broken"
+ * when a marker is missing its pair, repeated or out of order.
+ */
+function findClaudeMdBlock(text: string): ClaudeMdBlock | null | "broken" {
+	const starts = [...text.matchAll(/^<!-- pharaoh-mcp:start(\+nl)?\b[^\n]*\n/gm)];
+	const ends = [...text.matchAll(/^<!-- pharaoh-mcp:end -->\n?/gm)];
+	if (starts.length === 0 && ends.length === 0) return null;
+	const [start, end] = [starts[0], ends[0]];
+	const body = start ? start.index + start[0].length : 0;
+	if (starts.length !== 1 || ends.length !== 1 || end.index < body) return "broken";
+	return {
+		from: start.index,
+		body,
+		to: end.index,
+		through: end.index + end[0].length,
+		addedNewline: start[1] !== undefined,
+	};
+}
+
+/**
+ * ~/.claude/CLAUDE.md as the installer sees it. "kept": never written (a
+ * symlinked file or ~/.claude, SC-7, or a broken block). "current": the block
+ * holds the line, or the user's own text has it.
+ */
+type ClaudeMdFile = { path: string; text: string } & (
+	| { state: "no-claude" | "kept" | "absent" | "current"; block: ClaudeMdBlock | null }
+	| { state: "stale"; block: ClaudeMdBlock }
+);
+
+/** Read ~/.claude/CLAUDE.md without following a symlink. */
+function readClaudeMd(home: string): ClaudeMdFile {
+	const path = join(home, ".claude", "CLAUDE.md");
+	const dir = lstatSync(join(home, ".claude"), { throwIfNoEntry: false });
+	if (!dir) return { state: "no-claude", path, text: "", block: null };
+	const file = lstatSync(path, { throwIfNoEntry: false });
+	if (!dir.isDirectory() || (file && !file.isFile())) {
+		return { state: "kept", path, text: "", block: null };
+	}
+	const text = file ? readFileSync(path, "utf-8") : "";
+	const block = findClaudeMdBlock(text);
+	if (block === "broken") return { state: "kept", path, text, block: null };
+	if (!block) {
+		return {
+			state: text.includes(PHARAOH_CLAUDE_MD_LINE) ? "current" : "absent",
+			path,
+			text,
+			block,
+		};
+	}
+	const current = text.slice(block.body, block.to) === `${PHARAOH_CLAUDE_MD_LINE}\n`;
+	return { state: current ? "current" : "stale", path, text, block };
+}
+
+/** What `offerClaudeMdLine` did; `describeClaudeMdOutcome` words it. */
+export type ClaudeMdOutcome =
+	| "added"
+	| "updated"
+	| "declined"
+	| "kept"
+	| "failed"
+	| "current"
+	| "answered"
+	| "cancelled"
+	| "no-terminal"
+	| "no-claude";
+
+/**
+ * Offer the Pharaoh-first line in ~/.claude/CLAUDE.md. Interactive setup only,
+ * never a proxy start. Asks only when the block is absent and the user hasn't
+ * answered before; a stale block (an earlier yes) is updated without asking.
+ * The line is appended inside markers, and nothing else in the file changes.
+ *
+ * @param ask - Asks the user: true for yes, false for no, null when input ended.
+ * @param isTerminal - Whether stdin and stderr are a terminal; false asks and writes nothing.
+ * @param home - Home directory override (defaults to os.homedir()).
+ * @returns What happened, for `describeClaudeMdOutcome`.
+ */
+export async function offerClaudeMdLine(
+	ask: () => Promise<boolean | null>,
+	isTerminal: boolean,
+	home = homedir(),
+): Promise<ClaudeMdOutcome> {
+	if (!isTerminal) return "no-terminal";
+	const answerPath = join(home, ".pharaoh", CLAUDE_MD_ANSWER_FILE);
+	try {
+		let file = readClaudeMd(home);
+		// A saved answer also silences the add-it-yourself line of "kept": a no stands.
+		const answered = lstatSync(answerPath, { throwIfNoEntry: false }) !== undefined;
+		if (answered && (file.state === "absent" || file.state === "kept")) return "answered";
+		if (file.state === "absent") {
+			const yes = await ask();
+			if (yes === null) return "cancelled";
+			if (!yes) {
+				saveClaudeMdAnswer(home, answerPath, "no");
+				return "declined";
+			}
+			file = readClaudeMd(home); // again: it may have changed while the user answered
+		}
+		if (file.state === "absent") {
+			const newline = file.text !== "" && !file.text.endsWith("\n");
+			writeNoFollow(file.path, `${newline ? "\n" : ""}${claudeMdBlock(newline)}`, APPEND_NO_FOLLOW);
+			saveClaudeMdAnswer(home, answerPath, "yes");
+			return "added";
+		}
+		if (file.state === "stale") {
+			const { body, to } = file.block;
+			const next = `${file.text.slice(0, body)}${PHARAOH_CLAUDE_MD_LINE}\n${file.text.slice(to)}`;
+			writeNoFollow(file.path, next, REWRITE_NO_FOLLOW);
+			return "updated";
+		}
+		return file.state;
+	} catch {
+		// ALLOWED-CATCH: setup is done; the user gets the line to add by hand, and no saved answer, so the next setup asks again
+		return "failed";
+	}
+}
+
+/** Save the user's answer (0600). Never through a symlink: `wx` refuses any existing path. */
+function saveClaudeMdAnswer(home: string, answerPath: string, answer: "yes" | "no"): void {
+	try {
+		ensurePharaohHome(join(home, ".pharaoh"));
+		writeFileSync(answerPath, `${answer}\n`, { mode: 0o600, flag: "wx" });
+	} catch {
+		// ALLOWED-CATCH: an answer that can't be saved only means the next setup asks again
+	}
+}
+
+/**
+ * The line the interactive setup prints for an `offerClaudeMdLine` outcome, or
+ * null when there is nothing to say (already current, already answered, no terminal).
+ *
+ * @param outcome - What `offerClaudeMdLine` returned.
+ */
+export function describeClaudeMdOutcome(outcome: ClaudeMdOutcome): string | null {
+	const byHand = `To have Claude check Pharaoh first, add this line to it yourself:\n  ${PHARAOH_CLAUDE_MD_LINE}`;
+	switch (outcome) {
+		case "added":
+			return `Pharaoh: added the line to ~/.claude/CLAUDE.md, between pharaoh-mcp markers. npx ${PACKAGE_NAME} --clean removes it.`;
+		case "updated":
+			return "Pharaoh: updated its line in ~/.claude/CLAUDE.md.";
+		case "declined":
+			return "Pharaoh: left ~/.claude/CLAUDE.md as it is. Setup won't ask again.";
+		case "kept":
+			return `Pharaoh: left ~/.claude/CLAUDE.md as it is (it's a symlink, or its Pharaoh markers don't pair up). ${byHand}`;
+		case "failed":
+			return `Pharaoh: couldn't write ~/.claude/CLAUDE.md. ${byHand}`;
+		default:
+			return null;
+	}
+}
+
+/**
+ * Remove Pharaoh's block from ~/.claude/CLAUDE.md, taking out only bytes the
+ * installer wrote, and forget the answer so the next setup asks again. A file
+ * left empty stays: there's no telling whether the user had it before. Never
+ * throws: --clean and --logout go on to their other steps.
+ *
+ * @param home - Home directory override (defaults to os.homedir()).
+ */
+function removeClaudeMdBlock(home: string): void {
+	try {
+		const { path, text, block } = readClaudeMd(home);
+		if (block) {
+			// The newline before a start+nl marker is Pharaoh's only while the block
+			// ends the file; once the user writes below it, it ends their line.
+			const ownsNewline = block.addedNewline && block.from > 0 && block.through === text.length;
+			const from = ownsNewline ? block.from - 1 : block.from;
+			writeNoFollow(path, text.slice(0, from) + text.slice(block.through), REWRITE_NO_FOLLOW);
+		}
+		rmSync(join(home, ".pharaoh", CLAUDE_MD_ANSWER_FILE), { force: true });
+	} catch (err) {
+		// ALLOWED-CATCH: the other cleanup steps (credentials on --logout) must still run; the user is told what's left
+		const code = (err as NodeJS.ErrnoException).code;
+		process.stderr.write(
+			`Pharaoh: couldn't remove its line from ~/.claude/CLAUDE.md${code ? ` (${code})` : ""}. Delete the pharaoh-mcp block by hand.\n`,
+		);
 	}
 }
 
