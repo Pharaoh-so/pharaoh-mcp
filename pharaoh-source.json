@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "2b17b3613796199e79fa60d7fbc1a37b56f67931",
-  "payloadSha256": "7ac816bebc0ee8e23bb8114f2f30040a7c35705779036aef317af1a2f14b4bd9",
+  "commit": "27746a7130895bd43f6dae684f732b062c4d9e60",
+  "payloadSha256": "d8a52a4fb3d296cddad11f4a03a681989e1a1092e8c8c150e86d9de09ad1b905",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "c1dc42f686379d284b38f0563424bd12e31c6d5c24f3aafefb8d3b8c90d0c36c",
+      "sha256": "4c00c2199a3391c58c9954c9a10925e381bbbc3ab9e399e20cecb52dedf2f813",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "115aa0566bb1c4337390a01ecc62cca17ea9dc271eaceb66effc98039666d11d",
+      "sha256": "f0f22e2ca9bd1d500b9e745ce26e2730f34c810a536385669c999fee93837416",
       "mode": "100644"
     },
     {
@@ -51,7 +51,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "5c1e2315f67573fcee1a2ee2a411b6ae85b68def1c57fd20206db789508d3609",
+      "sha256": "5a1b1bf2717361f6d9a2c2154582cdbaddfbd680385981ac577f4d097b206083",
       "mode": "100644"
     },
     {
@@ -241,7 +241,7 @@
     },
     {
       "path": "trace-app.html",
-      "sha256": "207503355f9ab8489781fa11041e978b6701e73bf771310fe194d5964e9d973a",
+      "sha256": "8dbd57bc52b238ab74bcdc3f04283bae843838178ee6aa775a8965ac6a15d6d8",
       "mode": "100644"
     },
     {

@@ -3,7 +3,7 @@
 		"pharaoh": {
 			"command": "npx",
 			"args": [
-				"@pharaoh-so/mcp@0.3.52"
+				"@pharaoh-so/mcp@0.3.53"
 			]
 		}
 	}
