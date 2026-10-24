@@ -156,6 +156,35 @@ describe("no `claude` CLI on PATH (the desktop app's built-in one isn't)", () =>
 		expect(interactive).toMatch(/if \(!runSetup\([^)]*\)\)\s*\{?\s*process\.exit\(1\)/);
 		expect(at("if (!runSetup(")).toBeLessThan(at("Pharaoh is ready"));
 	});
+
+	// The CLAUDE.md line is the user's file: asked about only here, never on a proxy start.
+	it("offers the CLAUDE.md line once, in the interactive setup after registration", () => {
+		const main = readFileSync(join(PKG_ROOT, "src", "index.ts"), "utf-8");
+		const interactive = main.slice(
+			main.indexOf("if (isInteractive) {"),
+			main.indexOf("// ── Proxy mode"),
+		);
+		const at = (code: string) => interactive.indexOf(code);
+
+		expect(main.match(/offerClaudeMdLine\(/g)).toHaveLength(1);
+		expect(at("if (!runSetup(")).toBeLessThan(at("offerClaudeMdLine("));
+		expect(at("offerClaudeMdLine(")).toBeLessThan(at("Pharaoh is ready"));
+	});
+
+	// uninstallClaudePlugin removes the CLAUDE.md line; on --logout it must not stand between the user and a credential wipe.
+	it("--clean and --logout remove the CLAUDE.md line, and --logout deletes credentials first", () => {
+		const main = readFileSync(join(PKG_ROOT, "src", "index.ts"), "utf-8");
+		const branch = (opening: string) => {
+			const start = main.indexOf(opening);
+			return main.slice(start, main.indexOf("process.exit(0)", start));
+		};
+		expect(branch('if (args.includes("--clean")) {')).toContain("uninstallClaudePlugin();");
+		const logout = branch("if (logout) {");
+		expect(logout).toContain("uninstallClaudePlugin();");
+		expect(logout.indexOf("deleteCredentials();")).toBeLessThan(
+			logout.indexOf("uninstallClaudePlugin();"),
+		);
+	});
 });
 
 describe("SC-9: package.json names the repository that builds it", () => {

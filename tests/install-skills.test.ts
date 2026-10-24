@@ -4,6 +4,7 @@
  * merging, and backward compat of parseArgs.
  */
 import {
+	appendFileSync,
 	chmodSync,
 	existsSync,
 	mkdirSync,
@@ -16,13 +17,16 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseArgs } from "../src/helpers.js";
+import { askYesNo, parseArgs } from "../src/helpers.js";
 import {
 	allowReadTools,
 	claudePluginState,
+	describeClaudeMdOutcome,
 	installSkills,
 	mergeOpenClawConfig,
+	offerClaudeMdLine,
 	PHARAOH_ALLOW_RULES,
 	PHARAOH_COMMAND_MARKER,
 	runInstallSkills,
@@ -732,6 +736,219 @@ describe("SC-6: allowReadTools (interactive setup only)", () => {
 
 		expect(allowReadTools(home)).toBe("error");
 		expect(readFileSync(settingsPath, "utf-8")).toBe("not valid json {{{");
+	});
+});
+
+// ── The Pharaoh-first line in ~/.claude/CLAUDE.md ───────────────────
+//
+// Breaks when: the line is written without a yes, on a proxy start or without
+// a terminal; a re-run asks again, duplicates the block or ignores a no; the
+// user's text around the block changes; a symlink is written through; or
+// --clean/--logout (uninstallClaudePlugin) leaves the file other than it was.
+
+describe("the Pharaoh-first line in ~/.claude/CLAUDE.md (interactive setup only)", () => {
+	const LINE =
+		"In repos Pharaoh has mapped, before searching or reading files, ask Pharaoh where the relevant code is, what calls it, and whether what you need already exists.";
+	const START =
+		"<!-- pharaoh-mcp:start (managed by npx @pharaoh-so/mcp; --clean or --logout removes it) -->";
+	const BLOCK = `${START}\n${LINE}\n<!-- pharaoh-mcp:end -->\n`;
+	let home: string;
+	let claudeMd: string;
+	let answer: string;
+
+	beforeEach(() => {
+		home = makeTempHome();
+		mkdirSync(join(home, ".claude"), { recursive: true });
+		claudeMd = join(home, ".claude", "CLAUDE.md");
+		answer = join(home, ".pharaoh", "claude-md-answer");
+	});
+
+	afterEach(() => {
+		rmSync(home, { recursive: true, force: true });
+	});
+
+	/** A prompt stand-in that gives `reply` and counts how often it was asked. */
+	const prompt = (reply: boolean | null) => {
+		const asked = { count: 0 };
+		const ask = async () => {
+			asked.count++;
+			return reply;
+		};
+		return { asked, ask };
+	};
+	const offer = (reply: boolean | null, terminal = true) => {
+		const p = prompt(reply);
+		return offerClaudeMdLine(p.ask, terminal, home).then((outcome) => ({ outcome, ...p.asked }));
+	};
+	const clean = () => uninstallClaudePlugin(home, NO_CLI.claude);
+
+	it("asks once and writes the block; a re-run asks nothing and changes nothing", async () => {
+		expect(await offer(true)).toEqual({ outcome: "added", count: 1 });
+		expect(readFileSync(claudeMd, "utf-8")).toBe(BLOCK);
+		expect((statSync(answer).mode & 0o777).toString(8)).toBe("600");
+
+		expect(await offer(true)).toEqual({ outcome: "current", count: 0 });
+		expect(readFileSync(claudeMd, "utf-8")).toBe(BLOCK);
+	});
+
+	it.each([
+		["ending in a newline", "# Mine\n\nKeep this.\n", `# Mine\n\nKeep this.\n${BLOCK}`],
+		[
+			"with no final newline",
+			"Keep this.",
+			`Keep this.\n${START.replace("start", "start+nl")}\n${LINE}\n<!-- pharaoh-mcp:end -->\n`,
+		],
+		["that is empty", "", BLOCK],
+	])("keeps the user's file %s, and --clean/--logout restore it byte for byte", async (_, mine, withBlock) => {
+		writeFileSync(claudeMd, mine);
+
+		expect((await offer(true)).outcome).toBe("added");
+		expect(readFileSync(claudeMd, "utf-8")).toBe(withBlock);
+
+		clean();
+		expect(readFileSync(claudeMd, "utf-8")).toBe(mine);
+		expect(existsSync(answer)).toBe(false);
+	});
+
+	it("replaces a stale block in place without asking, and its removal leaves the text around it", async () => {
+		writeFileSync(
+			claudeMd,
+			"above\n<!-- pharaoh-mcp:start (old) -->\nOld line.\n<!-- pharaoh-mcp:end -->\nbelow\n",
+		);
+
+		expect(await offer(false)).toEqual({ outcome: "updated", count: 0 });
+		expect(readFileSync(claudeMd, "utf-8")).toBe(
+			`above\n<!-- pharaoh-mcp:start (old) -->\n${LINE}\n<!-- pharaoh-mcp:end -->\nbelow\n`,
+		);
+
+		clean();
+		expect(readFileSync(claudeMd, "utf-8")).toBe("above\nbelow\n");
+	});
+
+	it("keeps the user's lines apart when they wrote below a block that added a newline", async () => {
+		writeFileSync(claudeMd, "Keep this.");
+		await offer(true);
+		appendFileSync(claudeMd, "Mine below.\n");
+
+		clean();
+		expect(readFileSync(claudeMd, "utf-8")).toBe("Keep this.\nMine below.\n");
+	});
+
+	it("reads the file again after the answer: an edit made meanwhile stays, a symlink swapped in is refused", async () => {
+		writeFileSync(claudeMd, "before\n");
+		const editWhileAsking = async () => {
+			appendFileSync(claudeMd, "meanwhile\n");
+			return true;
+		};
+		expect(await offerClaudeMdLine(editWhileAsking, true, home)).toBe("added");
+		expect(readFileSync(claudeMd, "utf-8")).toBe(`before\nmeanwhile\n${BLOCK}`);
+
+		clean();
+		const target = join(home, "elsewhere.md");
+		writeFileSync(target, "target\n");
+		const swapWhileAsking = async () => {
+			rmSync(claudeMd);
+			symlinkSync(target, claudeMd);
+			return true;
+		};
+		writeFileSync(claudeMd, "");
+		expect(await offerClaudeMdLine(swapWhileAsking, true, home)).toBe("kept");
+		expect(readFileSync(target, "utf-8")).toBe("target\n");
+	});
+
+	it.skipIf(process.getuid?.() === 0)(
+		"a write error never stops setup, --clean or --logout, and saves no answer",
+		async () => {
+			chmodSync(join(home, ".claude"), 0o555);
+			expect(await offer(true)).toEqual({ outcome: "failed", count: 1 });
+			expect(existsSync(answer)).toBe(false);
+			expect(describeClaudeMdOutcome("failed")).toContain(LINE);
+			chmodSync(join(home, ".claude"), 0o755);
+
+			expect(await offer(true)).toEqual({ outcome: "added", count: 1 });
+			chmodSync(claudeMd, 0o444);
+			expect(() => clean()).not.toThrow();
+			expect(readFileSync(claudeMd, "utf-8")).toBe(BLOCK);
+		},
+	);
+
+	it("says nothing when the user's own text already has the line", async () => {
+		writeFileSync(claudeMd, `My rules.\n${LINE}\n`);
+
+		expect(await offer(true)).toEqual({ outcome: "current", count: 0 });
+		clean();
+		expect(readFileSync(claudeMd, "utf-8")).toBe(`My rules.\n${LINE}\n`);
+	});
+
+	it("SC-7: never writes through a symlink, and leaves a broken block alone", async () => {
+		const target = join(home, "dotfiles.md");
+		writeFileSync(target, `mine\n${BLOCK}`);
+		symlinkSync(target, claudeMd);
+		expect(await offer(true)).toEqual({ outcome: "kept", count: 0 });
+		expect(describeClaudeMdOutcome("kept")).toContain(LINE);
+		clean();
+		expect(readFileSync(target, "utf-8")).toBe(`mine\n${BLOCK}`);
+
+		rmSync(claudeMd);
+		const END = "<!-- pharaoh-mcp:end -->\n";
+		for (const broken of [`${START}\nno end\n`, `${END}x\n${START}\n`, `${BLOCK}${BLOCK}`]) {
+			writeFileSync(claudeMd, broken);
+			expect(await offer(true)).toEqual({ outcome: "kept", count: 0 });
+			clean();
+			expect(readFileSync(claudeMd, "utf-8")).toBe(broken);
+		}
+
+		const dotfiles = join(home, "dotfiles-claude");
+		rmSync(join(home, ".claude"), { recursive: true });
+		mkdirSync(dotfiles);
+		symlinkSync(dotfiles, join(home, ".claude"));
+		expect(await offer(true)).toEqual({ outcome: "kept", count: 0 });
+		expect(existsSync(join(dotfiles, "CLAUDE.md"))).toBe(false);
+	});
+
+	it("writes nothing on a no, and never asks or suggests the line again", async () => {
+		expect(await offer(false)).toEqual({ outcome: "declined", count: 1 });
+		expect(existsSync(claudeMd)).toBe(false);
+
+		expect(await offer(true)).toEqual({ outcome: "answered", count: 0 });
+		expect(existsSync(claudeMd)).toBe(false);
+
+		symlinkSync(join(home, "elsewhere.md"), claudeMd);
+		expect(await offer(true)).toEqual({ outcome: "answered", count: 0 });
+	});
+
+	it("asks nothing and writes nothing without a terminal, on EOF, without ~/.claude, or on a proxy start", async () => {
+		expect(await offer(true, false)).toEqual({ outcome: "no-terminal", count: 0 });
+		expect(await offer(null)).toEqual({ outcome: "cancelled", count: 1 });
+		expect(existsSync(claudeMd) || existsSync(answer)).toBe(false);
+
+		runInstallSkills(home, NO_CLI);
+		expect(existsSync(claudeMd)).toBe(false);
+
+		rmSync(join(home, ".claude"), { recursive: true });
+		expect(await offer(true)).toEqual({ outcome: "no-claude", count: 0 });
+		expect(existsSync(join(home, ".claude"))).toBe(false);
+	});
+
+	it("askYesNo: Enter is yes, n is no, anything else asks again, EOF is no answer", async () => {
+		const reply = async (input: string, end = false) => {
+			const stdin = new PassThrough();
+			const answer = askYesNo("Add it? [Y/n] ", stdin, new PassThrough());
+			stdin.write(input);
+			if (end) stdin.end();
+			return answer;
+		};
+		expect(await reply("\n")).toBe(true);
+		expect(await reply("N\n")).toBe(false);
+		expect(await reply("maybe\n", true)).toBe(null);
+	});
+
+	it("askYesNo on a terminal drops an Enter pressed before the question showed", async () => {
+		const tty = Object.assign(new PassThrough(), { isTTY: true });
+		tty.write("\n");
+		const answer = askYesNo("Add it? [Y/n] ", tty, new PassThrough());
+		setTimeout(() => tty.write("n\n"), 150);
+		expect(await answer).toBe(false);
 	});
 });
 

@@ -2,6 +2,7 @@
  * Pure helper functions for the mcp-proxy CLI — no side effects on import.
  * Separated from index.ts so tests can import without triggering main().
  */
+import { createInterface } from "node:readline/promises";
 import type { TokenResponse } from "./auth.js";
 import type { Credentials } from "./credentials.js";
 import { isExpired } from "./credentials.js";
@@ -14,6 +15,57 @@ export const NPX_COMMAND = "npx @pharaoh-so/mcp";
 /** Write one or more lines to stderr. */
 export function printLines(...lines: string[]): void {
 	process.stderr.write(`${lines.join("\n")}\n`);
+}
+
+/** How long to read and drop input that was typed before a question showed. */
+const TYPE_AHEAD_MS = 50;
+
+/**
+ * Ask a yes/no question that defaults to yes: Enter, `y` or `yes` is yes; `n`
+ * or `no` is no; anything else asks again. Ctrl-C exits (130). On a terminal,
+ * keys pressed before the question showed (an Enter while sign-in waited) are
+ * dropped, so only a key pressed after reading it answers.
+ *
+ * @param question - The prompt, ending in something like `[Y/n] `.
+ * @param input - Where the answer is read (defaults to stdin).
+ * @param output - Where the prompt is written (defaults to stderr, like every other line).
+ * @returns The answer, or null when input ended before one.
+ */
+export async function askYesNo(
+	question: string,
+	input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
+	output: NodeJS.WritableStream = process.stderr,
+): Promise<boolean | null> {
+	if (input.isTTY) await dropTypedAhead(input);
+	const rl = createInterface({ input, output });
+	rl.on("SIGINT", () => {
+		output.write("\n");
+		process.exit(130);
+	});
+	rl.setPrompt(question);
+	rl.prompt();
+	try {
+		// The iterator ends on EOF; rl.question never settles then.
+		for await (const reply of rl) {
+			const answer = reply.trim().toLowerCase();
+			if (answer === "" || answer === "y" || answer === "yes") return true;
+			if (answer === "n" || answer === "no") return false;
+			rl.prompt();
+		}
+		return null;
+	} finally {
+		rl.close();
+	}
+}
+
+/** Read and drop the input already waiting, in raw mode so a half-typed line goes too. */
+async function dropTypedAhead(input: NodeJS.ReadableStream): Promise<void> {
+	(input as Partial<NodeJS.ReadStream>).setRawMode?.(true);
+	const drop = () => {};
+	input.on("data", drop);
+	await new Promise((resolve) => setTimeout(resolve, TYPE_AHEAD_MS));
+	input.off("data", drop);
+	input.pause();
 }
 
 /** Parse CLI arguments. */
@@ -66,8 +118,8 @@ export function printUsage(): void {
 		"",
 		"Options:",
 		"  --server <url>    Pharaoh server URL (default: https://mcp.pharaoh.so)",
-		"  --logout          Clear credentials, MCP config and the Claude Code plugin, then exit",
-		"  --clean           Remove Pharaoh's MCP entries and plugin from Claude Code config",
+		"  --logout          Clear credentials, MCP config, the Claude Code plugin and the CLAUDE.md line, then exit",
+		"  --clean           Remove Pharaoh's MCP entries, plugin and CLAUDE.md line from Claude Code",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --version, -v     Print the version",
 		"  --help, -h        Show this help",

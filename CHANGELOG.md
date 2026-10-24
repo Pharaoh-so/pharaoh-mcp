@@ -5,6 +5,16 @@ All notable changes to `@pharaoh-so/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.54] - 2026-10-24
+
+### Added
+- The interactive setup (`npx @pharaoh-so/mcp` in a terminal) asks once whether to add one line to `~/.claude/CLAUDE.md`: "In repos Pharaoh has mapped, before searching or reading files, ask Pharaoh where the relevant code is, what calls it, and whether what you need already exists." Enter means yes. In Pharaoh's adoption benchmark, Claude Code called Pharaoh first when this line was in a CLAUDE.md, and rarely when the same sentence came from the server instructions or a plugin hook.
+- The line sits between `<!-- pharaoh-mcp:start … -->` and `<!-- pharaoh-mcp:end -->` markers. Setup appends that block or replaces the line inside it, and nothing else in the file changes. A symlinked file is left alone, and a proxy start (Claude Code launching the server) never asks or writes. Your answer is saved in `~/.pharaoh/claude-md-answer`, so a no stands.
+
+### Changed
+- `--clean` and `--logout` also remove that block, leaving the rest of the file byte for byte, and delete the saved answer so the next setup asks again.
+- `--logout` deletes the saved credentials first, so a cleanup step that fails can't leave them behind.
+
 ## [0.3.53] - 2026-10-23
 
 ### Changed

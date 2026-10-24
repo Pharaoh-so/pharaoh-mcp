@@ -27,6 +27,7 @@ import {
 } from "./credentials.js";
 import { createGateway } from "./gateway.js";
 import {
+	askYesNo,
 	formatTtl,
 	parseArgs,
 	printLines,
@@ -36,8 +37,11 @@ import {
 } from "./helpers.js";
 import {
 	allowReadTools,
+	CLAUDE_MD_QUESTION,
 	describeAllowReadTools,
+	describeClaudeMdOutcome,
 	formatKeptCommands,
+	offerClaudeMdLine,
 	runInstallSkills,
 } from "./install-skills.js";
 import { handleRefreshFailure, tryMidSessionRefresh } from "./lifecycle.js";
@@ -95,7 +99,9 @@ async function main(): Promise<void> {
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
 		cleanSlate();
 		uninstallClaudePlugin();
-		printLines("Pharaoh: cleaned all MCP entries and the plugin from Claude Code config");
+		printLines(
+			"Pharaoh: removed its MCP entries, plugin and ~/.claude/CLAUDE.md line from Claude Code",
+		);
 		process.exit(0);
 	}
 
@@ -104,10 +110,13 @@ async function main(): Promise<void> {
 	if (logout) {
 		const { cleanSlate } = await import("./setup.js");
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
+		// Credentials first: a cleanup step that fails must never leave the tokens behind.
+		deleteCredentials();
 		cleanSlate();
 		uninstallClaudePlugin();
-		deleteCredentials();
-		printLines("Pharaoh: credentials, MCP config and the Claude Code plugin cleared");
+		printLines(
+			"Pharaoh: credentials, MCP config, the Claude Code plugin and the ~/.claude/CLAUDE.md line cleared",
+		);
 		process.exit(0);
 	}
 
@@ -166,6 +175,16 @@ async function main(): Promise<void> {
 		printLines(describeAllowReadTools(allowReadTools()));
 		const kept = formatKeptCommands(keptCommands);
 		if (kept) printLines(kept);
+
+		// The one line agents act on (bench #1305) goes in the user's own
+		// ~/.claude/CLAUDE.md, so it's asked about once, here, never on a start.
+		const claudeMd = describeClaudeMdOutcome(
+			await offerClaudeMdLine(
+				() => askYesNo(CLAUDE_MD_QUESTION),
+				Boolean(process.stdin.isTTY && process.stderr.isTTY),
+			),
+		);
+		if (claudeMd) printLines(claudeMd);
 
 		// The registration is pinned to this version; upgrading is a deliberate
 		// re-run. Interactive only, and quiet when the registry can't be reached.
