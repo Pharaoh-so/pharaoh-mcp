@@ -6,60 +6,117 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Pharaoh Trace</title>
   <style>
-    :root { color-scheme:dark; --bg:#171813; --text:#e5e6d8; --muted:#aaa995; --gold:#d4ad51; --yellow:#edc54c; --rule:#414236; --hover:#22251c; --error:#e3a18d; font:400 12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace; background:var(--bg); color:var(--text); }
-    :root[data-theme="light"] { color-scheme:light; --bg:#faf8f1; --text:#292b20; --muted:#656553; --gold:#866315; --yellow:#926700; --rule:#d8d4c5; --hover:#efede2; --error:#a13929; }
+    :root { color-scheme:dark; --stone:#2a2520; --rule:#3a352e; --track:#342e28; --hover:#332d27; --gold:#d4a843; --papyrus:#e8dcc8; --text:#c4b99a; --muted:#9d927b; --red:#f87171; --amber:#f0c855; --green:#4ade80;
+      --s0:#d4a843; --s1:#b08a3a; --s2:#8c6e31; --s3:#6e5728; --s4:#574522; --s-muted:#5f574a; --s-warning:#f0c855; --s-error:#ef4444;
+      --sans:"DM Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace; }
+    :root[data-theme="light"] { color-scheme:light; --stone:#f7f3ea; --rule:#e2d8c4; --track:#ece4d3; --hover:#efe8da; --gold:#946c0f; --papyrus:#2a2520; --text:#4a4235; --muted:#71675a; --red:#b42318; --amber:#9a5b00; --green:#15803d;
+      --s0:#b08515; --s1:#c9a24a; --s2:#d9bb72; --s3:#e6cf98; --s4:#efdfb8; --s-muted:#cfc4ad; --s-warning:#e0a526; --s-error:#d93f2f; }
     * { box-sizing:border-box; }
-    body { margin:0; min-width:0; }
-    #trace { border-left:2px solid var(--gold); padding:9px 14px 8px; min-width:0; }
-    header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:3px 14px; color:var(--muted); font-size:10px; }
-    #tool { overflow-wrap:anywhere; min-width:0; }
-    #status { white-space:nowrap; }
-    #status[data-state="ok"] { color:#4ade80; }
-    #status[data-state="pending"],.filled { color:var(--yellow); }
-    #status[data-state="error"] { color:var(--error); }
-    #trace[data-pending="true"] #status { animation:pending 1.4s ease-in-out infinite alternate; }
-    @keyframes pending { from { opacity:.55; } to { opacity:1; } }
-    #repo { font-size:14px; margin:4px 0 0; overflow-wrap:anywhere; }
-    #provenance { color:var(--muted); font-size:10px; overflow-wrap:anywhere; margin-top:2px; }
-    h1 { font-size:14px; line-height:1.5; font-weight:500; margin:6px 0 0; overflow-wrap:anywhere; }
-    #summary { margin:2px 0 0; color:var(--muted); overflow-wrap:anywhere; }
-    ul { list-style:none; padding:0; margin:4px 0 0; min-width:0; }
-    li { min-width:0; }
-    summary,.row { display:grid; grid-template-columns:18px minmax(0,1fr) auto; gap:6px; align-items:baseline; padding:2px 0; min-width:0; }
-    summary { list-style:none; min-height:24px; border-bottom:1px solid var(--rule); cursor:pointer; }
-    summary::-webkit-details-marker { display:none; }
-    summary:hover { background:var(--hover); }
-    summary:focus-visible { outline:2px solid var(--gold); outline-offset:2px; }
-    .branch { color:var(--gold); white-space:pre; }
-    details>summary .branch::after { content:"+"; }
-    details[open]>summary .branch::after { content:"−"; }
-    .label,.detail,.badge { overflow-wrap:anywhere; white-space:pre-wrap; min-width:0; unicode-bidi:plaintext; }
-    details[open]>summary .label { color:var(--gold); }
-    .detail { display:block; color:var(--muted); font-size:10px; margin-top:1px; }
-    .badge { color:var(--muted); font-size:10px; text-align:right; }
-    .badge[data-state="ok"] { color:#4ade80; }
-    .badge[data-state="warning"],.badge[data-state="pending"] { color:var(--yellow); }
-    .badge[data-state="error"] { color:var(--error); }
-    .children { margin:0 0 3px 17px; border-left:1px solid var(--rule); padding-left:9px; }
-    .meter { display:block; color:var(--muted); font-size:11px; margin:2px 0; overflow-wrap:anywhere; }
-    #notes { border-top:1px solid var(--rule); margin-top:6px; padding-top:5px; color:var(--muted); font-size:10px; }
-    #notes p { margin:2px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
-    #fallback { font:inherit; font-size:11px; margin:6px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
+    html,body { margin:0; background:transparent; min-width:0; }
+    .label,.detail,.badge { overflow-wrap:anywhere; min-width:0; unicode-bidi:plaintext; }
+    .mark-s { font:600 12px var(--mono); width:1ch; }
+    #trace { background:var(--stone); color:var(--text); border:1px solid var(--rule); border-radius:6px; padding:9px 12px; font:13px/1.45 var(--sans); min-width:0; }
+    .head { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 10px; }
+    .mark { color:var(--gold); font-size:14px; line-height:1; }
+    .headline { flex:1 1 16em; margin:0; min-width:0; overflow-wrap:anywhere; }
+    #kind { color:var(--muted); }
+    #target { color:var(--papyrus); font:600 13px/1.45 var(--mono); }
+    #target,.legend > span,.rows .label { unicode-bidi:isolate; }
+    #title { color:var(--papyrus); font-weight:600; }
+    #summary { margin-left:8px; }
+    .num { color:var(--gold); font:600 12.5px var(--mono); }
+    .meta { margin-left:auto; display:flex; gap:10px; white-space:nowrap; font-size:12px; }
+    #verdict[data-state="error"] { color:var(--red); } #verdict[data-state="warning"] { color:var(--amber); } #verdict[data-state="ok"] { color:var(--green); }
+    #sha { color:var(--muted); font:11.5px var(--mono); }
+    .bar { position:relative; display:flex; gap:2px; height:6px; margin:8px 0 0; border-radius:3px; overflow:hidden; background:var(--track); }
+    .bar i,.mini i { display:block; flex:0 1 0; min-width:0; }
+    .bar i[data-shown] { min-width:3px; }
+    .s0 { background:var(--s0); } .s1 { background:var(--s1); } .s2 { background:var(--s2); } .s3 { background:var(--s3); } .s4 { background:var(--s4); }
+    .muted { background:var(--s-muted); } .warning { background:var(--s-warning); } .error { background:var(--s-error); }
+    .foot { display:flex; align-items:baseline; gap:4px 14px; margin-top:6px; flex-wrap:wrap; }
+    .legend { display:flex; flex-wrap:wrap; gap:2px 14px; margin:0; color:var(--muted); font-size:12px; min-width:0; flex:1 1 auto; }
+    #trace[data-reveal] .legend { opacity:0; }
+    .legend b { color:var(--text); font:500 11.5px var(--mono); margin-left:4px; }
+    .sw { display:inline-block; width:8px; height:8px; border-radius:1px; margin-right:5px; }
+    .toggle { margin-left:auto; display:flex; align-items:baseline; gap:4px; border:0; background:none; padding:2px 0; color:var(--gold); font:12px var(--sans); cursor:pointer; white-space:nowrap; }
+    .toggle:hover { color:var(--papyrus); }
+    .toggle:focus-visible,summary:focus-visible { outline:2px solid var(--gold); outline-offset:2px; border-radius:2px; }
+    .chev { display:inline-block; font-size:10px; }
+    .toggle[aria-expanded="true"] .chev { transform:rotate(90deg); }
+    .caveat { margin:6px 0 0; color:var(--amber); font-size:12px; overflow-wrap:anywhere; }
+    .caveat span + span::before { content:" · "; color:var(--muted); }
+    .rows { list-style:none; margin:4px 0 0; padding:0; }
+    .rows li { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; padding:4px 0 5px; border-top:1px solid var(--rule); min-width:0; }
+    .rows li:first-child { border-top:0; }
+    .rows .kind { color:var(--muted); font-size:12.5px; }
+    .rows .label { color:var(--papyrus); font:12.5px var(--mono); }
+    .rows .prose { color:var(--text); font:12.5px var(--sans); }
+    .rows .detail { color:var(--text); font-size:12.5px; }
+    .rows .end { margin-left:auto; font-size:12px; white-space:nowrap; }
+    .rows .more { color:var(--muted); font-size:12px; }
+    .rows .mini { display:flex; gap:1px; flex:1 0 100%; height:3px; margin-top:3px; border-radius:2px; overflow:hidden; background:var(--track); }
+    [data-state="ok"] > .mark-s { color:var(--green); } [data-state="warning"] > .mark-s, [data-state="pending"] > .mark-s { color:var(--amber); } [data-state="error"] > .mark-s, .end[data-state="error"] { color:var(--red); } .end[data-state="warning"] { color:var(--amber); }
+    .drawer { display:grid; grid-template-rows:0fr; }
+    .drawer[data-open] { grid-template-rows:1fr; }
+    .drawer-inner { overflow:hidden; min-height:0; }
+    .drawer[data-open] .drawer-inner { border-top:1px solid var(--rule); margin-top:8px; padding-top:4px; }
+    ul.tree,.tree ul { list-style:none; margin:0; padding:0; }
+    .tree ul { margin:0 0 4px 6px; padding-left:10px; border-left:1px solid var(--rule); }
+    .tree summary,.leaf { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:baseline; padding:3px 0; font-size:12.5px; min-width:0; }
+    .tree summary { list-style:none; cursor:pointer; color:var(--text); }
+    .tree summary::-webkit-details-marker { display:none; }
+    .tree summary:hover { background:var(--hover); }
+    .tree summary .label::before { content:"▸"; display:inline-block; color:var(--gold); font-size:10px; width:12px; }
+    .tree details[open] > summary .label::before { transform:rotate(90deg); }
+    .tree details[open] > summary .label { color:var(--gold); }
+    .leaf .label { color:var(--papyrus); font:12px var(--mono); }
+    .tree > li > .leaf { padding-left:12px; }
+    .tree > li > .leaf .label { color:var(--text); font:12.5px var(--sans); }
+    .tree .label .detail { color:var(--muted); font:11px var(--mono); margin-left:8px; }
+    .tree .label .caveat { color:var(--amber); font:11.5px var(--sans); margin:0 0 0 8px; }
+    .badge { color:var(--muted); font:11.5px var(--mono); text-align:right; white-space:nowrap; }
+    .badge[data-state="ok"] { color:var(--green); } .badge[data-state="warning"],.badge[data-state="pending"] { color:var(--amber); } .badge[data-state="error"] { color:var(--red); }
+    .meter { display:block; height:3px; margin-top:3px; border-radius:2px; background:var(--track); max-width:240px; }
+    .meter i { display:block; height:100%; border-radius:2px; background:var(--gold); }
+    .notes,.provenance { color:var(--muted); font-size:11.5px; margin:6px 0 2px; }
+    .notes p { margin:2px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
+    #fallback { font:11.5px/1.5 var(--mono); color:var(--text); margin:6px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
+    @media(max-width:400px) { #trace { padding:8px 10px; } #summary { margin-left:0; } #summary:not([hidden]) { display:block; } .tree summary,.leaf { grid-template-columns:minmax(0,1fr); gap:0; } .badge { text-align:left; } }
+    /* Motion only for people who have not asked to reduce it. */
+    @media(prefers-reduced-motion:no-preference) {
+      .bar i,.mini i { transition:flex-grow .7s cubic-bezier(.22,.8,.24,1); }
+      .legend { transition:opacity .4s ease .2s; }
+      .chev { transition:transform .3s ease; }
+      .drawer { transition:grid-template-rows .3s ease; }
+      .tree summary .label::before { transition:transform .2s ease; }
+      #trace[data-state="pending"] .bar::after,#trace[data-state="waiting"] .bar::after { content:""; position:absolute; top:0; bottom:0; left:0; width:35%; background:linear-gradient(90deg,transparent,var(--gold),transparent); opacity:.55; animation:sweep 1.3s ease-in-out infinite; }
+      @keyframes sweep { from { transform:translateX(-100%); } to { transform:translateX(290%); } }
+    }
     [hidden] { display:none; }
-    @media(max-width:400px) { #trace { padding:8px 10px 7px; } summary,.row { grid-template-columns:15px minmax(0,1fr); gap:4px; } .badge { grid-column:2; text-align:left; } .children { margin-left:9px; padding-left:7px; } }
-    @media(prefers-reduced-motion:reduce) { #trace[data-pending="true"] #status { animation:none; } }
   </style>
 </head>
 <body>
-  <main id="trace" data-pending="false">
-    <header><span id="tool">Pharaoh result</span><span id="status" role="status" aria-live="polite" aria-atomic="true">waiting</span></header>
-    <div id="repo" hidden></div>
-    <div id="provenance" hidden></div>
-    <h1 id="title">Waiting for a tool result</h1>
-    <p id="summary" hidden></p>
-    <ul id="tree" aria-label="Result evidence" hidden></ul>
-    <pre id="fallback">The tool's text response remains available in chat.</pre>
-    <div id="notes" hidden></div>
+  <main id="trace" data-state="waiting">
+    <div class="head">
+      <span class="mark" aria-hidden="true">☥</span>
+      <p class="headline"><span id="kind"></span><span id="target"></span><span id="title">Pharaoh</span><span id="summary" role="status" aria-live="polite">Waiting for the tool</span></p>
+      <span id="meta" class="meta"><span id="verdict" hidden></span><span id="sha" hidden></span></span>
+    </div>
+    <div id="bar" class="bar" aria-hidden="true"></div>
+    <div id="foot" class="foot">
+      <p id="legend" class="legend"></p>
+      <button id="toggle" class="toggle" type="button" aria-expanded="false" aria-controls="drawer" hidden><span id="toggle-label">Details</span><span class="chev" aria-hidden="true">▸</span></button>
+    </div>
+    <p id="caveat" class="caveat" hidden></p>
+    <ul id="rows" class="rows" hidden></ul>
+    <div id="drawer" class="drawer" inert>
+      <div class="drawer-inner">
+        <ul id="tree" class="tree" aria-label="Result evidence"></ul>
+        <pre id="fallback" hidden></pre>
+        <div id="notes" class="notes" hidden></div>
+        <p id="provenance" class="provenance" hidden></p>
+      </div>
+    </div>
   </main>
   <script>
     (() => {
@@ -67,11 +124,18 @@
       const META_KEY = "so.pharaoh/trace";
       const PROTOCOL_VERSION = "2026-01-26";
       // Kept in parity with TRACE_LIMITS in trace-contract.ts by the resource test.
-      const LIMITS = { bytes:65536, nodes:120, depth:6, label:512, detail:2048, badge:128, summary:1024, notes:16, note:1024, repo:256 };
+      const LIMITS = { bytes:65536, nodes:120, depth:6, label:512, detail:2048, badge:128, summary:1024, notes:16, note:1024, repo:256, segments:8 };
       const MAX_TEXT = 32768;
+      const MAX_ROWS = 5;
+      const TONES = ["warning","error","muted"];
+      const STATES = ["ok","pending","warning","error"];
+      // What each tool is doing while it runs, shown with the argument it targets.
+      const VERBS = { get_blast_radius:"Tracing callers of", get_unused_code:"Checking reachability in", search_functions:"Searching for", get_codebase_map:"Mapping", get_module_context:"Reading module", pharaoh_recon:"Running recon on", pharaoh_account:"Checking account" };
       const root = document.getElementById("trace");
-      const fields = Object.fromEntries(["tool","status","repo","provenance","title","summary","tree","fallback","notes"].map(id => [id,document.getElementById(id)]));
+      const fields = Object.fromEntries(["kind","target","title","summary","meta","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","drawer","tree","fallback","notes","provenance"].map(id => [id,document.getElementById(id)]));
+      const compact = new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
       const initId = "pharaoh-trace-initialize";
+      let tool = "";
       let ready = false;
       let closed = false;
       let cancelled = false;
@@ -81,37 +145,76 @@
       const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
       const string = (value,max) => typeof value === "string" && value.length <= max;
       const send = message => { if (!closed) window.parent.postMessage({jsonrpc:"2.0",...message},"*"); };
-      function status(label,state) {
-        fields.status.textContent = label;
-        fields.status.dataset.state = state;
-        root.dataset.pending = String(state === "pending");
+      function element(tag,className,text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      }
+      // Counts read at a glance: digit runs become gold monospace spans, everything else stays text.
+      function rich(target,text) {
+        target.replaceChildren();
+        for (const part of String(text || "").split(/(\b\d[\d,.]*\b)/)) {
+          if (part) target.append(/^\d/.test(part) ? element("span","num",part) : part);
+        }
       }
       function display(field,text) {
         fields[field].textContent = text || "";
         fields[field].hidden = !text;
       }
-      function notes(items) {
-        fields.notes.replaceChildren();
-        for (const text of items) {
-          const paragraph = document.createElement("p");
-          paragraph.textContent = text;
-          fields.notes.append(paragraph);
-        }
-        fields.notes.hidden = items.length === 0;
+      // "Impact: attachTraceView" reads as a muted kind and a monospace target.
+      const splitTitle = title => /^([^:]{1,40}): (.+)$/.exec(title);
+      function headline(title,summary) {
+        const split = splitTitle(title);
+        display("kind",split ? `${split[1]} ` : "");
+        display("target",split ? split[2] : "");
+        display("title",split ? "" : title);
+        rich(fields.summary,summary);
+        fields.summary.hidden = !summary;
+      }
+      // The toggle ends the legend line, or the headline when there is no legend.
+      function place(withLegend) {
+        (withLegend ? fields.foot : fields.meta).append(fields.toggle);
+        fields.foot.hidden = !withLegend;
+      }
+      function setOpen(open) {
+        fields.drawer.toggleAttribute("data-open",open);
+        fields.drawer.toggleAttribute("inert",!open);
+        fields.toggle.setAttribute("aria-expanded",String(open));
+        fields["toggle-label"].textContent = open ? "Hide" : "Details";
       }
       function clearResult() {
-        fields.tree.replaceChildren();
-        fields.tree.hidden = true;
-        display("summary","");
-        display("provenance","");
-        notes([]);
+        setOpen(false);
+        for (const field of ["bar","rows","legend","tree","notes"]) fields[field].replaceChildren();
+        for (const field of ["verdict","sha","caveat","provenance","fallback"]) display(field,"");
+        delete fields.verdict.dataset.state;
+        fields.sha.title = "";
+        fields.bar.hidden = true;
+        fields.rows.hidden = true;
+        fields.notes.hidden = true;
+        fields.toggle.hidden = true;
+      }
+      function notes(items) {
+        for (const text of items) fields.notes.append(element("p","",text));
+        fields.notes.hidden = items.length === 0;
+      }
+      function caveats(items) {
+        fields.caveat.replaceChildren(...items.map(text => element("span","",text)));
+        fields.caveat.hidden = items.length === 0;
       }
       function fallback(title,text,notice,state="neutral") {
         clearResult();
-        fields.title.textContent = title;
+        root.dataset.state = state === "error" ? "error" : "ready";
+        const first = text.split("\n").find(line => line.trim()) || "";
+        headline(title,first.length > 160 ? `${first.slice(0,159)}…` : first);
         display("fallback",text);
-        status(state === "error" ? "[!] error" : state === "cancelled" ? "[||] cancelled" : "response received",state);
+        if (state === "error" || state === "cancelled") {
+          fields.verdict.dataset.state = state === "error" ? "error" : "warning";
+          display("verdict",state === "error" ? "Failed" : "Cancelled");
+        }
         if (notice) notes([notice]);
+        fields.toggle.hidden = !text;
+        place(false);
       }
       function readableText(result) {
         if (!record(result) || !Array.isArray(result.content)) return {text:"No readable text was returned. Read the tool response in chat.",omitted:false};
@@ -129,12 +232,20 @@
         }
         return {text:text || "No readable text was returned. Read the tool response in chat.",omitted};
       }
+      function validGlance(glance) {
+        if (glance === undefined) return true;
+        if (!record(glance)) return false;
+        if (glance.segments !== undefined && (!Array.isArray(glance.segments) || glance.segments.length > LIMITS.segments || !glance.segments.every(s => record(s) && string(s.label,LIMITS.badge) && Number.isFinite(s.value) && s.value >= 0 && (s.tone === undefined || TONES.includes(s.tone))))) return false;
+        if (glance.verdict !== undefined && (!record(glance.verdict) || !string(glance.verdict.label,LIMITS.badge) || (glance.verdict.status !== undefined && !["ok","warning","error"].includes(glance.verdict.status)))) return false;
+        return glance.caveat === undefined || string(glance.caveat,LIMITS.note);
+      }
       function validView(view) {
         try {
           if (!record(view) || view.version !== 1 || !string(view.title,LIMITS.label) || !view.title.trim() || !Array.isArray(view.nodes)) return false;
           if (new TextEncoder().encode(JSON.stringify(view)).byteLength > LIMITS.bytes) return false;
           if (view.repo !== undefined && !string(view.repo,LIMITS.repo)) return false;
           if (view.summary !== undefined && !string(view.summary,LIMITS.summary)) return false;
+          if (!validGlance(view.glance)) return false;
           if (view.notes !== undefined && (!Array.isArray(view.notes) || view.notes.length > LIMITS.notes || !view.notes.every(note => string(note,LIMITS.note)))) return false;
           if (view.freshness !== undefined) {
             const value = view.freshness;
@@ -145,71 +256,145 @@
             if (++count > LIMITS.nodes || depth > LIMITS.depth || !record(node) || !string(node.label,LIMITS.label) || !node.label.trim()) return false;
             if (node.detail !== undefined && !string(node.detail,LIMITS.detail)) return false;
             if (node.badge !== undefined && !string(node.badge,LIMITS.badge)) return false;
-            if (node.status !== undefined && !["ok","pending","warning","error"].includes(node.status)) return false;
+            if (node.status !== undefined && !STATES.includes(node.status)) return false;
             if (node.meter !== undefined && (!record(node.meter) || !Number.isFinite(node.meter.value) || !Number.isFinite(node.meter.total) || node.meter.total <= 0 || node.meter.value < 0 || node.meter.value > node.meter.total)) return false;
+            if (!validGlance(node.glance)) return false;
             return node.children === undefined || (Array.isArray(node.children) && node.children.every(child => visit(child,depth + 1)));
           };
           return view.nodes.every(node => visit(node,1));
         } catch { return false; }
       }
-      function element(tag,className,text) {
-        const node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
+      // Segments start empty and grow to their share once painted: the one motion on arrival.
+      function segments(target,items) {
+        const total = items.reduce((sum,item) => sum + item.value,0);
+        if (!total) return [];
+        let shade = 0;
+        return items.filter(item => item.value > 0).map((item,index) => {
+          const slice = element("i",item.tone || `s${Math.min(shade++,4)}`);
+          slice.style.transitionDelay = `${index * 70}ms`;
+          slice.dataset.share = String(item.value / total);
+          target.append(slice);
+          return slice;
+        });
       }
-      function renderNode(node,last,open=false) {
+      function grow(slices) {
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          for (const slice of slices) { slice.style.flexGrow = slice.dataset.share; slice.dataset.shown = ""; }
+          delete root.dataset.reveal;
+        }));
+      }
+      function legend(items) {
+        let shade = 0;
+        for (const item of items.filter(item => item.value > 0)) {
+          const entry = element("span");
+          entry.append(element("span",`sw ${item.tone || `s${Math.min(shade++,4)}`}`),item.label,element("b","",compact.format(item.value)));
+          fields.legend.append(entry);
+        }
+      }
+      function verdict(target,value) {
+        if (!value) return;
+        target.textContent = value.label;
+        if (value.status) target.dataset.state = value.status;
+        target.hidden = false;
+      }
+      // Sections (recon) and status lines (states, named checks) stay visible; groups open on demand.
+      function rowFor(node,slices) {
+        const item = element("li");
+        if (node.status) {
+          item.dataset.state = node.status;
+          item.append(element("span","mark-s",{ok:"✓",pending:"…",warning:"!",error:"×"}[node.status]));
+        }
+        const split = splitTitle(node.label);
+        if (split) item.append(element("span","kind",split[1]));
+        // Names read in monospace; sentences (state messages) read as prose.
+        item.append(element("span",split || !/\s/.test(node.label) ? "label" : "label prose",split ? split[2] : node.label));
+        if (node.detail) { const detail = element("span","detail"); rich(detail,node.detail); item.append(detail); }
+        const end = element("span","end",node.badge || "");
+        end.hidden = !node.badge;
+        if (node.glance?.verdict) { end.hidden = true; verdict(end,node.glance.verdict); }
+        item.append(end);
+        if (node.glance?.caveat) item.append(element("span","detail caveat",node.glance.caveat));
+        if (node.glance?.segments?.length) {
+          const mini = element("span","mini");
+          mini.setAttribute("aria-hidden","true");
+          slices.push(...segments(mini,node.glance.segments));
+          item.append(mini);
+        }
+        return item;
+      }
+      function renderNode(node) {
         const item = element("li");
         const group = Array.isArray(node.children) && node.children.length > 0;
-        const container = group ? element("details") : item;
-        if (group && open) container.open = true;
-        const row = element(group ? "summary" : "div",group ? "" : "row");
-        const branch = element("span","branch",group ? "" : last ? "└─" : "├─");
-        branch.setAttribute("aria-hidden","true");
+        const row = element(group ? "summary" : "div",group ? "" : "leaf");
         const label = element("span","label",node.label);
         if (node.detail) label.append(element("span","detail",node.detail));
-        const symbol = {ok:"[ok]",pending:"[...]",warning:"[!]",error:"[!]"}[node.status] || "";
-        const badge = element("span","badge",[symbol,node.badge].filter(Boolean).join(" "));
-        if (node.status) badge.dataset.state = node.status;
-        row.append(branch,label,badge);
-        container.append(row);
         if (node.meter) {
-          const filled = Math.round(node.meter.value / node.meter.total * 12);
           const meter = element("span","meter");
-          meter.append("[",element("span","filled","#".repeat(filled)),`${".".repeat(12-filled)}] ${node.meter.value} / ${node.meter.total}`);
+          meter.title = `${node.meter.value} / ${node.meter.total}`;
+          const fill = element("i");
+          fill.style.width = `${Math.max(1,Math.round(node.meter.value / node.meter.total * 100))}%`;
+          meter.append(fill);
           label.append(meter);
         }
-        if (group) {
-          const children = element("ul","children");
-          node.children.forEach((child,index) => { children.append(renderNode(child,index === node.children.length-1)); });
-          container.append(children);
-          item.append(container);
-        }
+        if (node.glance?.caveat) label.append(element("span","caveat",node.glance.caveat));
+        const symbol = {ok:"✓",pending:"…",warning:"!",error:"×"}[node.status] || "";
+        const badge = element("span","badge",[symbol,node.badge || node.glance?.verdict?.label].filter(Boolean).join(" "));
+        const state = node.status || node.glance?.verdict?.status;
+        if (state) badge.dataset.state = state;
+        row.append(label,badge);
+        if (!group) { item.append(row); return item; }
+        const details = element("details");
+        const children = element("ul");
+        for (const child of node.children) children.append(renderNode(child));
+        details.append(row,children);
+        item.append(details);
         return item;
       }
       function renderView(view) {
         clearResult();
-        fields.title.textContent = view.title;
-        display("repo",view.repo);
-        display("summary",view.summary);
-        display("fallback","");
-        if (view.freshness) {
-          const freshness = view.freshness;
-          display("provenance",[freshness.mappedCommit ? `mapped ${freshness.mappedCommit}` : "mapped commit unknown",freshness.lastAnalyzed ? `as of ${freshness.lastAnalyzed}` : "map time unknown",`status: ${freshness.status}`].join(" · "));
+        cancelled = false;
+        root.dataset.state = "ready";
+        root.dataset.reveal = "";
+        const glance = view.glance || {};
+        headline(view.title,view.summary);
+        verdict(fields.verdict,glance.verdict);
+        const freshness = view.freshness;
+        if (freshness?.mappedCommit) {
+          display("sha",`@${/^[0-9a-f]{7,}$/i.test(freshness.mappedCommit) ? freshness.mappedCommit.slice(0,7) : freshness.mappedCommit.slice(0,12)}`);
+          fields.sha.title = `Mapped ${freshness.mappedCommit}${freshness.lastAnalyzed ? ` as of ${freshness.lastAnalyzed}` : ""}`;
         }
-        const firstGroup = view.nodes.findIndex(node => node.children?.length);
-        view.nodes.forEach((node,index) => { fields.tree.append(renderNode(node,index === view.nodes.length-1,index === firstGroup)); });
-        fields.tree.hidden = view.nodes.length === 0;
+        if (freshness) display("provenance",[freshness.mappedCommit ? `Mapped ${freshness.mappedCommit}` : "Mapped commit unknown",freshness.lastAnalyzed ? `as of ${freshness.lastAnalyzed}` : "map time unknown",`status: ${freshness.status}`].join(" · "));
+        caveats([glance.caveat,freshness?.status === "stale" ? "Map is behind the latest push" : ""].filter(Boolean));
+        const slices = segments(fields.bar,glance.segments || []);
+        fields.bar.hidden = slices.length === 0;
+        legend(glance.segments || []);
+        // Up to MAX_ROWS rows, warnings and verdicts first, shown in their original order.
+        const candidates = view.nodes.filter(node => node.glance || node.status);
+        const urgent = node => node.status === "error" || node.status === "warning" || node.glance?.verdict || node.glance?.caveat;
+        const chosen = new Set([...new Set([...candidates.filter(urgent),...candidates])].slice(0,MAX_ROWS));
+        const visible = candidates.filter(node => chosen.has(node));
+        for (const node of visible) fields.rows.append(rowFor(node,slices));
+        if (candidates.length > visible.length) fields.rows.append(element("li","more",`+${candidates.length - visible.length} more in Details`));
+        fields.rows.hidden = visible.length === 0;
+        for (const node of view.nodes) if (!visible.includes(node) || node.children?.length) fields.tree.append(renderNode(node));
+        // One click on Details shows evidence: the first group is already open inside the drawer.
+        fields.tree.querySelector("details")?.setAttribute("open","");
         notes(view.notes || []);
-        status("[ok] result","ok");
+        fields.toggle.hidden = !fields.tree.childElementCount && fields.notes.hidden && fields.provenance.hidden;
+        place(fields.legend.childElementCount > 0);
+        grow(slices);
       }
       function input(params) {
         cancelled = false;
         clearResult();
-        display("fallback","Waiting for the tool response.");
-        fields.title.textContent = "Request in progress";
-        display("repo",record(params.arguments) && string(params.arguments.repo,LIMITS.repo) ? params.arguments.repo : "");
-        status("[>] working","pending");
+        root.dataset.state = "pending";
+        const args = record(params.arguments) ? params.arguments : {};
+        const target = ["entity","query","module","repo"].map(key => args[key]).find(value => string(value,LIMITS.repo) && value.trim());
+        const verb = Object.hasOwn(VERBS,tool) ? VERBS[tool] : "Querying the Pharaoh graph";
+        headline("","");
+        display("kind",target ? `${verb} ` : `${verb}…`);
+        display("target",target ? `${target}…` : "");
+        fields.bar.hidden = false;
       }
       function result(params) {
         if (cancelled) return;
@@ -226,7 +411,7 @@
       function context(params) {
         if (params.theme === "dark" || params.theme === "light") document.documentElement.dataset.theme = params.theme;
         const name = params.toolInfo?.tool?.name;
-        if (string(name,128)) fields.tool.textContent = name;
+        if (string(name,128)) tool = name;
       }
       function size() {
         if (!ready || closed || resizeFrame) return;
@@ -244,7 +429,9 @@
       const observer = typeof ResizeObserver === "function" ? new ResizeObserver(size) : null;
       observer?.observe(root);
       root.addEventListener("toggle",size,true);
+      root.addEventListener("transitionend",size);
       window.addEventListener("resize",size);
+      fields.toggle.addEventListener("click",() => { setOpen(fields.toggle.getAttribute("aria-expanded") !== "true"); size(); });
       function receive(event) {
         if (closed || event.source !== window.parent || !record(event.data) || event.data.jsonrpc !== "2.0") return;
         const message = event.data;
@@ -271,7 +458,7 @@
             clearTimeout(initTimeout);
             cancelAnimationFrame(resizeFrame);
             observer?.disconnect();
-            root.dataset.pending = "false";
+            root.dataset.state = "ready";
             window.removeEventListener("message",receive);
           } else send({id:message.id,error:{code:-32601,message:"Unsupported request"}});
           return;
@@ -289,7 +476,7 @@
       const initTimeout = setTimeout(() => {
         if (!ready && !closed) fallback("Text response available","Read the tool response in chat.","Trace has not received a host connection.");
       },10000);
-      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.1.0"},appCapabilities:{availableDisplayModes:["inline"]},protocolVersion:PROTOCOL_VERSION}});
+      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.2.0"},appCapabilities:{availableDisplayModes:["inline"]},protocolVersion:PROTOCOL_VERSION}});
     })();
   </script>
 </body>

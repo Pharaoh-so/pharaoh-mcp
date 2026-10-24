@@ -5,7 +5,11 @@ All notable changes to `@pharaoh-so/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.53] - 2026-10-23
+
+### Changed
+- The Trace card is a compact receipt: the finding with its counts, a verdict such as risk, and one bar showing where the results sit (callers by module, dead or possibly unused, matches by module, code by module). The evidence opens on Details. A single-tool card is about 80px tall instead of 290 to 2,200px.
+- While a tool runs, the card says what Pharaoh is doing ("Tracing callers of parseEvent…"). Caveats such as an incomplete graph or a stale map stay visible while the evidence is closed.
 
 ### Fixed
 - With no `claude` CLI on PATH, `npx @pharaoh-so/mcp` stops before sign-in and says why: setup registers Pharaoh through that CLI, and the Claude desktop app's built-in Claude Code isn't on PATH. The message gives the CLI installer. It used to link the desktop app download, write the slash commands anyway and end with "Pharaoh is ready".
