@@ -122,6 +122,8 @@ test("the exact tarball handoff succeeds; altered bytes, manifest, source and pa
 
 test("npm boundary rejects private source, release credentials, traversal, links and missing runtime assets", () => {
 	verifyPackPaths(paths);
+	verifyPackPaths([...paths, "skills/.gitkeep", "skills/plan/SKILL.md"]);
+	verifyPackPaths([...paths, "NOTICE", "npx-skills/plan/SKILL.md", "npx-skills/verify/SKILL.md"]);
 	for (const path of [
 		"src/mcp/server.ts",
 		".npmrc",
@@ -129,6 +131,9 @@ test("npm boundary rejects private source, release credentials, traversal, links
 		"dist/../../server.js",
 		"scripts/release.mjs",
 		"dist/nested/private.js",
+		"npx-skills/.gitkeep",
+		"npx-skills/plan/run.sh",
+		"npx-skills/plan/nested/SKILL.md",
 	])
 		assert.throws(() => verifyPackPaths([...paths, path]));
 	assert.throws(() => verifyPackPaths(paths.filter((path) => path !== "dist/index.js")));
