@@ -1,22 +1,21 @@
 ---
 name: pharaoh
 prompt-name: pharaoh-core
-description: "Which Pharaoh tool answers which structural question about a mapped repo (TypeScript, JavaScript, Python): where code lives, what calls it, what a change affects, what a module contains and what nothing runs."
+description: "Which Pharaoh tool answers which structural question about a mapped repo (TypeScript, JavaScript, Python): where code lives, what calls it, what a change affects, what a module contains and what nothing runs. Use when Pharaoh's tools are connected and the question is about the structure of a repo Pharaoh maps."
 description-npx: "Codebase knowledge graph — gives AI agents full architectural awareness. Query architecture, dependencies, blast radius, module context, and function search instead of reading files one at a time. Code intelligence via MCP: understand any codebase in seconds."
-version: 0.3.0
+version: 0.3.1
 homepage: https://pharaoh.so
 metadata: {"emoji": "☥", "openclaw": {"always": true}, "tags": ["code-intelligence", "architecture", "mcp", "knowledge-graph", "dependencies", "codebase-understanding"]}
 ---
 
+# Pharaoh Tool Guide
+
 Pharaoh maps codebases into queryable knowledge graphs — functions, dependencies, modules, connections. No source code stored.<!-- only: npx --> For questions about how code connects, one Pharaoh call answers what grep and file reads take many turns to piece together.<!-- /only -->
 
+<!-- only: npx -->
 ## When to Use
 
-<!-- only: npx -->
 This skill loads automatically in sessions where Pharaoh MCP tools are available. It is not manually invoked — it activates when the `pharaoh` MCP server is connected and tools like `get_codebase_map` are present.
-<!-- /only -->
-<!-- only: connector, plugin -->
-Use when Pharaoh's tools are connected and the question is about the structure of a repo Pharaoh maps.
 <!-- /only -->
 
 ## Pick the tool by the question
@@ -52,24 +51,23 @@ The only supported path is the Pharaoh GitHub App: Free maps one live repo; Pro 
 Repos are mapped through the Pharaoh GitHub App, installed on the account or org that owns them, and live repos re-map on every push. `pharaoh_account` shows each workspace's live repo and, where the App isn't installed, its install link. `search_functions` accepts any of the user's mapped repo names.
 <!-- /only -->
 
+<!-- only: npx -->
 ## Vision docs
 
 **Vision docs are first-class.** If the repo has a `docs/VISION.md`, it's
 the contract for what must always be true. Read it before touching
 architecture. If a change would violate a MUST-bullet, stop and raise it
 with the user before coding.
+<!-- /only -->
 
 ## <!-- only: npx -->Automatic workflows<!-- /only --><!-- only: connector, plugin -->Workflows<!-- /only -->
 
-**PR review:** `pharaoh_recon` (map + touched modules + blast radius) → `get_blast_radius` on the riskiest changed functions. Verdict: SHIP, SHIP WITH CHANGES, or BLOCK. Any PR touching code governed by a MUST-bullet should reference the assertion in the review.
+**PR review:** `pharaoh_recon` (map + touched modules + blast radius) → `get_blast_radius` on the riskiest changed functions. Verdict: SHIP, SHIP WITH CHANGES, or BLOCK.<!-- only: npx --> Any PR touching code governed by a MUST-bullet should reference the assertion in the review.<!-- /only -->
 
 <!-- only: npx -->
 **Cross-repo:** When the user has several mapped repos, check related repos when a change touches shared interfaces, APIs or types: `search_functions` takes any of your repo names.
 
 **Vision maintenance:** When an architectural decision lands in a PR, update `docs/VISION.md` in the same commit — add an assertion if one is new, retire one if it no longer applies. Stale vision docs are worse than none.
-<!-- /only -->
-<!-- only: connector, plugin -->
-**VISION.md updates:** If a change affects an assertion in the repo's `docs/VISION.md`, point it out and offer to update the file.
 <!-- /only -->
 
 <!-- only: npx -->
@@ -106,5 +104,8 @@ https://mcp.pharaoh.so/mcp
 <!-- only: plugin -->
 ## Connection
 
-The plugin registers the Pharaoh connector. Run `/mcp`, select `pharaoh` and sign in with GitHub to connect it.
+The plugin registers the Pharaoh connector. To connect it and sign in with GitHub:
+
+- **Claude Code:** run `/mcp` and select `plugin:pharaoh:pharaoh`.
+- **claude.ai and Cowork:** open Pharaoh in Customize > Plugins and use its Connectors tab.
 <!-- /only -->

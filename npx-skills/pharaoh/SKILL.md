@@ -2,10 +2,12 @@
 name: pharaoh
 prompt-name: pharaoh-core
 description: "Codebase knowledge graph — gives AI agents full architectural awareness. Query architecture, dependencies, blast radius, module context, and function search instead of reading files one at a time. Code intelligence via MCP: understand any codebase in seconds."
-version: 0.3.0
+version: 0.3.1
 homepage: https://pharaoh.so
 metadata: {"emoji": "☥", "openclaw": {"always": true}, "tags": ["code-intelligence", "architecture", "mcp", "knowledge-graph", "dependencies", "codebase-understanding"]}
 ---
+
+# Pharaoh Tool Guide
 
 Pharaoh maps codebases into queryable knowledge graphs — functions, dependencies, modules, connections. No source code stored. For questions about how code connects, one Pharaoh call answers what grep and file reads take many turns to piece together.
 

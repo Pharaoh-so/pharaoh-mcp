@@ -1,7 +1,6 @@
 ---
 name: review
-description: "Five-phase code review: git context (branch, base, changed files), Pharaoh recon (architecture map, module context and blast radius, with a fallback when the repo isn't mapped), parallel specialized reviewers (correctness, security against the project's own rules, error handling, tests, types), an independent second-opinion pass for security-sensitive changes, and a SHIP / SHIP WITH CHANGES / BLOCK verdict. Architecture-aware wherever Pharaoh maps the repo, always branch-aware."
-user-invocable: true
+description: "Five-phase code review: git context (branch, base, changed files), Pharaoh recon (architecture map, module context and blast radius, with a fallback when the repo isn't mapped), parallel specialized reviewers (correctness, security against the project's own rules, error handling, tests, types), an independent second-opinion pass for security-sensitive changes, and a SHIP / SHIP WITH CHANGES / BLOCK verdict. Architecture-aware wherever Pharaoh maps the repo. Use when reviewing a branch or pull request before merging, or when the user asks for a code review."
 ---
 
 # Review with Pharaoh
@@ -155,9 +154,9 @@ For each agent, launch a subagent (the Agent tool in Claude Code) with:
 5. For the **Security Reviewer** specifically: the project's security rules (Layer 2) and the security-sensitive files you found, so it knows the project's threat model
 
 Each agent returns a structured report with findings categorized by severity:
-- **CRITICAL** (90-100): Must fix before merge
-- **IMPORTANT** (80-89): Should fix before merge
-- **SUGGESTION** (70-79): Consider for a follow-up
+- **CRITICAL**: Must fix before merge
+- **IMPORTANT**: Should fix before merge
+- **SUGGESTION**: Consider for a follow-up
 
 ### What NOT to dispatch
 

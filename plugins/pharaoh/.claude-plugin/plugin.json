@@ -10,5 +10,9 @@
 	"homepage": "https://pharaoh.so",
 	"repository": "https://github.com/Pharaoh-so/pharaoh-mcp",
 	"license": "MIT",
-	"privacyPolicyUrl": "https://pharaoh.so/docs/use-pharaoh/terms-and-privacy#privacy"
+	"icon": "./.claude-plugin/icon.png",
+	"documentationUrl": "https://pharaoh.so/docs",
+	"privacyPolicyUrl": "https://pharaoh.so/docs/use-pharaoh/terms-and-privacy#privacy",
+	"termsOfServiceUrl": "https://pharaoh.so/docs/use-pharaoh/terms-and-privacy#terms",
+	"supportUrl": "https://github.com/Pharaoh-so/pharaoh-mcp/issues"
 }

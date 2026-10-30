@@ -3,85 +3,103 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Pharaoh Trace</title>
   <style>
-    :root { color-scheme:dark; --stone:#2a2520; --rule:#3a352e; --track:#342e28; --hover:#332d27; --gold:#d4a843; --papyrus:#e8dcc8; --text:#c4b99a; --muted:#9d927b; --red:#f87171; --amber:#f0c855; --green:#4ade80;
-      --s0:#d4a843; --s1:#b08a3a; --s2:#8c6e31; --s3:#6e5728; --s4:#574522; --s-muted:#5f574a; --s-warning:#f0c855; --s-error:#ef4444;
-      --sans:"DM Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace; }
-    :root[data-theme="light"] { color-scheme:light; --stone:#f7f3ea; --rule:#e2d8c4; --track:#ece4d3; --hover:#efe8da; --gold:#946c0f; --papyrus:#2a2520; --text:#4a4235; --muted:#71675a; --red:#b42318; --amber:#9a5b00; --green:#15803d;
-      --s0:#b08515; --s1:#c9a24a; --s2:#d9bb72; --s3:#e6cf98; --s4:#efdfb8; --s-muted:#cfc4ad; --s-warning:#e0a526; --s-error:#d93f2f; }
+    /* Host tokens first: styles.variables lands on :root. Each fallback is Claude's default, so a host
+       that sends none still gets a themed card. Gold is the one brand colour; the rest is the host's. */
+    :root { color-scheme:light dark;
+      --ink:var(--color-text-primary,light-dark(#141413,#faf9f5)); --text:var(--color-text-secondary,light-dark(#3d3d3a,#c2c0b6)); --muted:var(--color-text-tertiary,light-dark(#73726c,#9c9a92));
+      --rule:var(--color-border-tertiary,light-dark(rgba(31,30,29,.15),rgba(222,220,209,.15))); --track:var(--color-background-secondary,light-dark(#f5f4ed,#262624)); --focus:var(--color-ring-primary,light-dark(rgba(20,20,19,.7),rgba(250,249,245,.7)));
+      --red:var(--color-text-danger,light-dark(#7f2c28,#ee8884)); --amber:var(--color-text-warning,light-dark(#5a4815,#d1a041)); --green:var(--color-text-success,light-dark(#265b19,#7ab948));
+      --gold:light-dark(#86610c,#d4a843);
+      --s0:light-dark(#b08515,#d4a843); --s1:light-dark(#c9a24a,#b08a3a); --s2:light-dark(#d9bb72,#8c6e31); --s3:light-dark(#e6cf98,#6e5728); --s4:light-dark(#efdfb8,#574522);
+      --s-muted:var(--color-border-primary,light-dark(rgba(31,30,29,.4),rgba(222,220,209,.4))); --s-warning:var(--color-border-warning,light-dark(#805c1f,#a87829)); --s-error:var(--color-border-danger,light-dark(#a73d39,#cd5c58));
+      --sans:var(--font-sans,system-ui,-apple-system,"Segoe UI",sans-serif); --mono:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);
+      --type-heading:var(--font-heading-md-size,16px); --type-body:var(--font-text-sm-size,14px); --type-caption:var(--font-text-xs-size,12px); --leading:var(--font-text-sm-line-height,1.4);
+      --regular:var(--font-weight-normal,400); --strong:var(--font-weight-semibold,600);
+      --line:var(--border-width-regular,.5px) solid var(--rule); --radius:var(--border-radius-md,8px); --radius-small:var(--border-radius-xs,4px); }
+    :root[data-theme="light"] { color-scheme:light; } :root[data-theme="dark"] { color-scheme:dark; }
     * { box-sizing:border-box; }
     html,body { margin:0; background:transparent; min-width:0; }
+    body { padding:var(--safe-top,0) var(--safe-right,0) var(--safe-bottom,0) var(--safe-left,0); }
     .label,.detail,.badge { overflow-wrap:anywhere; min-width:0; unicode-bidi:plaintext; }
-    .mark-s { font:600 12px var(--mono); width:1ch; }
-    #trace { background:var(--stone); color:var(--text); border:1px solid var(--rule); border-radius:6px; padding:9px 12px; font:13px/1.45 var(--sans); min-width:0; }
+    .mark-s { font:var(--strong) var(--type-caption) var(--mono); width:1ch; }
+    #trace { color:var(--text); border:var(--line); border-radius:var(--radius); padding:10px 12px; font:var(--regular) var(--type-body)/var(--leading) var(--sans); min-width:0; }
     .head { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 10px; }
-    .mark { color:var(--gold); font-size:14px; line-height:1; }
+    .mark { color:var(--gold); font-size:var(--type-heading); line-height:1; }
     .headline { flex:1 1 16em; margin:0; min-width:0; overflow-wrap:anywhere; }
     #kind { color:var(--muted); }
-    #target { color:var(--papyrus); font:600 13px/1.45 var(--mono); }
+    #target { color:var(--ink); font:var(--strong) var(--type-heading)/var(--leading) var(--mono); }
     #target,.legend > span,.rows .label { unicode-bidi:isolate; }
-    #title { color:var(--papyrus); font-weight:600; }
+    #title { color:var(--ink); font-size:var(--type-heading); font-weight:var(--strong); }
     #summary { margin-left:8px; }
-    .num { color:var(--gold); font:600 12.5px var(--mono); }
-    .meta { margin-left:auto; display:flex; gap:10px; white-space:nowrap; font-size:12px; }
+    .num { color:var(--gold); font-family:var(--mono); font-weight:var(--strong); }
+    .meta { margin-left:auto; display:flex; gap:10px; white-space:nowrap; font-size:var(--type-caption); }
     #verdict[data-state="error"] { color:var(--red); } #verdict[data-state="warning"] { color:var(--amber); } #verdict[data-state="ok"] { color:var(--green); }
-    #sha { color:var(--muted); font:11.5px var(--mono); }
-    .bar { position:relative; display:flex; gap:2px; height:6px; margin:8px 0 0; border-radius:3px; overflow:hidden; background:var(--track); }
+    #sha { color:var(--muted); font-family:var(--mono); }
+    .bar { position:relative; display:flex; gap:2px; height:6px; margin:8px 0 0; border-radius:var(--radius-small); overflow:hidden; background:var(--track); }
     .bar i,.mini i { display:block; flex:0 1 0; min-width:0; }
     .bar i[data-shown] { min-width:3px; }
     .s0 { background:var(--s0); } .s1 { background:var(--s1); } .s2 { background:var(--s2); } .s3 { background:var(--s3); } .s4 { background:var(--s4); }
     .muted { background:var(--s-muted); } .warning { background:var(--s-warning); } .error { background:var(--s-error); }
-    .foot { display:flex; align-items:baseline; gap:4px 14px; margin-top:6px; flex-wrap:wrap; }
-    .legend { display:flex; flex-wrap:wrap; gap:2px 14px; margin:0; color:var(--muted); font-size:12px; min-width:0; flex:1 1 auto; }
+    .legend { display:flex; flex-wrap:wrap; gap:2px 14px; margin:6px 0 0; color:var(--muted); font-size:var(--type-caption); min-width:0; }
+    .legend:empty { display:none; }
     #trace[data-reveal] .legend { opacity:0; }
-    .legend b { color:var(--text); font:500 11.5px var(--mono); margin-left:4px; }
-    .sw { display:inline-block; width:8px; height:8px; border-radius:1px; margin-right:5px; }
-    .toggle { margin-left:auto; display:flex; align-items:baseline; gap:4px; border:0; background:none; padding:2px 0; color:var(--gold); font:12px var(--sans); cursor:pointer; white-space:nowrap; }
-    .toggle:hover { color:var(--papyrus); }
-    .toggle:focus-visible,summary:focus-visible { outline:2px solid var(--gold); outline-offset:2px; border-radius:2px; }
-    .chev { display:inline-block; font-size:10px; }
-    .toggle[aria-expanded="true"] .chev { transform:rotate(90deg); }
-    .caveat { margin:6px 0 0; color:var(--amber); font-size:12px; overflow-wrap:anywhere; }
+    .legend b { color:var(--text); font:var(--strong) var(--type-caption) var(--mono); margin-left:4px; }
+    .sw { display:inline-block; width:8px; height:8px; border-radius:var(--radius-small); margin-right:5px; }
+    .foot { display:flex; justify-content:flex-end; gap:14px; margin-top:6px; }
+    .action { display:flex; align-items:center; gap:4px; border:0; background:none; padding:2px 0; color:var(--gold); font:var(--regular) var(--type-caption) var(--sans); cursor:pointer; white-space:nowrap; }
+    .action:hover { color:var(--ink); }
+    .action:focus-visible,summary:focus-visible { outline:2px solid var(--focus); outline-offset:2px; border-radius:var(--radius-small); }
+    .chev { display:inline-block; }
+    .action[aria-expanded="true"] .chev { transform:rotate(90deg); }
+    .caveat { margin:6px 0 0; color:var(--amber); font-size:var(--type-caption); overflow-wrap:anywhere; }
     .caveat span + span::before { content:" · "; color:var(--muted); }
-    .rows { list-style:none; margin:4px 0 0; padding:0; }
-    .rows li { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; padding:4px 0 5px; border-top:1px solid var(--rule); min-width:0; }
+    .rows { list-style:none; margin:4px 0 0; padding:0; font-size:var(--type-caption); }
+    .rows li { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; padding:4px 0 5px; border-top:var(--line); min-width:0; }
     .rows li:first-child { border-top:0; }
-    .rows .kind { color:var(--muted); font-size:12.5px; }
-    .rows .label { color:var(--papyrus); font:12.5px var(--mono); }
-    .rows .prose { color:var(--text); font:12.5px var(--sans); }
-    .rows .detail { color:var(--text); font-size:12.5px; }
-    .rows .end { margin-left:auto; font-size:12px; white-space:nowrap; }
-    .rows .more { color:var(--muted); font-size:12px; }
-    .rows .mini { display:flex; gap:1px; flex:1 0 100%; height:3px; margin-top:3px; border-radius:2px; overflow:hidden; background:var(--track); }
+    .rows .kind { color:var(--muted); }
+    .rows .label { color:var(--ink); font-family:var(--mono); }
+    .rows .prose { color:var(--text); font-family:var(--sans); }
+    .rows .detail { color:var(--text); }
+    .rows .end { margin-left:auto; white-space:nowrap; }
+    .rows .more { color:var(--muted); }
+    .rows .mini { display:flex; gap:1px; flex:1 0 100%; height:3px; margin-top:3px; border-radius:var(--radius-small); overflow:hidden; background:var(--track); }
     [data-state="ok"] > .mark-s { color:var(--green); } [data-state="warning"] > .mark-s, [data-state="pending"] > .mark-s { color:var(--amber); } [data-state="error"] > .mark-s, .end[data-state="error"] { color:var(--red); } .end[data-state="warning"] { color:var(--amber); }
     .drawer { display:grid; grid-template-rows:0fr; }
     .drawer[data-open] { grid-template-rows:1fr; }
     .drawer-inner { overflow:hidden; min-height:0; }
-    .drawer[data-open] .drawer-inner { border-top:1px solid var(--rule); margin-top:8px; padding-top:4px; }
+    .drawer[data-open] .drawer-inner { border-top:var(--line); margin-top:8px; padding-top:4px; }
     ul.tree,.tree ul { list-style:none; margin:0; padding:0; }
-    .tree ul { margin:0 0 4px 6px; padding-left:10px; border-left:1px solid var(--rule); }
-    .tree summary,.leaf { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:baseline; padding:3px 0; font-size:12.5px; min-width:0; }
+    .tree ul { margin:0 0 4px 6px; padding-left:10px; border-left:var(--line); }
+    .tree summary,.leaf { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:baseline; padding:3px 0; font-size:var(--type-caption); min-width:0; }
     .tree summary { list-style:none; cursor:pointer; color:var(--text); }
     .tree summary::-webkit-details-marker { display:none; }
-    .tree summary:hover { background:var(--hover); }
-    .tree summary .label::before { content:"▸"; display:inline-block; color:var(--gold); font-size:10px; width:12px; }
+    .tree summary:hover { background:var(--track); }
+    .tree summary .label::before { content:"▸"; display:inline-block; color:var(--gold); width:1em; }
     .tree details[open] > summary .label::before { transform:rotate(90deg); }
     .tree details[open] > summary .label { color:var(--gold); }
-    .leaf .label { color:var(--papyrus); font:12px var(--mono); }
-    .tree > li > .leaf { padding-left:12px; }
-    .tree > li > .leaf .label { color:var(--text); font:12.5px var(--sans); }
-    .tree .label .detail { color:var(--muted); font:11px var(--mono); margin-left:8px; }
-    .tree .label .caveat { color:var(--amber); font:11.5px var(--sans); margin:0 0 0 8px; }
-    .badge { color:var(--muted); font:11.5px var(--mono); text-align:right; white-space:nowrap; }
+    .leaf .label { color:var(--ink); font-family:var(--mono); }
+    .tree > li > .leaf { padding-left:1em; }
+    .tree > li > .leaf .label { color:var(--text); font-family:var(--sans); }
+    .tree .label .detail { color:var(--muted); font-family:var(--mono); margin-left:8px; }
+    .tree .label .caveat { color:var(--amber); font-family:var(--sans); margin:0 0 0 8px; }
+    .badge { color:var(--muted); font-family:var(--mono); text-align:right; white-space:nowrap; }
     .badge[data-state="ok"] { color:var(--green); } .badge[data-state="warning"],.badge[data-state="pending"] { color:var(--amber); } .badge[data-state="error"] { color:var(--red); }
-    .meter { display:block; height:3px; margin-top:3px; border-radius:2px; background:var(--track); max-width:240px; }
-    .meter i { display:block; height:100%; border-radius:2px; background:var(--gold); }
-    .notes,.provenance { color:var(--muted); font-size:11.5px; margin:6px 0 2px; }
+    .meter { display:block; height:3px; margin-top:3px; border-radius:var(--radius-small); background:var(--track); max-width:240px; }
+    .meter i { display:block; height:100%; border-radius:var(--radius-small); background:var(--gold); }
+    .notes,.provenance { color:var(--muted); font-size:var(--type-caption); margin:6px 0 2px; }
     .notes p { margin:2px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
-    #fallback { font:11.5px/1.5 var(--mono); color:var(--text); margin:6px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
+    #fallback { font:var(--regular) var(--type-caption)/1.5 var(--mono); color:var(--text); margin:6px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
     @media(max-width:400px) { #trace { padding:8px 10px; } #summary { margin-left:0; } #summary:not([hidden]) { display:block; } .tree summary,.leaf { grid-template-columns:minmax(0,1fr); gap:0; } .badge { text-align:left; } }
+    /* A finger needs 44pt: the MCP Apps minimum for anything tappable. */
+    @media(pointer:coarse) { .action { min-height:44px; min-width:44px; justify-content:center; } .tree summary { min-height:44px; align-items:center; } .foot { gap:8px; } }
+    /* Inline cards can't scroll, so full screen is where long Details go: the page scrolls and they stay open. */
+    :root[data-display="fullscreen"],:root[data-display="fullscreen"] body { height:100%; }
+    :root[data-display="fullscreen"] body { overflow-y:auto; }
+    :root[data-display="fullscreen"] #trace { border:0; border-radius:0; }
     /* Motion only for people who have not asked to reduce it. */
     @media(prefers-reduced-motion:no-preference) {
       .bar i,.mini i { transition:flex-grow .7s cubic-bezier(.22,.8,.24,1); }
@@ -100,15 +118,16 @@
     <div class="head">
       <span class="mark" aria-hidden="true">☥</span>
       <p class="headline"><span id="kind"></span><span id="target"></span><span id="title">Pharaoh</span><span id="summary" role="status" aria-live="polite">Waiting for the tool</span></p>
-      <span id="meta" class="meta"><span id="verdict" hidden></span><span id="sha" hidden></span></span>
+      <span class="meta"><span id="verdict" hidden></span><span id="sha" hidden></span></span>
     </div>
     <div id="bar" class="bar" aria-hidden="true"></div>
-    <div id="foot" class="foot">
-      <p id="legend" class="legend"></p>
-      <button id="toggle" class="toggle" type="button" aria-expanded="false" aria-controls="drawer" hidden><span id="toggle-label">Details</span><span class="chev" aria-hidden="true">▸</span></button>
-    </div>
+    <p id="legend" class="legend"></p>
     <p id="caveat" class="caveat" hidden></p>
     <ul id="rows" class="rows" hidden></ul>
+    <div id="foot" class="foot" hidden>
+      <button id="toggle" class="action" type="button" aria-expanded="false" aria-controls="drawer" hidden><span id="toggle-label">Details</span><span class="chev" aria-hidden="true">▸</span></button>
+      <button id="expand" class="action" type="button" hidden></button>
+    </div>
     <div id="drawer" class="drawer" inert>
       <div class="drawer-inner">
         <ul id="tree" class="tree" aria-label="Result evidence"></ul>
@@ -129,12 +148,18 @@
       const MAX_ROWS = 5;
       const TONES = ["warning","error","muted"];
       const STATES = ["ok","pending","warning","error"];
+      const DISPLAY_MODES = ["inline","fullscreen"];
+      // The tokens hosts send, and only those: a host never overwrites the card's own names (--gold, --rule).
+      const HOST_VARIABLE = /^--(color|font|border|shadow)-[a-z0-9-]+$/;
+      const MAX_HOST_VALUE = 512;
       // What each tool is doing while it runs, shown with the argument it targets.
       const VERBS = { get_blast_radius:"Tracing callers of", get_unused_code:"Checking reachability in", search_functions:"Searching for", get_codebase_map:"Mapping", get_module_context:"Reading module", pharaoh_recon:"Running recon on", pharaoh_account:"Checking account", pharaoh_manage_repo:"Updating" };
       const root = document.getElementById("trace");
-      const fields = Object.fromEntries(["kind","target","title","summary","meta","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","drawer","tree","fallback","notes","provenance"].map(id => [id,document.getElementById(id)]));
+      const page = document.documentElement;
+      const fields = Object.fromEntries(["kind","target","title","summary","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","expand","drawer","tree","fallback","notes","provenance"].map(id => [id,document.getElementById(id)]));
       const compact = new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
       const initId = "pharaoh-trace-initialize";
+      const displayId = "pharaoh-trace-display-";
       let tool = "";
       let ready = false;
       let closed = false;
@@ -142,6 +167,10 @@
       let resizeFrame = 0;
       let lastHeight = 0;
       let lastWidth = 0;
+      let hasDetails = false;
+      let displayMode = "inline";
+      let hostModes = [];
+      let displayRequests = 0;
       const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
       const string = (value,max) => typeof value === "string" && value.length <= max;
       const send = message => { if (!closed) window.parent.postMessage({jsonrpc:"2.0",...message},"*"); };
@@ -172,10 +201,13 @@
         rich(fields.summary,summary);
         fields.summary.hidden = !summary;
       }
-      // The toggle ends the legend line, or the headline when there is no legend.
-      function place(withLegend) {
-        (withLegend ? fields.foot : fields.meta).append(fields.toggle);
-        fields.foot.hidden = !withLegend;
+      // Details and full screen sit at the foot of the card; full screen only where the host offers it.
+      function showActions() {
+        const full = displayMode === "fullscreen";
+        fields.toggle.hidden = !hasDetails || full;
+        fields.expand.hidden = !hasDetails || !hostModes.includes(full ? "inline" : "fullscreen");
+        fields.expand.textContent = full ? "Exit full screen" : "Full screen";
+        fields.foot.hidden = fields.toggle.hidden && fields.expand.hidden;
       }
       function setOpen(open) {
         fields.drawer.toggleAttribute("data-open",open);
@@ -183,8 +215,14 @@
         fields.toggle.setAttribute("aria-expanded",String(open));
         fields["toggle-label"].textContent = open ? "Hide" : "Details";
       }
+      function setDisplay(mode) {
+        displayMode = mode;
+        page.dataset.display = mode;
+        setOpen(mode === "fullscreen");
+        showActions();
+      }
       function clearResult() {
-        setOpen(false);
+        setOpen(displayMode === "fullscreen");
         for (const field of ["bar","rows","legend","tree","notes"]) fields[field].replaceChildren();
         for (const field of ["verdict","sha","caveat","provenance","fallback"]) display(field,"");
         delete fields.verdict.dataset.state;
@@ -192,7 +230,8 @@
         fields.bar.hidden = true;
         fields.rows.hidden = true;
         fields.notes.hidden = true;
-        fields.toggle.hidden = true;
+        hasDetails = false;
+        showActions();
       }
       function notes(items) {
         for (const text of items) fields.notes.append(element("p","",text));
@@ -213,8 +252,8 @@
           display("verdict",state === "error" ? "Failed" : "Cancelled");
         }
         if (notice) notes([notice]);
-        fields.toggle.hidden = !text;
-        place(false);
+        hasDetails = Boolean(text);
+        showActions();
       }
       function readableText(result) {
         if (!record(result) || !Array.isArray(result.content)) return {text:"No readable text was returned. Read the tool response in chat.",omitted:false};
@@ -380,8 +419,8 @@
         // One click on Details shows evidence: the first group is already open inside the drawer.
         fields.tree.querySelector("details")?.setAttribute("open","");
         notes(view.notes || []);
-        fields.toggle.hidden = !fields.tree.childElementCount && fields.notes.hidden && fields.provenance.hidden;
-        place(fields.legend.childElementCount > 0);
+        hasDetails = fields.tree.childElementCount > 0 || !fields.notes.hidden || !fields.provenance.hidden;
+        showActions();
         grow(slices);
       }
       function input(params) {
@@ -409,15 +448,23 @@
         else fallback("Tool response",text.text,[view === undefined ? "" : "Trace metadata could not be displayed; showing the tool's text response.",omission].filter(Boolean).join(" "));
       }
       function context(params) {
-        if (params.theme === "dark" || params.theme === "light") document.documentElement.dataset.theme = params.theme;
+        // Updates carry only the fields that changed.
+        if (params.theme === "dark" || params.theme === "light") page.dataset.theme = params.theme;
+        const variables = params.styles?.variables;
+        if (record(variables)) for (const [name,value] of Object.entries(variables)) if (HOST_VARIABLE.test(name) && string(value,MAX_HOST_VALUE)) page.style.setProperty(name,value);
+        const insets = params.safeAreaInsets;
+        if (record(insets)) for (const side of ["top","right","bottom","left"]) if (Number.isFinite(insets[side]) && insets[side] >= 0) page.style.setProperty(`--safe-${side}`,`${insets[side]}px`);
+        if (Array.isArray(params.availableDisplayModes)) hostModes = params.availableDisplayModes;
+        if (DISPLAY_MODES.includes(params.displayMode)) setDisplay(params.displayMode);
         const name = params.toolInfo?.tool?.name;
         if (string(name,128)) tool = name;
+        showActions();
       }
       function size() {
         if (!ready || closed || resizeFrame) return;
         resizeFrame = requestAnimationFrame(() => {
           resizeFrame = 0;
-          const height = Math.ceil(root.getBoundingClientRect().height);
+          const height = Math.ceil(document.body.getBoundingClientRect().height);
           const width = Math.ceil(document.documentElement.clientWidth);
           if (height !== lastHeight || width !== lastWidth) {
             lastHeight = height;
@@ -432,6 +479,7 @@
       root.addEventListener("transitionend",size);
       window.addEventListener("resize",size);
       fields.toggle.addEventListener("click",() => { setOpen(fields.toggle.getAttribute("aria-expanded") !== "true"); size(); });
+      fields.expand.addEventListener("click",() => send({id:`${displayId}${++displayRequests}`,method:"ui/request-display-mode",params:{mode:displayMode === "fullscreen" ? "inline" : "fullscreen"}}));
       function receive(event) {
         if (closed || event.source !== window.parent || !record(event.data) || event.data.jsonrpc !== "2.0") return;
         const message = event.data;
@@ -446,6 +494,12 @@
           clearTimeout(initTimeout);
           if (record(message.result.hostContext)) context(message.result.hostContext);
           send({method:"ui/notifications/initialized",params:{}});
+          size();
+          return;
+        }
+        // The host answers with the mode it actually set, which may not be the one requested.
+        if (typeof message.id === "string" && message.id.startsWith(displayId) && message.method === undefined) {
+          if (DISPLAY_MODES.includes(message.result?.mode)) setDisplay(message.result.mode);
           size();
           return;
         }
@@ -476,7 +530,7 @@
       const initTimeout = setTimeout(() => {
         if (!ready && !closed) fallback("Text response available","Read the tool response in chat.","Trace has not received a host connection.");
       },10000);
-      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.2.0"},appCapabilities:{availableDisplayModes:["inline"]},protocolVersion:PROTOCOL_VERSION}});
+      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.3.0"},appCapabilities:{availableDisplayModes:DISPLAY_MODES},protocolVersion:PROTOCOL_VERSION}});
     })();
   </script>
 </body>
