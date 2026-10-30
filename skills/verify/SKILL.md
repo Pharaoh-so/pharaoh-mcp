@@ -2,7 +2,9 @@
 name: verify
 prompt-name: verification
 description: "Evidence before assertions. Run verification commands and confirm output before claiming work is complete, fixed, or passing. No 'should work now' — run the command, read the output, then claim the result. Covers tests, builds, linting, agent delegation, and requirement checklists."
-version: 0.2.0
+channels: npx
+license: MIT. Adapted from obra/superpowers, Copyright (c) 2025 Jesse Vincent; see NOTICE in @pharaoh-so/mcp
+version: 0.2.1
 homepage: https://pharaoh.so
 user-invocable: true
 metadata: {"emoji": "☥", "tags": ["verification", "quality", "completion", "evidence", "discipline"]}

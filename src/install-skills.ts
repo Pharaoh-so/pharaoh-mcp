@@ -32,8 +32,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Path to the bundled package root (one level up from dist/). */
 const PKG_ROOT = join(__dirname, "..");
 
-/** Path to the bundled skills directory. */
-const BUNDLED_SKILLS_DIR = join(PKG_ROOT, "skills");
+/**
+ * Path to the bundled skills: npx's render of skills/ (written by the build's
+ * generate:commands), so installs copy them as-is and never see channel markers.
+ */
+const BUNDLED_SKILLS_DIR = join(PKG_ROOT, "npx-skills");
 
 /** Path to the bundled slash commands directory. */
 const BUNDLED_COMMANDS_DIR = join(PKG_ROOT, "commands");
@@ -757,10 +760,11 @@ export function mergeOpenClawConfig(home = homedir()): boolean {
 
 /**
  * Rules the interactive setup adds to `permissions.allow` in
- * ~/.claude/settings.json: the six read-only tools and `pharaoh_account`,
+ * ~/.claude/settings.json: the seven read-only tools (`readOnlyHint: true`),
  * each by full name. Never a prefix rule — `mcp__pharaoh` also auto-approves
- * account deletion and `pharaoh_admin`, so a prompt injection could run them
- * with no human in the loop (security review SC-6). Those tools keep prompting.
+ * the tools that change things (`pharaoh_manage_repo`, which switches the live
+ * repo, and the superadmin tools), so a prompt injection could run them with
+ * no human in the loop (security review SC-6). Those tools keep prompting.
  */
 export const PHARAOH_ALLOW_RULES: readonly string[] = [
 	"mcp__pharaoh__get_codebase_map",
@@ -836,11 +840,11 @@ export function describeAllowReadTools(result: AllowReadToolsResult): string {
 	const count = PHARAOH_ALLOW_RULES.length;
 	switch (result) {
 		case "added":
-			return `Pharaoh: allowed ${count} tools by name in ~/.claude/settings.json (permissions.allow): the read-only tools and pharaoh_account. Account deletion and pharaoh_admin still prompt.`;
+			return `Pharaoh: allowed ${count} read-only tools by name in ~/.claude/settings.json (permissions.allow). pharaoh_manage_repo, which switches or refreshes a repo, still asks first.`;
 		case "migrated":
-			return `Pharaoh: replaced the blanket mcp__pharaoh rule in ~/.claude/settings.json with ${count} tools by name. Account deletion and pharaoh_admin prompt again.`;
+			return `Pharaoh: replaced the blanket mcp__pharaoh rule in ~/.claude/settings.json with ${count} read-only tools by name. pharaoh_manage_repo asks first again.`;
 		case "current":
-			return `Pharaoh: ~/.claude/settings.json already allows the ${count} read-only and account tools by name.`;
+			return `Pharaoh: ~/.claude/settings.json already allows the ${count} read-only tools by name.`;
 		case "no-settings":
 			return "Pharaoh: no ~/.claude/settings.json yet, so Pharaoh's tools ask before they run. The rules to allow the read-only tools are in the README (Security).";
 		case "error":
