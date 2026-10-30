@@ -1,13 +1,11 @@
 ---
 name: pharaoh
-description: "Which Pharaoh tool answers which structural question about a mapped repo (TypeScript, JavaScript, Python): where code lives, what calls it, what a change affects, what a module contains and what nothing runs."
+description: "Which Pharaoh tool answers which structural question about a mapped repo (TypeScript, JavaScript, Python): where code lives, what calls it, what a change affects, what a module contains and what nothing runs. Use when Pharaoh's tools are connected and the question is about the structure of a repo Pharaoh maps."
 ---
 
+# Pharaoh Tool Guide
+
 Pharaoh maps codebases into queryable knowledge graphs — functions, dependencies, modules, connections. No source code stored.
-
-## When to Use
-
-Use when Pharaoh's tools are connected and the question is about the structure of a repo Pharaoh maps.
 
 ## Pick the tool by the question
 
@@ -26,18 +24,9 @@ The graph reflects the default branch at its last mapped push, and a response sa
 
 Repos are mapped through the Pharaoh GitHub App, installed on the account or org that owns them, and live repos re-map on every push. `pharaoh_account` shows each workspace's live repo and, where the App isn't installed, its install link. `search_functions` accepts any of the user's mapped repo names.
 
-## Vision docs
-
-**Vision docs are first-class.** If the repo has a `docs/VISION.md`, it's
-the contract for what must always be true. Read it before touching
-architecture. If a change would violate a MUST-bullet, stop and raise it
-with the user before coding.
-
 ## Workflows
 
-**PR review:** `pharaoh_recon` (map + touched modules + blast radius) → `get_blast_radius` on the riskiest changed functions. Verdict: SHIP, SHIP WITH CHANGES, or BLOCK. Any PR touching code governed by a MUST-bullet should reference the assertion in the review.
-
-**VISION.md updates:** If a change affects an assertion in the repo's `docs/VISION.md`, point it out and offer to update the file.
+**PR review:** `pharaoh_recon` (map + touched modules + blast radius) → `get_blast_radius` on the riskiest changed functions. Verdict: SHIP, SHIP WITH CHANGES, or BLOCK.
 
 ## Utilities
 
@@ -48,4 +37,7 @@ Full docs at [pharaoh.so/docs](https://pharaoh.so/docs).
 
 ## Connection
 
-The plugin registers the Pharaoh connector. Run `/mcp`, select `pharaoh` and sign in with GitHub to connect it.
+The plugin registers the Pharaoh connector. To connect it and sign in with GitHub:
+
+- **Claude Code:** run `/mcp` and select `plugin:pharaoh:pharaoh`.
+- **claude.ai and Cowork:** open Pharaoh in Customize > Plugins and use its Connectors tab.

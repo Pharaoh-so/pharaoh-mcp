@@ -81,7 +81,7 @@ Adapt depth to change size. Skip sections that don't apply. **After each section
 - Data flow bottlenecks and single points of failure
 - Does this need new code at all, or can a human process / existing pattern solve it?
 - **If this plan introduces a new invariant**, call it out and include a
-  step in Section 6 to add a `### assertion` to VISION.md with a pairing TEST.
+  step in the plan to add a `### assertion` to VISION.md with a pairing TEST.
 
 ### Section 2 — Code Quality (always)
 
@@ -94,8 +94,8 @@ Adapt depth to change size. Skip sections that don't apply. **After each section
 ### Section 3 — Wiring & Integration (always)
 
 - Are all new exports called from a production entry point?
-- Run `get_blast_radius` on any new/changed functions — zero callers = not done
-- Does the plan declare WHERE new code gets called from? If not, flag it
+- Run `get_blast_radius` on changed functions that already exist
+- The graph has no functions the plan adds, so does the plan declare WHERE new code gets called from? If not, flag it — no named caller = not done
 - Integration points: how does this connect to what already exists?
 
 ### Section 4 — Tests (always)
@@ -136,7 +136,7 @@ Number each issue (1, 2, 3...) and letter each option (A, B, C...). Recommended 
 
 - **Before reviewing**: recon (Step 1 above)
 - **During review**: `get_blast_radius` when evaluating impact of changes; `search_functions` before suggesting new code
-- **Final sweep**: `get_blast_radius` on ALL new exports — zero callers on non-entry-points = plan is incomplete
+- **Final sweep**: every new export has a caller named in the plan, and `get_blast_radius` covers every changed export that already exists — zero callers on non-entry-points = plan is incomplete
 
 ## Workflow Rules
 

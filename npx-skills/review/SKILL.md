@@ -1,10 +1,9 @@
 ---
 name: review
 prompt-name: review-with-pharaoh
-description: "Five-phase workflow: git context detection (worktree, branch, base, changed files), Pharaoh recon (architecture map, module context, blast radius in one call, with a fallback when the repo isn't mapped), parallel specialized agent dispatch (code quality, security against the project's own rules, error handling, test coverage, type design), adversarial review by the other model (Codex from Claude Code, Claude from Codex) for security-sensitive changes, and a final synthesized verdict of SHIP / SHIP WITH CHANGES / BLOCK. Architecture-aware wherever Pharaoh maps the repo, always branch-aware."
-version: 0.6.0
+description: "Five-phase workflow: git context detection (worktree, branch, base, changed files), Pharaoh recon (architecture map, module context, blast radius in one call, with a fallback when the repo isn't mapped), parallel specialized agent dispatch (code quality, security against the project's own rules, error handling, test coverage, type design), adversarial review by the other model (Codex from Claude Code, Claude from Codex) for security-sensitive changes, and a final synthesized verdict of SHIP / SHIP WITH CHANGES / BLOCK. Architecture-aware wherever Pharaoh maps the repo. Use when reviewing a branch or pull request before merging, or when the user asks for a code review."
+version: 0.6.1
 homepage: https://pharaoh.so
-user-invocable: true
 metadata: {"emoji": "☥", "tags": ["code-review", "pull-request", "architecture", "pharaoh", "multi-agent", "adversarial-review", "cross-model", "regression-risk", "spec-alignment"]}
 ---
 
