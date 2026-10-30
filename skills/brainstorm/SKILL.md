@@ -2,7 +2,9 @@
 name: brainstorm
 prompt-name: brainstorm
 description: "Explore intent, requirements, and design before implementation. Collaborative dialogue to turn ideas into specs. Ask clarifying questions one at a time, propose 2-3 approaches with trade-offs, get approval before writing any code. Prevents wasted work from unexamined assumptions."
-version: 0.2.0
+channels: npx
+license: MIT. Adapted from obra/superpowers, Copyright (c) 2025 Jesse Vincent; see NOTICE in @pharaoh-so/mcp
+version: 0.2.1
 homepage: https://pharaoh.so
 user-invocable: true
 metadata: {"emoji": "☥", "tags": ["planning", "design", "brainstorming", "requirements", "architecture"]}

@@ -1,0 +1,14 @@
+{
+	"name": "pharaoh",
+	"displayName": "Pharaoh",
+	"version": "0.3.54",
+	"description": "Plan, review and refactor code against Pharaoh's graph of your GitHub repos: modules, functions, callers, endpoints and dependencies.",
+	"author": {
+		"name": "Pharaoh",
+		"url": "https://pharaoh.so"
+	},
+	"homepage": "https://pharaoh.so",
+	"repository": "https://github.com/Pharaoh-so/pharaoh-mcp",
+	"license": "MIT",
+	"privacyPolicyUrl": "https://pharaoh.so/docs/use-pharaoh/terms-and-privacy#privacy"
+}

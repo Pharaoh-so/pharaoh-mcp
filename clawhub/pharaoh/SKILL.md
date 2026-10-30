@@ -66,7 +66,7 @@ After installation, the core `pharaoh` skill loads automatically in sessions whe
 
 ## What You Get
 
-**7 MCP Tools** — six that answer architecture questions (`get_codebase_map`, `get_module_context`, `search_functions`, `pharaoh_recon`, `get_blast_radius`, `get_unused_code`) and `pharaoh_account` for your plan, live repo and refreshes.
+**8 MCP Tools** — six that answer architecture questions (`get_codebase_map`, `get_module_context`, `search_functions`, `pharaoh_recon`, `get_blast_radius`, `get_unused_code`), `pharaoh_account` for your plan and live repo, and `pharaoh_manage_repo` to switch the live repo or refresh a repo.
 
 **8 Development Skills:**
 

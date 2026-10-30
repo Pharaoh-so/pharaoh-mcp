@@ -5,6 +5,22 @@ All notable changes to `@pharaoh-so/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `plugins/pharaoh/`: the Claude directory plugin, generated from the same skills (plan, review, refactor and pharaoh) with the hosted connector at `https://mcp.pharaoh.so/mcp`. It has no hooks or commands and isn't part of the npm package.
+- `NOTICE`: the brainstorm, debug, tdd and verify skills are adapted from [superpowers](https://github.com/obra/superpowers) (MIT, Copyright (c) 2025 Jesse Vincent). Each skill's `license:` field says so too.
+
+### Changed
+- `/review` works as before, second opinion from Codex or Claude included. It no longer calls itself "the definitive code review", and Phase 0 says that `gh pr view` asks GitHub for the open PR's target branch with your gh login.
+- `/plan` says "This is a review: make no code changes during it" instead of claiming plan mode. A plain "yes" or "yes to all" still doesn't pick BIG or SMALL, so it asks once more; if the reply still doesn't pick one, or you tell it to choose, it picks and says which. `.claude/plan-review.md` adds review criteria, and your own instructions come first.
+- `pharaoh:refactor` runs the six steps its description lists: module context, blast radius, reachability, dependencies, naming conflicts, and a search for the tests to change.
+- Skills install from `npx-skills/`, this package's build of `skills/`.
+- `pharaoh_account` only reads now: your plan, live repo and upgrade link. Switching the live repo and refreshing a repo moved to the new `pharaoh_manage_repo`, which Claude Code asks about before it runs. The interactive setup's allow rules need no change: they already list the read-only tools, `pharaoh_account` among them, and leave `pharaoh_manage_repo` out.
+- Every tool has a title, and the tool descriptions say what each tool returns instead of which other tool to avoid.
+- The `pharaoh` skill's connection URL is `https://mcp.pharaoh.so/mcp` instead of `/sse`. The skill also carries the guidance that was only in the server instructions: one Pharaoh call answers what grep and file reads take many turns to piece together, load Pharaoh's tools before the first code search when your client defers them, summarize a block marked "Trace view available" instead of reproducing it, and check related repos when a change touches shared interfaces.
+- The server instructions state facts: what Pharaoh maps, which tool answers which question, what the graph leaves to grep, how repos are mapped and what each account tool does. Asking Pharaoh first, not re-checking its answers with grep, surfacing and crediting its ★ blocks and the rest of that guidance now live in the `pharaoh` skill. Claude Code and OpenClaw list the skill in every session and load its body only when they use it. The Grep hook and the optional `~/.claude/CLAUDE.md` line are unchanged and apply from the start of a session.
+
 ## [0.3.54] - 2026-10-24
 
 ### Added

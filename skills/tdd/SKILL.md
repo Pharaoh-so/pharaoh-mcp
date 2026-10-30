@@ -2,7 +2,9 @@
 name: tdd
 prompt-name: test-driven-development
 description: "Test-driven development discipline. Write the failing test first, watch it fail, write minimal code to pass, refactor. No production code without a failing test. No exceptions without explicit permission. Covers red-green-refactor cycle, common rationalizations, and when to start over."
-version: 0.2.0
+channels: npx
+license: MIT. Adapted from obra/superpowers, Copyright (c) 2025 Jesse Vincent; see NOTICE in @pharaoh-so/mcp
+version: 0.2.1
 homepage: https://pharaoh.so
 user-invocable: true
 metadata: {"emoji": "☥", "tags": ["tdd", "testing", "red-green-refactor", "quality", "discipline"]}

@@ -4,7 +4,7 @@ description: Architecture-aware code review with Pharaoh
 
 # Review with Pharaoh
 
-The definitive code review, for any codebase. Architecture-aware, branch-aware, multi-agent, adversarial. Five phases that combine Pharaoh's knowledge graph with parallel specialized reviewers and an independent second opinion from a different model. Every phase works without Pharaoh too; Pharaoh makes the architecture picture exact and cheap where it maps the repo.
+Architecture-aware, branch-aware, multi-agent, adversarial code review. Five phases that combine Pharaoh's knowledge graph with parallel specialized reviewers and an independent second opinion from a different model. Every phase works without Pharaoh too; Pharaoh makes the architecture picture exact and cheap where it maps the repo.
 
 A review always reaches a verdict. When a phase needs something your client doesn't have (Pharaoh, a shell, subagents, a second model), it says how to carry on without it: do that, and name what was missing in the review output. Ask the user only when someone is there to answer.
 
@@ -30,7 +30,7 @@ No shell, or no git? Review the diff you were given (a file, a pasted patch, a p
    git log --oneline -1                   # latest commit
    ```
 
-2. Determine the base (where this branch diverged from the branch it merges into). The target is the first of these that resolves:
+2. Determine the base (where this branch diverged from the branch it merges into). The target is the first of these that resolves (`gh pr view` asks GitHub, with your own gh login, for the open PR's target branch):
    ```bash
    TARGET=$(gh pr view --json baseRefName --jq '"origin/" + .baseRefName' 2>/dev/null)   # the open PR's target branch
    [ -n "$TARGET" ] || TARGET=$(git symbolic-ref -q --short refs/remotes/origin/HEAD)    # the default branch, set by git clone

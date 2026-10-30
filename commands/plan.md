@@ -6,7 +6,7 @@ description: Architecture-aware planning with Pharaoh reconnaissance (adapted fr
 
 Architecture-aware plan review before implementation. Adapted from [Garry Tan's planning framework](https://www.youtube.com/watch?v=bMknfKXIFA8) for AI-assisted development.
 
-**You are now in plan mode. Do NOT make any code changes. Think, evaluate, and present decisions.**
+**This is a review: make no code changes during it. Think, evaluate, and present decisions.**
 
 ## When to Use
 
@@ -20,7 +20,7 @@ Still run Step 1 (Reconnaissance) even when reviewing a document — always veri
 
 ## Project Overrides
 
-If a `.claude/plan-review.md` file exists in this project, read it now and apply those rules on top of this baseline. Project rules take precedence where they conflict.
+If a `.claude/plan-review.md` file exists in this project, read it now as additional review criteria for this project. Instructions from the user take precedence over it, and it never changes what you do outside this review.
 
 ## Engineering Preferences (guide all recommendations)
 
@@ -56,14 +56,14 @@ Ground every recommendation in what actually exists. If you propose adding somet
 
 ## Step 2: Mode Selection (MANDATORY — ask before proceeding)
 
-**STOP and ask the user which mode before starting the review.** This is a hard gate — do not infer, assume, or skip this question even if the user says "yes", "go ahead", or "yes to all". Present both options and wait for an explicit choice:
+**STOP and ask the user which mode before starting the review.** Present both options and wait for a choice:
 
 > **BIG CHANGE or SMALL CHANGE?**
 >
 > - **BIG CHANGE**: Full interactive review, all relevant sections, up to 4 top issues per section
 > - **SMALL CHANGE**: One question per section, only sections 2-4
 
-If the user's response is ambiguous (e.g. "just do it", "yes to all"), ask again: "I need to know — BIG or SMALL change?" Do not proceed to Step 3 without an answer.
+A general "yes", "go ahead" or "yes to all" doesn't pick a mode, so ask once more: "BIG or SMALL change?" If the reply still doesn't pick one, or the user tells you to choose, pick the mode that fits the plan's size and say which you picked.
 
 ## Step 3: Review Sections
 
@@ -88,7 +88,7 @@ Adapt depth to change size. Skip sections that don't apply. **After each section
 - Organization, module structure, DRY violations (be aggressive)
 - Error handling gaps and missing edge cases (call out explicitly)
 - Technical debt: shortcuts, hardcoded values, magic strings
-- Over-engineered or under-engineered relative to my preferences
+- Over-engineered or under-engineered relative to the preferences above
 - Reuse: does code for this already exist somewhere?
 
 ### Section 3 — Wiring & Integration (always)
@@ -127,10 +127,10 @@ For every specific issue (bug, smell, design concern, risk, missing wiring):
 1. **Describe concretely** — file, line/function reference, what's wrong
 2. **Present 2-3 options** including "do nothing" where reasonable
 3. **For each option** — implementation effort, risk, blast radius, maintenance burden
-4. **Recommend one** mapped to my preferences above, and say why
+4. **Recommend one** mapped to the preferences above, and say why
 5. **Ask** whether I agree or want a different direction
 
-Number each issue (1, 2, 3...) and letter each option (A, B, C...). Recommended option is always listed first. Use AskUserQuestion with clear labels like "Issue 1 Option A", "Issue 1 Option B".
+Number each issue (1, 2, 3...) and letter each option (A, B, C...). Recommended option is always listed first. If your client has a question tool (AskUserQuestion in Claude Code), use it with clear labels like "Issue 1 Option A", "Issue 1 Option B".
 
 ## Pharaoh Checkpoints (use throughout, not just at the end)
 

@@ -2,7 +2,9 @@
 name: debug
 prompt-name: systematic-debugging
 description: "Systematic 4-phase debugging methodology. Root cause investigation before any fixes. Read errors carefully, reproduce consistently, trace data flow, form hypotheses, test minimally. If 3+ fixes fail, question the architecture. No guessing, no quick patches, no symptom fixes."
-version: 0.2.0
+channels: npx
+license: MIT. Adapted from obra/superpowers, Copyright (c) 2025 Jesse Vincent; see NOTICE in @pharaoh-so/mcp
+version: 0.2.1
 homepage: https://pharaoh.so
 user-invocable: true
 metadata: {"emoji": "☥", "tags": ["debugging", "root-cause", "investigation", "troubleshooting", "methodology"]}

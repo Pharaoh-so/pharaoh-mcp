@@ -466,12 +466,13 @@ describe("installSkills", () => {
 		expect(core).toMatch(/^---\n[\s\S]*?name:\s*pharaoh\n/);
 		expect(existsSync(join(skillsDir, "pharaoh-pharaoh"))).toBe(false);
 		expect(existsSync(join(skillsDir, "pharaoh-tdd", "SKILL.md"))).toBe(true);
-		// Only `name:` is rewritten; prompt-name and the body are copied verbatim.
-		const plan = readFileSync(join(skillsDir, "pharaoh-plan", "SKILL.md"), "utf-8");
-		const source = readFileSync(join(__dirname, "..", "skills", "plan", "SKILL.md"), "utf-8");
+		// Only `name:` is rewritten; the rest is npx's render, copied verbatim (never the
+		// source in skills/, whose channel markers and connector text would reach the user).
+		const review = readFileSync(join(skillsDir, "pharaoh-review", "SKILL.md"), "utf-8");
+		const source = readFileSync(join(__dirname, "..", "npx-skills", "review", "SKILL.md"), "utf-8");
 		const stripName = (s: string) => s.replace(/^name:\s*.+$/m, "");
-		expect(plan).toMatch(/^---\n[\s\S]*?name:\s*pharaoh-plan\n/);
-		expect(stripName(plan)).toBe(stripName(source));
+		expect(review).toMatch(/^---\n[\s\S]*?name:\s*pharaoh-review\n/);
+		expect(stripName(review)).toBe(stripName(source));
 		// The vision skill was removed with the vision tools.
 		expect(existsSync(join(skillsDir, "pharaoh-vision"))).toBe(false);
 		// Bare-name variants must not exist.
@@ -667,7 +668,7 @@ describe("SC-6: allowReadTools (interactive setup only)", () => {
 		(JSON.parse(readFileSync(settingsPath, "utf-8")) as { permissions: { allow: string[] } })
 			.permissions.allow;
 
-	it("allow-lists the read tools and pharaoh_account by full name, never a prefix or a destructive tool", () => {
+	it("allow-lists the read-only tools by full name, never a prefix or a tool that changes something", () => {
 		writeFileSync(settingsPath, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
 
 		expect(allowReadTools(home)).toBe("added");
@@ -684,15 +685,17 @@ describe("SC-6: allowReadTools (interactive setup only)", () => {
 		]);
 	});
 
-	it("names only tools in the bundled catalog, none of them destructive", () => {
+	// Breaks when a tool that changes something (pharaoh_manage_repo) is
+	// allow-listed, or a read-only tool is left out and prompts for nothing.
+	it("allow-lists exactly the bundled catalog's read-only tools", () => {
 		const catalog = JSON.parse(
 			readFileSync(join(__dirname, "..", "inspect-tools.json"), "utf-8"),
-		) as { tools: { name: string; annotations?: { destructiveHint?: boolean } }[] };
-		const byName = new Map(catalog.tools.map((t) => [`mcp__pharaoh__${t.name}`, t]));
-		for (const rule of PHARAOH_ALLOW_RULES) {
-			expect(byName.get(rule), rule).toBeDefined();
-			expect(byName.get(rule)?.annotations?.destructiveHint, rule).toBe(false);
-		}
+		) as { tools: { name: string; annotations?: { readOnlyHint?: boolean } }[] };
+		const readOnly = catalog.tools
+			.filter((t) => t.annotations?.readOnlyHint === true)
+			.map((t) => `mcp__pharaoh__${t.name}`);
+		expect([...PHARAOH_ALLOW_RULES].sort()).toEqual(readOnly.sort());
+		expect(catalog.tools.map((t) => t.name)).toContain("pharaoh_manage_repo");
 	});
 
 	it("does not create settings.json when the user has none", () => {

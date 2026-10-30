@@ -1,0 +1,8 @@
+{
+	"mcpServers": {
+		"pharaoh": {
+			"type": "http",
+			"url": "https://mcp.pharaoh.so/mcp"
+		}
+	}
+}

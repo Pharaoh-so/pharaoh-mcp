@@ -16,3 +16,9 @@ chmodSync(entry, 0o755);
 const { name, version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const mcp = { mcpServers: { pharaoh: { command: "npx", args: [`${name}@${version}`] } } };
 writeFileSync(join(root, ".mcp.json"), `${JSON.stringify(mcp, null, "\t")}\n`);
+
+// The Claude directory plugin (plugins/pharaoh/, generated from skills/) carries the
+// same version, so a release bumps both.
+const plugin = join(root, "plugins", "pharaoh", ".claude-plugin", "plugin.json");
+const manifest = JSON.parse(readFileSync(plugin, "utf8"));
+writeFileSync(plugin, `${JSON.stringify({ ...manifest, version }, null, "\t")}\n`);

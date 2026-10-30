@@ -130,7 +130,7 @@
       const TONES = ["warning","error","muted"];
       const STATES = ["ok","pending","warning","error"];
       // What each tool is doing while it runs, shown with the argument it targets.
-      const VERBS = { get_blast_radius:"Tracing callers of", get_unused_code:"Checking reachability in", search_functions:"Searching for", get_codebase_map:"Mapping", get_module_context:"Reading module", pharaoh_recon:"Running recon on", pharaoh_account:"Checking account" };
+      const VERBS = { get_blast_radius:"Tracing callers of", get_unused_code:"Checking reachability in", search_functions:"Searching for", get_codebase_map:"Mapping", get_module_context:"Reading module", pharaoh_recon:"Running recon on", pharaoh_account:"Checking account", pharaoh_manage_repo:"Updating" };
       const root = document.getElementById("trace");
       const fields = Object.fromEntries(["kind","target","title","summary","meta","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","drawer","tree","fallback","notes","provenance"].map(id => [id,document.getElementById(id)]));
       const compact = new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
