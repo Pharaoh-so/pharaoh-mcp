@@ -8,13 +8,14 @@
   <title>Pharaoh Trace</title>
   <style>
     /* Host tokens first: styles.variables lands on :root. Each fallback is Claude's default, so a host
-       that sends none still gets a themed card. Gold is the one brand colour; the rest is the host's. */
+       that sends none still gets a themed card. Gold and the slice colours are the card's own; the rest is the host's. */
     :root { color-scheme:light dark;
       --ink:var(--color-text-primary,light-dark(#141413,#faf9f5)); --text:var(--color-text-secondary,light-dark(#3d3d3a,#c2c0b6)); --muted:var(--color-text-tertiary,light-dark(#73726c,#9c9a92));
       --rule:var(--color-border-tertiary,light-dark(rgba(31,30,29,.15),rgba(222,220,209,.15))); --track:var(--color-background-secondary,light-dark(#f5f4ed,#262624)); --focus:var(--color-ring-primary,light-dark(rgba(20,20,19,.7),rgba(250,249,245,.7)));
       --red:var(--color-text-danger,light-dark(#7f2c28,#ee8884)); --amber:var(--color-text-warning,light-dark(#5a4815,#d1a041)); --green:var(--color-text-success,light-dark(#265b19,#7ab948));
       --gold:light-dark(#86610c,#d4a843);
-      --s0:light-dark(#b08515,#d4a843); --s1:light-dark(#c9a24a,#b08a3a); --s2:light-dark(#d9bb72,#8c6e31); --s3:light-dark(#e6cf98,#6e5728); --s4:light-dark(#efdfb8,#574522);
+      /* Slices are separate things, so they share one lightness and differ by hue. The order alternates warm and cool, which keeps neighbours apart under colour blindness; it clears red, amber and green, which mean error, warning and ok here. */
+      --s0:light-dark(#977100,#cca13e); --s1:light-dark(#7d66b9,#ad97ee); --s2:light-dark(#008d65,#4ac094); --s3:light-dark(#5374c1,#81a5f6); --s4:light-dark(#aa5688,#df86ba);
       --s-muted:var(--color-border-primary,light-dark(rgba(31,30,29,.4),rgba(222,220,209,.4))); --s-warning:var(--color-border-warning,light-dark(#805c1f,#a87829)); --s-error:var(--color-border-danger,light-dark(#a73d39,#cd5c58));
       --sans:var(--font-sans,system-ui,-apple-system,"Segoe UI",sans-serif); --mono:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);
       --type-heading:var(--font-heading-md-size,16px); --type-body:var(--font-text-sm-size,14px); --type-caption:var(--font-text-xs-size,12px); --leading:var(--font-text-sm-line-height,1.4);
@@ -39,16 +40,23 @@
     .meta { margin-left:auto; display:flex; gap:10px; white-space:nowrap; font-size:var(--type-caption); }
     #verdict[data-state="error"] { color:var(--red); } #verdict[data-state="warning"] { color:var(--amber); } #verdict[data-state="ok"] { color:var(--green); }
     #sha { color:var(--muted); font-family:var(--mono); }
-    .bar { position:relative; display:flex; gap:2px; height:6px; margin:8px 0 0; border-radius:var(--radius-small); overflow:hidden; background:var(--track); }
-    .bar i,.mini i { display:block; flex:0 1 0; min-width:0; }
-    .bar i[data-shown] { min-width:3px; }
-    .s0 { background:var(--s0); } .s1 { background:var(--s1); } .s2 { background:var(--s2); } .s3 { background:var(--s3); } .s4 { background:var(--s4); }
-    .muted { background:var(--s-muted); } .warning { background:var(--s-warning); } .error { background:var(--s-error); }
+    /* Bars are text. Each cell is a tick-sized window onto a caption-size glyph, set apart from the next, so █ reads as a tick, not a rule.
+       Whole pixels: a window's edges round the same way, so every tick lands the same width on a 1x screen. */
+    .bar,.sw { --tick-width:5px; --tick-height:8px; }
+    .mini,.meter { --tick-width:4px; --tick-height:6px; }
+    .bar,.mini,.meter,.sw { font:var(--regular) var(--type-caption)/var(--tick-height) var(--mono); letter-spacing:0; font-variant-ligatures:none; -webkit-user-select:none; user-select:none; }
+    .bar,.mini,.meter { display:grid; grid-template-columns:repeat(var(--cols),var(--tick-width)); justify-content:space-between; min-width:0; }
+    .bar span,.mini span,.meter span,.sw { position:relative; width:var(--tick-width); height:var(--tick-height); overflow:hidden; }
+    .bar span,.mini span,.meter span { color:var(--s-muted); }
+    .bar span::after,.mini span::after,.meter span::after { content:attr(data-g); position:absolute; inset:0; color:var(--tone,var(--gold)); }
+    .bar { margin:8px 0 0; }
+    .s0 { --tone:var(--s0); } .s1 { --tone:var(--s1); } .s2 { --tone:var(--s2); } .s3 { --tone:var(--s3); } .s4 { --tone:var(--s4); }
+    .muted { --tone:var(--muted); } .warning { --tone:var(--s-warning); } .error { --tone:var(--s-error); }
     .legend { display:flex; flex-wrap:wrap; gap:2px 14px; margin:6px 0 0; color:var(--muted); font-size:var(--type-caption); min-width:0; }
     .legend:empty { display:none; }
     #trace[data-reveal] .legend { opacity:0; }
     .legend b { color:var(--text); font:var(--strong) var(--type-caption) var(--mono); margin-left:4px; }
-    .sw { display:inline-block; width:8px; height:8px; border-radius:var(--radius-small); margin-right:5px; }
+    .sw { display:inline-block; color:var(--tone); margin-right:5px; }
     .foot { display:flex; justify-content:flex-end; gap:14px; margin-top:6px; }
     .action { display:flex; align-items:center; gap:4px; border:0; background:none; padding:2px 0; color:var(--gold); font:var(--regular) var(--type-caption) var(--sans); cursor:pointer; white-space:nowrap; }
     .action:hover { color:var(--ink); }
@@ -66,7 +74,7 @@
     .rows .detail { color:var(--text); }
     .rows .end { margin-left:auto; white-space:nowrap; }
     .rows .more { color:var(--muted); }
-    .rows .mini { display:flex; gap:1px; flex:1 0 100%; height:3px; margin-top:3px; border-radius:var(--radius-small); overflow:hidden; background:var(--track); }
+    .rows .mini { flex:1 0 100%; margin-top:4px; }
     [data-state="ok"] > .mark-s { color:var(--green); } [data-state="warning"] > .mark-s, [data-state="pending"] > .mark-s { color:var(--amber); } [data-state="error"] > .mark-s, .end[data-state="error"] { color:var(--red); } .end[data-state="warning"] { color:var(--amber); }
     .drawer { display:grid; grid-template-rows:0fr; }
     .drawer[data-open] { grid-template-rows:1fr; }
@@ -88,8 +96,7 @@
     .tree .label .caveat { color:var(--amber); font-family:var(--sans); margin:0 0 0 8px; }
     .badge { color:var(--muted); font-family:var(--mono); text-align:right; white-space:nowrap; }
     .badge[data-state="ok"] { color:var(--green); } .badge[data-state="warning"],.badge[data-state="pending"] { color:var(--amber); } .badge[data-state="error"] { color:var(--red); }
-    .meter { display:block; height:3px; margin-top:3px; border-radius:var(--radius-small); background:var(--track); max-width:240px; }
-    .meter i { display:block; height:100%; border-radius:var(--radius-small); background:var(--gold); }
+    .meter { margin-top:4px; max-width:190px; }
     .notes,.provenance { color:var(--muted); font-size:var(--type-caption); margin:6px 0 2px; }
     .notes p { margin:2px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
     #fallback { font:var(--regular) var(--type-caption)/1.5 var(--mono); color:var(--text); margin:6px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
@@ -100,15 +107,18 @@
     :root[data-display="fullscreen"],:root[data-display="fullscreen"] body { height:100%; }
     :root[data-display="fullscreen"] body { overflow-y:auto; }
     :root[data-display="fullscreen"] #trace { border:0; border-radius:0; }
+    /* The frame is short for a moment before a taller result is sized: a scrollbar then would shrink the card and redraw its bars mid-arrival. */
+    :root:not([data-display="fullscreen"]) { scrollbar-width:none; }
     /* Motion only for people who have not asked to reduce it. */
     @media(prefers-reduced-motion:no-preference) {
-      .bar i,.mini i { transition:flex-grow .7s cubic-bezier(.22,.8,.24,1); }
+      #trace:not([data-settled]) .bar span::after,#trace:not([data-settled]) .mini span::after { animation:tick 1ms calc(var(--i) * .7s / var(--cols)) backwards; }
+      @keyframes tick { from { opacity:0; } }
       .legend { transition:opacity .4s ease .2s; }
       .chev { transition:transform .3s ease; }
       .drawer { transition:grid-template-rows .3s ease; }
       .tree summary .label::before { transition:transform .2s ease; }
-      #trace[data-state="pending"] .bar::after,#trace[data-state="waiting"] .bar::after { content:""; position:absolute; top:0; bottom:0; left:0; width:35%; background:linear-gradient(90deg,transparent,var(--gold),transparent); opacity:.55; animation:sweep 1.3s ease-in-out infinite; }
-      @keyframes sweep { from { transform:translateX(-100%); } to { transform:translateX(290%); } }
+      #trace[data-state="pending"] .bar span::after,#trace[data-state="waiting"] .bar span::after { content:"█"; color:var(--gold); opacity:0; animation:walk 1.5s linear calc(var(--i) * 1.5s / var(--cols)) infinite; }
+      @keyframes walk { from { opacity:1; } 16%,to { opacity:0; } }
     }
     [hidden] { display:none; }
   </style>
@@ -146,6 +156,13 @@
       const LIMITS = { bytes:65536, nodes:120, depth:6, label:512, detail:2048, badge:128, summary:1024, notes:16, note:1024, repo:256, segments:8 };
       const MAX_TEXT = 32768;
       const MAX_ROWS = 5;
+      // Px from one tick to the next, its width plus the gap: a wider card gets more ticks, not fatter ones.
+      const TICK_PITCH = {bar:7,mini:6};
+      const TICK_GAP = 2;
+      // Lays bars out while the frame has no width yet; the first resize refits them.
+      const FALLBACK_WIDTH = 340;
+      const METER_CELLS = 32;
+      const BLOCKS = ["","▏","▎","▍","▌","▋","▊","▉","█"];
       const TONES = ["warning","error","muted"];
       const STATES = ["ok","pending","warning","error"];
       const DISPLAY_MODES = ["inline","fullscreen"];
@@ -155,6 +172,7 @@
       // What each tool is doing while it runs, shown with the argument it targets.
       const VERBS = { get_blast_radius:"Tracing callers of", get_unused_code:"Checking reachability in", search_functions:"Searching for", get_codebase_map:"Mapping", get_module_context:"Reading module", pharaoh_recon:"Running recon on", pharaoh_account:"Checking account", pharaoh_manage_repo:"Updating" };
       const root = document.getElementById("trace");
+      const head = root.querySelector(".head");
       const page = document.documentElement;
       const fields = Object.fromEntries(["kind","target","title","summary","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","expand","drawer","tree","fallback","notes","provenance"].map(id => [id,document.getElementById(id)]));
       const compact = new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
@@ -167,6 +185,7 @@
       let resizeFrame = 0;
       let lastHeight = 0;
       let lastWidth = 0;
+      let bars = [];
       let hasDetails = false;
       let displayMode = "inline";
       let hostModes = [];
@@ -228,6 +247,8 @@
         delete fields.verdict.dataset.state;
         fields.sha.title = "";
         fields.bar.hidden = true;
+        bars = [];
+        delete root.dataset.settled;
         fields.rows.hidden = true;
         fields.notes.hidden = true;
         hasDetails = false;
@@ -303,30 +324,70 @@
           return view.nodes.every(node => visit(node,1));
         } catch { return false; }
       }
-      // Segments start empty and grow to their share once painted: the one motion on arrival.
-      function segments(target,items) {
-        const total = items.reduce((sum,item) => sum + item.value,0);
-        if (!total) return [];
-        let shade = 0;
-        return items.filter(item => item.value > 0).map((item,index) => {
-          const slice = element("i",item.tone || `s${Math.min(shade++,4)}`);
-          slice.style.transitionDelay = `${index * 70}ms`;
-          slice.dataset.share = String(item.value / total);
-          target.append(slice);
-          return slice;
-        });
+      // Largest remainder: cells sum to exactly cols, and every slice keeps at least one.
+      function allocate(values,cols) {
+        const total = values.reduce((sum,value) => sum + value,0);
+        const exact = values.map(value => value / total * cols);
+        const cells = exact.map(share => Math.max(1,Math.floor(share)));
+        const spare = cols - cells.reduce((sum,count) => sum + count,0);
+        const shortest = exact.map((share,index) => [share - cells[index],index]).sort((a,b) => b[0] - a[0]);
+        for (const [,index] of shortest.slice(0,Math.max(0,spare))) cells[index]++;
+        for (let over = -spare; over > 0; over--) cells[cells.indexOf(Math.max(...cells))]--;
+        return cells;
       }
-      function grow(slices) {
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          for (const slice of slices) { slice.style.flexGrow = slice.dataset.share; slice.dataset.shown = ""; }
-          delete root.dataset.reveal;
-        }));
+      // Every cell is a ░ with its real glyph laid over it, so a bar fills in over its own track.
+      function cell(target,tone,glyph) {
+        const node = element("span",tone,"░");
+        if (glyph) node.dataset.g = glyph;
+        node.style.setProperty("--i",target.childElementCount);
+        target.append(node);
+      }
+      const blockFor = item => item.tone === "muted" ? "░" : "█";
+      const colsFor = ({target,shown},width) => Math.max(shown.length * 2 - 1,Math.floor(((width || FALLBACK_WIDTH) + TICK_GAP) / TICK_PITCH[target.className]));
+      // One empty cell separates slices: ticks have no edge of their own to tell two golds apart.
+      function drawBar(bar,width) {
+        const {target,shown} = bar;
+        bar.cols = colsFor(bar,width);
+        const counts = allocate(shown.map(item => item.value),bar.cols - shown.length + 1);
+        target.style.setProperty("--cols",bar.cols);
+        target.replaceChildren();
+        let shade = 0;
+        shown.forEach((item,position) => {
+          if (position) target.append(element("span"));
+          const tone = item.tone || `s${Math.min(shade++,4)}`;
+          for (let count = counts[position]; count > 0; count--) cell(target,tone,blockFor(item));
+        });
+        while (target.childElementCount < bar.cols) cell(target);
+      }
+      function addBar(target,items) {
+        const bar = {target,shown:items.filter(item => item.value > 0)};
+        bars.push(bar);
+        drawBar(bar,head.clientWidth);
+      }
+      // A new column count redraws a bar, without the arrival motion. Smaller changes are the cell spacing's to absorb, so running motion is left alone.
+      function refit() {
+        const width = head.clientWidth;
+        const stale = bars.filter(bar => colsFor(bar,width) !== bar.cols);
+        if (!stale.length) return;
+        root.dataset.settled = "";
+        for (const bar of stale) drawBar(bar,width);
+      }
+      // The empty bar shown until a result arrives.
+      function showTrack() {
+        addBar(fields.bar,[]);
+        fields.bar.hidden = false;
+      }
+      // The bars fill by themselves in CSS; the legend fades in once they have painted.
+      function reveal() {
+        requestAnimationFrame(() => requestAnimationFrame(() => { delete root.dataset.reveal; }));
       }
       function legend(items) {
         let shade = 0;
         for (const item of items.filter(item => item.value > 0)) {
           const entry = element("span");
-          entry.append(element("span",`sw ${item.tone || `s${Math.min(shade++,4)}`}`),item.label,element("b","",compact.format(item.value)));
+          const swatch = element("span",`sw ${item.tone || `s${Math.min(shade++,4)}`}`,blockFor(item));
+          swatch.setAttribute("aria-hidden","true");
+          entry.append(swatch,item.label,element("b","",compact.format(item.value)));
           fields.legend.append(entry);
         }
       }
@@ -337,7 +398,7 @@
         target.hidden = false;
       }
       // Sections (recon) and status lines (states, named checks) stay visible; groups open on demand.
-      function rowFor(node,slices) {
+      function rowFor(node) {
         const item = element("li");
         if (node.status) {
           item.dataset.state = node.status;
@@ -356,7 +417,7 @@
         if (node.glance?.segments?.length) {
           const mini = element("span","mini");
           mini.setAttribute("aria-hidden","true");
-          slices.push(...segments(mini,node.glance.segments));
+          addBar(mini,node.glance.segments);
           item.append(mini);
         }
         return item;
@@ -370,9 +431,11 @@
         if (node.meter) {
           const meter = element("span","meter");
           meter.title = `${node.meter.value} / ${node.meter.total}`;
-          const fill = element("i");
-          fill.style.width = `${Math.max(1,Math.round(node.meter.value / node.meter.total * 100))}%`;
-          meter.append(fill);
+          meter.setAttribute("aria-hidden","true");
+          meter.style.setProperty("--cols",METER_CELLS);
+          // Eighths of a cell, and never none: a tiny value still shows. The window clips the top three to look full.
+          const eighths = Math.max(1,Math.round(node.meter.value / node.meter.total * METER_CELLS * 8));
+          for (let index = 0; index < METER_CELLS; index++) cell(meter,"",BLOCKS[Math.min(8,Math.max(0,eighths - index * 8))]);
           label.append(meter);
         }
         if (node.glance?.caveat) label.append(element("span","caveat",node.glance.caveat));
@@ -404,15 +467,16 @@
         }
         if (freshness) display("provenance",[freshness.mappedCommit ? `Mapped ${freshness.mappedCommit}` : "Mapped commit unknown",freshness.lastAnalyzed ? `as of ${freshness.lastAnalyzed}` : "map time unknown",`status: ${freshness.status}`].join(" · "));
         caveats([glance.caveat,freshness?.status === "stale" ? "Map is behind the latest push" : ""].filter(Boolean));
-        const slices = segments(fields.bar,glance.segments || []);
-        fields.bar.hidden = slices.length === 0;
+        const shown = glance.segments?.some(item => item.value > 0);
+        if (shown) addBar(fields.bar,glance.segments);
+        fields.bar.hidden = !shown;
         legend(glance.segments || []);
         // Up to MAX_ROWS rows, warnings and verdicts first, shown in their original order.
         const candidates = view.nodes.filter(node => node.glance || node.status);
         const urgent = node => node.status === "error" || node.status === "warning" || node.glance?.verdict || node.glance?.caveat;
         const chosen = new Set([...new Set([...candidates.filter(urgent),...candidates])].slice(0,MAX_ROWS));
         const visible = candidates.filter(node => chosen.has(node));
-        for (const node of visible) fields.rows.append(rowFor(node,slices));
+        for (const node of visible) fields.rows.append(rowFor(node));
         if (candidates.length > visible.length) fields.rows.append(element("li","more",`+${candidates.length - visible.length} more in Details`));
         fields.rows.hidden = visible.length === 0;
         for (const node of view.nodes) if (!visible.includes(node) || node.children?.length) fields.tree.append(renderNode(node));
@@ -421,7 +485,7 @@
         notes(view.notes || []);
         hasDetails = fields.tree.childElementCount > 0 || !fields.notes.hidden || !fields.provenance.hidden;
         showActions();
-        grow(slices);
+        reveal();
       }
       function input(params) {
         cancelled = false;
@@ -433,7 +497,7 @@
         headline("","");
         display("kind",target ? `${verb} ` : `${verb}…`);
         display("target",target ? `${target}…` : "");
-        fields.bar.hidden = false;
+        showTrack();
       }
       function result(params) {
         if (cancelled) return;
@@ -464,6 +528,7 @@
         if (!ready || closed || resizeFrame) return;
         resizeFrame = requestAnimationFrame(() => {
           resizeFrame = 0;
+          refit();
           const height = Math.ceil(document.body.getBoundingClientRect().height);
           const width = Math.ceil(document.documentElement.clientWidth);
           if (height !== lastHeight || width !== lastWidth) {
@@ -527,10 +592,11 @@
         size();
       }
       window.addEventListener("message",receive);
+      showTrack();
       const initTimeout = setTimeout(() => {
         if (!ready && !closed) fallback("Text response available","Read the tool response in chat.","Trace has not received a host connection.");
       },10000);
-      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.3.0"},appCapabilities:{availableDisplayModes:DISPLAY_MODES},protocolVersion:PROTOCOL_VERSION}});
+      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.4.0"},appCapabilities:{availableDisplayModes:DISPLAY_MODES},protocolVersion:PROTOCOL_VERSION}});
     })();
   </script>
 </body>
