@@ -81,8 +81,9 @@ export function verifyPackPaths(paths) {
 	assert.equal(new Set(paths).size, paths.length, "Duplicate archive entries");
 	for (const path of paths) {
 		assert.ok(safePath(path), `Unsafe archive path: ${path}`);
+		// skills/ is the pre-npx-skills layout; drop it once main's package.json no longer ships it.
 		assert.ok(
-			/^(?:package\.json|README\.md|LICENSE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
+			/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
 				path,
 			),
 			`Unexpected npm file: ${path}`,
