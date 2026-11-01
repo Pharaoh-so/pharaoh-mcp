@@ -224,7 +224,7 @@
       function showActions() {
         const full = displayMode === "fullscreen";
         fields.toggle.hidden = !hasDetails || full;
-        fields.expand.hidden = !hasDetails || !hostModes.includes(full ? "inline" : "fullscreen");
+        fields.expand.hidden = !(hasDetails || full) || !hostModes.includes(full ? "inline" : "fullscreen");
         fields.expand.textContent = full ? "Exit full screen" : "Full screen";
         fields.foot.hidden = fields.toggle.hidden && fields.expand.hidden;
       }
@@ -235,9 +235,10 @@
         fields["toggle-label"].textContent = open ? "Hide" : "Details";
       }
       function setDisplay(mode) {
+        // Hosts repeat the mode in context updates, and Details stay as the user left them.
+        if (mode !== displayMode) setOpen(mode === "fullscreen");
         displayMode = mode;
         page.dataset.display = mode;
-        setOpen(mode === "fullscreen");
         showActions();
       }
       function clearResult() {
