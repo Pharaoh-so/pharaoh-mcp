@@ -285,7 +285,7 @@
     {
       "name": "get_unused_code",
       "title": "Unused Code",
-      "description": "Find code nothing runs: functions no production entry point (endpoint, CLI command, cron job, event handler, worker, entry file) reaches.\n\nCALL THIS WHEN:\n• Cleaning up a module or deleting a function\n• Confirming new code is reached from an entry point\n\nRETURNS: Reachability through the call graph, not text references.\n• Dead: unreached, named in no other file, and no production file imports its file.\n• Possibly unused: unreached, but named in other files (string dispatch, dynamic loading) or its file is imported. Listed with the files that name it.\n• Used only by tests: exported functions and class methods only test files reference.\nWith `functions`: each one's status, and the call path from an entry point when it's reachable.",
+      "description": "Find code nothing runs: functions no production entry point (endpoint, CLI command, cron job, event handler, worker, entry file) reaches.\n\nCALL THIS WHEN:\n• Cleaning up a module or deleting a function\n• Confirming new code is reached from an entry point\n\nRETURNS: Reachability through the call graph, not text references.\n• Dead: unreached, named in no other file, and no import of its file could reach it.\n• Possibly unused: unreached, but named in other files (string dispatch, dynamic loading) or an import of its file could reach it. Listed with the files that name it.\n• Used only by tests: exported functions and class methods only test files reference.\nWith `functions`: each one's status, and the call path from an entry point when it's reachable.",
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
