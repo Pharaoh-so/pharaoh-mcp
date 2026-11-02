@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NOTICE`: the brainstorm, debug, tdd and verify skills are adapted from [superpowers](https://github.com/obra/superpowers) (MIT, Copyright (c) 2025 Jesse Vincent). Each skill's `license:` field says so too.
 
 ### Changed
+- `get_unused_code` says a Dead function's file has no import that could reach it, instead of "file not imported". An import that names other functions from the same file doesn't count, and never did.
 - The Trace card draws its bars in block characters (`█ ▏ ░`) in your client's monospace font instead of solid CSS bars.
 - `/review` works as before, second opinion from Codex or Claude included. It no longer calls itself "the definitive code review", and Phase 0 says that `gh pr view` asks GitHub for the open PR's target branch with your gh login.
 - `/plan` says "This is a review: make no code changes during it" instead of claiming plan mode. A plain "yes" or "yes to all" still doesn't pick BIG or SMALL, so it asks once more; if the reply still doesn't pick one, or you tell it to choose, it picks and says which. `.claude/plan-review.md` adds review criteria, and your own instructions come first.
