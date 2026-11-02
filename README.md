@@ -264,7 +264,7 @@ Contributions are welcome. Please open an issue first to discuss what you'd like
 
 ## License
 
-[MIT](LICENSE) -- Pharaoh, Inc.
+[MIT](LICENSE) -- 2407066 Alberta Inc.
 
 ## Links
 
