@@ -2,7 +2,7 @@
 	"name": "pharaoh",
 	"displayName": "Pharaoh",
 	"version": "0.3.54",
-	"description": "Plan, review and refactor code against Pharaoh's graph of your GitHub repos: modules, functions, callers, endpoints and dependencies.",
+	"description": "Agents ship invisible bugs. Plan, review and refactor with Pharaoh's map of your GitHub repos, so Claude sees what a change could break before it ships.",
 	"author": {
 		"name": "Pharaoh",
 		"url": "https://pharaoh.so"
@@ -14,5 +14,15 @@
 	"documentationUrl": "https://pharaoh.so/docs",
 	"privacyPolicyUrl": "https://pharaoh.so/docs/use-pharaoh/terms-and-privacy#privacy",
 	"termsOfServiceUrl": "https://pharaoh.so/docs/use-pharaoh/terms-and-privacy#terms",
-	"supportUrl": "https://github.com/Pharaoh-so/pharaoh-mcp/issues"
+	"supportUrl": "https://github.com/Pharaoh-so/pharaoh-mcp/issues",
+	"keywords": [
+		"code-review",
+		"refactoring",
+		"planning",
+		"blast-radius",
+		"dead-code",
+		"architecture",
+		"codebase-map",
+		"mcp"
+	]
 }
