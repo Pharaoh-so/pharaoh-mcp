@@ -24,7 +24,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "title": "Codebase Map"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -121,7 +122,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "title": "Codebase Recon"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -157,7 +159,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "title": "Module Context"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -209,7 +212,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "title": "Blast Radius"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -270,7 +274,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "title": "Search Functions"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -313,7 +318,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "title": "Unused Code"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -342,7 +348,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "title": "Account Status"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -386,7 +393,8 @@
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": true
+        "destructiveHint": true,
+        "title": "Switch or Refresh Live Repo"
       },
       "execution": {
         "taskSupport": "forbidden"
