@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NOTICE`: the brainstorm, debug, tdd and verify skills are adapted from [superpowers](https://github.com/obra/superpowers) (MIT, Copyright (c) 2025 Jesse Vincent). Each skill's `license:` field says so too.
 
 ### Changed
+- Every tool declares `openWorldHint: false` (Pharaoh reaches only your own connected repos), and `pharaoh_account`'s description says it links the plans page.
 - When a repo isn't live, and in `pharaoh_account` for free workspaces, replies link to the plans page on pharaoh.so instead of showing a price and a checkout link.
 - `get_unused_code` says a Dead function's file has no import that could reach it, instead of "file not imported". An import that names other functions from the same file doesn't count, and never did.
 - The Trace card draws its bars in block characters (`█ ▏ ░`) in your client's monospace font instead of solid CSS bars.
