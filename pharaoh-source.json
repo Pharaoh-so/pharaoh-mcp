@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "143955398ff388ef7bc61688532594905490303d",
-  "payloadSha256": "efa02f2cfca757e2a1b078c34750f1d21bceaea961004fa16e386cda7d2e25d5",
+  "commit": "09de76ee0a6443a6dc2d98d03fbffb41da85e646",
+  "payloadSha256": "1a1a476bcffdfa87487d8d66558320541dab25f372577b04b52445a073b0a074",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -51,7 +51,7 @@
     },
     {
       "path": "inspect-tools.json",
-      "sha256": "2c8ed897db19ebdec8d763bb0de1936dd29c2a782099ec8cf0f302525a07ca7a",
+      "sha256": "05ecc5db33dd9fe272e172cc6ce2d6e42e5a8e27df493323dc64039c21bb3e7f",
       "mode": "100644"
     },
     {
@@ -66,7 +66,7 @@
     },
     {
       "path": "npx-skills/pharaoh/SKILL.md",
-      "sha256": "b964cc53e0dd45b1d4c9dca743218517bf4718bd5271d8761d212a87a9c8b913",
+      "sha256": "ca0d1673b7b89b54727aca7fa15e3221394bdb4277a2642b518bef58c1891cce",
       "mode": "100644"
     },
     {
@@ -121,7 +121,7 @@
     },
     {
       "path": "plugins/pharaoh/README.md",
-      "sha256": "22ce399066ca8d2e5a82e87495b0af6cb776d543fa9d60172621aec67b99a44f",
+      "sha256": "4eac84964e9b6647bcccd5fa02f5e3417f8abf8394aee96e63e81cdd09bd23b6",
       "mode": "100644"
     },
     {
@@ -166,7 +166,7 @@
     },
     {
       "path": "skills/pharaoh/SKILL.md",
-      "sha256": "ccb773903e656ed2e5f222dc433abebb706f3629ba1b63557e057d7428456094",
+      "sha256": "7050b17a8e84cbb8ae360f93627051b08d9ab4a9599f796c880fe18c16220783",
       "mode": "100644"
     },
     {

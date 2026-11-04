@@ -36,7 +36,7 @@ Surface the facts in each ★ Pharaoh block in your visible response. Preserve i
 
 ## Repos that aren't mapped
 
-The only supported path is the Pharaoh GitHub App: Free maps one live repo; Pro maps every repo, and mapped repos re-map on every push. Run `pharaoh_account` to get the exact install link for the user's account or org. Do not suggest workarounds for missing repos.
+The only supported path is the Pharaoh GitHub App: Pro maps every repo, as does the trial (after the trial, get_codebase_map keeps answering and the other tools say what's needed), and mapped repos re-map on every push. Run `pharaoh_account` to get the exact install link for the user's account or org. Do not suggest workarounds for missing repos.
 
 ## Vision docs
 

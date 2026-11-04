@@ -45,7 +45,7 @@ The graph reflects the default branch at its last mapped push, and a response sa
 ## Repos that aren't mapped
 
 <!-- only: npx -->
-The only supported path is the Pharaoh GitHub App: Free maps one live repo; Pro maps every repo, and mapped repos re-map on every push. Run `pharaoh_account` to get the exact install link for the user's account or org. Do not suggest workarounds for missing repos.
+The only supported path is the Pharaoh GitHub App: Pro maps every repo, as does the trial (after the trial, get_codebase_map keeps answering and the other tools say what's needed), and mapped repos re-map on every push. Run `pharaoh_account` to get the exact install link for the user's account or org. Do not suggest workarounds for missing repos.
 <!-- /only -->
 <!-- only: connector, plugin -->
 Repos are mapped through the Pharaoh GitHub App, installed on the account or org that owns them, and live repos re-map on every push. `pharaoh_account` shows each workspace's live repo and, where the App isn't installed, its install link. `search_functions` accepts any of the user's mapped repo names.
