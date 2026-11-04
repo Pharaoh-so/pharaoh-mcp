@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `pharaoh` skill's connection URL is `https://mcp.pharaoh.so/mcp` instead of `/sse`. The skill also carries the guidance that was only in the server instructions: one Pharaoh call answers what grep and file reads take many turns to piece together, load Pharaoh's tools before the first code search when your client defers them, summarize a block marked "Trace view available" instead of reproducing it, and check related repos when a change touches shared interfaces.
 - The server instructions state facts: what Pharaoh maps, which tool answers which question, what the graph leaves to grep, how repos are mapped and what each account tool does. Asking Pharaoh first, not re-checking its answers with grep, surfacing and crediting its ★ blocks and the rest of that guidance now live in the `pharaoh` skill. Claude Code and OpenClaw list the skill in every session and load its body only when they use it. The Grep hook and the optional `~/.claude/CLAUDE.md` line are unchanged and apply from the start of a session.
 
+## [0.3.56] - 2026-11-04
+
+### Fixed
+- A connected project that is still mapping during normal setup now starts memory on an ordinary prompt after its mapped revision is verified.
+
+## [0.3.55] - 2026-11-04
+
+### Added
+- Normal interactive setup and upgrades configure local project-memory hooks for accounts with an existing pilot grant. Codex uses its native hook review.
+
 ## [0.3.54] - 2026-10-24
 
 ### Added

@@ -12,6 +12,7 @@
  *                      mode until device flow completes, then swap to SSE in
  *                      place — the stdio session never disconnects.
  */
+import { syncMemoryHooks } from "../project-memory/setup.mjs";
 import {
 	pollForToken,
 	printActivationPrompt,
@@ -64,6 +65,15 @@ const BANNER = [
 	"",
 ].join("\n");
 
+function reportMemorySetup(options: Parameters<typeof syncMemoryHooks>[0]): void {
+	try {
+		const notices = syncMemoryHooks(options);
+		if (notices.length) printLines(...notices);
+	} catch {
+		printLines("Pharaoh: project memory setup could not update local activation.");
+	}
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 
@@ -95,28 +105,28 @@ async function main(): Promise<void> {
 	// Clean mode — remove all pharaoh traces from Claude Code config (MCP entries,
 	// disabled states, project-scoped configs). Useful for resetting broken installs.
 	if (args.includes("--clean")) {
-		const { cleanSlate } = await import("./setup.js");
+		const { cleanCodexSetup, cleanSlate } = await import("./setup.js");
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
 		cleanSlate();
 		uninstallClaudePlugin();
-		printLines(
-			"Pharaoh: removed its MCP entries, plugin and ~/.claude/CLAUDE.md line from Claude Code",
-		);
+		cleanCodexSetup();
+		reportMemorySetup({ removeLegacy: true });
+		printLines("Pharaoh: local setup cleanup finished.");
 		process.exit(0);
 	}
 
 	const { server, logout } = parseArgs(args);
 
 	if (logout) {
-		const { cleanSlate } = await import("./setup.js");
+		const { cleanCodexSetup, cleanSlate } = await import("./setup.js");
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
 		// Credentials first: a cleanup step that fails must never leave the tokens behind.
 		deleteCredentials();
 		cleanSlate();
 		uninstallClaudePlugin();
-		printLines(
-			"Pharaoh: credentials, MCP config, the Claude Code plugin and the ~/.claude/CLAUDE.md line cleared",
-		);
+		cleanCodexSetup();
+		reportMemorySetup({ removeLegacy: true });
+		printLines("Pharaoh: credentials cleared and local setup cleanup finished.");
 		process.exit(0);
 	}
 
@@ -128,10 +138,12 @@ async function main(): Promise<void> {
 	if (isInteractive) {
 		process.stderr.write(`${BANNER}\n`);
 
-		// Setup registers everything through the `claude` CLI on PATH. Without it,
-		// stop before sign-in: nothing is written and saved credentials stay.
-		const { claudeCliMissing, hasClaude, runSetup } = await import("./setup.js");
-		if (!hasClaude()) {
+		const { claudeCliMissing, hasClaude, hasCodex, runCodexSetup, runSetup } = await import(
+			"./setup.js"
+		);
+		const claude = hasClaude();
+		const codex = hasCodex();
+		if (!claude && !codex) {
 			printLines(...claudeCliMissing());
 			process.exit(1);
 		}
@@ -153,7 +165,7 @@ async function main(): Promise<void> {
 		}
 
 		const sseUrl = resolveSseUrl(token.sse_url, server);
-		const newCreds = tokenToCredentials(token, sseUrl);
+		const newCreds = tokenToCredentials(token, sseUrl, server);
 		writeCredentials(newCreds);
 
 		printAuthSuccess(
@@ -162,29 +174,31 @@ async function main(): Promise<void> {
 			token.repos?.length ?? 0,
 		);
 
-		// Register MCP server + install skills (silent — user doesn't need internals).
-		// runSetup has printed the failure and the command to run by hand; no success line.
-		if (!runSetup({ silent: true })) process.exit(1);
-		process.stderr.write("  Setting up...");
-		const { keptCommands } = runInstallSkills(undefined, { silent: true });
-		process.stderr.write(" done.\n");
+		const clients: string[] = [];
+		if (claude && runSetup({ silent: true })) clients.push("claude-code");
+		// Existing Claude-only installs stay unchanged for nonpilot accounts.
+		if (codex && (!claude || newCreds.project_memory?.length)) {
+			if (runCodexSetup()) clients.push("codex");
+		}
+		if (!clients.length) process.exit(1);
+		if (clients.includes("claude-code")) {
+			process.stderr.write("  Setting up...");
+			const { keptCommands } = runInstallSkills(undefined, { silent: true });
+			process.stderr.write(" done.\n");
 
-		// Two things the user must hear about: their settings.json (the only
-		// place this setup edits permissions, never a silent start) and any
-		// command file of theirs that was left alone.
-		printLines(describeAllowReadTools(allowReadTools()));
-		const kept = formatKeptCommands(keptCommands);
-		if (kept) printLines(kept);
+			printLines(describeAllowReadTools(allowReadTools()));
+			const kept = formatKeptCommands(keptCommands);
+			if (kept) printLines(kept);
 
-		// The one line agents act on (bench #1305) goes in the user's own
-		// ~/.claude/CLAUDE.md, so it's asked about once, here, never on a start.
-		const claudeMd = describeClaudeMdOutcome(
-			await offerClaudeMdLine(
-				() => askYesNo(CLAUDE_MD_QUESTION),
-				Boolean(process.stdin.isTTY && process.stderr.isTTY),
-			),
-		);
-		if (claudeMd) printLines(claudeMd);
+			const claudeMd = describeClaudeMdOutcome(
+				await offerClaudeMdLine(
+					() => askYesNo(CLAUDE_MD_QUESTION),
+					Boolean(process.stdin.isTTY && process.stderr.isTTY),
+				),
+			);
+			if (claudeMd) printLines(claudeMd);
+		}
+		reportMemorySetup({ credentials: newCreds, clients });
 
 		// The registration is pinned to this version; upgrading is a deliberate
 		// re-run. Interactive only, and quiet when the registry can't be reached.
@@ -198,7 +212,7 @@ async function main(): Promise<void> {
 
 		printLines(
 			"",
-			"Pharaoh is ready. Try these in a new Claude Code conversation:",
+			"Pharaoh is ready. Try these in a new conversation:",
 			"",
 			'  "What modules does this codebase have?"',
 			'  "Search for functions related to authentication"',

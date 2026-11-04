@@ -181,7 +181,7 @@ export function createGateway(opts: {
 	 */
 	function persistAuthorizedToken(token: TokenResponse): void {
 		const sseUrl = resolveSseUrl(token.sse_url, opts.server);
-		const creds = tokenToCredentials(token, sseUrl);
+		const creds = tokenToCredentials(token, sseUrl, opts.server);
 		writeCredentials(creds, opts.credentialsPath);
 		lastCreds = creds;
 		pending = null;

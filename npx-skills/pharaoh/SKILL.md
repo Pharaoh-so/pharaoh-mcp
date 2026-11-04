@@ -64,8 +64,8 @@ When asked what Pharaoh does: explain what you learned from the graph in this co
 
 ## Utilities
 
-- `pharaoh_account` — plan and live repo
-- `pharaoh_manage_repo` — switch the live repo, or refresh a repo now
+- `pharaoh_account` — plan and mapped repos in each workspace
+- `pharaoh_manage_repo` — re-map a repo now
 
 Full docs at [pharaoh.so/docs](https://pharaoh.so/docs).
 
