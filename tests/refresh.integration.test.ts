@@ -36,7 +36,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Credentials, readCredentials, writeCredentials } from "../src/credentials.js";
-import { loadAndRefresh, refreshIfNeeded } from "../src/refresh.js";
+import { loadAndRefresh, originBoundRefresh, refreshIfNeeded } from "../src/refresh.js";
 
 interface TestServer {
 	url: string;
@@ -48,6 +48,7 @@ interface TestServer {
 function startTestServer(handler: {
 	status: number;
 	body: Record<string, unknown>;
+	location?: string;
 }): Promise<TestServer> {
 	let capturedBody: string | null = null;
 	return new Promise((resolve, reject) => {
@@ -60,6 +61,7 @@ function startTestServer(handler: {
 				capturedBody = body;
 				res.statusCode = handler.status;
 				res.setHeader("Content-Type", "application/json");
+				if (handler.location) res.setHeader("Location", handler.location);
 				res.end(JSON.stringify(handler.body));
 			});
 		});
@@ -479,6 +481,28 @@ describe("loadAndRefresh", () => {
 		// Server received the refresh request (JSON body, not form-encoded)
 		const body = JSON.parse(server.lastRequestBody() ?? "{}");
 		expect(body).toEqual({ refresh_token: "phrt_old" });
+	});
+
+	it("keeps origin-bound credentials away from other servers and redirect targets", async () => {
+		const destination = await startTestServer({ status: 500, body: {} });
+		try {
+			server = await startTestServer({ status: 307, body: {}, location: destination.url });
+			const refresh = originBoundRefresh(server.url, credsPath);
+			writeFileSync(credsPath, JSON.stringify(expiredAccessCreds()));
+			expect(await refresh.load()).toMatchObject({ ok: false, action: "transient" });
+			expect(server.lastRequestBody()).toBeNull();
+
+			writeFileSync(
+				credsPath,
+				JSON.stringify(expiredAccessCreds({ sse_url: `${server.url}/sse` })),
+			);
+			expect(await refresh.load()).toMatchObject({ ok: false, action: "preserve" });
+			expect(server.lastRequestBody()).toBe('{"refresh_token":"phrt_old"}');
+			expect(destination.lastRequestBody()).toBeNull();
+			expect(readCredentials(credsPath)?.refresh_token).toBe("phrt_old");
+		} finally {
+			await destination.close();
+		}
 	});
 });
 

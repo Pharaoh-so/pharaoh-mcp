@@ -100,6 +100,7 @@ const REFRESH_TIMEOUT_MS = 10_000;
  * @param server  Pharaoh server base URL (e.g. "https://mcp.pharaoh.so")
  * @param path    optional custom credentials path (for tests)
  * @param timeoutMs how long the refresh request may take (for tests)
+ * @param strictOrigin require credentials from this origin and refuse refresh redirects
  * @returns New or adopted credentials, or a classified failure. A lock held by
  *   another proxy for too long is `transient` (credentials untouched).
  */
@@ -108,6 +109,7 @@ export async function refreshIfNeeded(
 	server: string,
 	path?: string,
 	timeoutMs = REFRESH_TIMEOUT_MS,
+	strictOrigin = false,
 ): Promise<RefreshOutcome> {
 	let release: () => void;
 	try {
@@ -121,11 +123,12 @@ export async function refreshIfNeeded(
 	}
 	try {
 		const current = readCredentials(path);
+		const source = current ?? creds;
+		if (strictOrigin && !matchesOrigin(source, server)) return originMismatch();
 		if (current && current.access_token !== creds.access_token && !isExpired(current)) {
 			return { ok: true, creds: current };
 		}
-		const source = current ?? creds;
-		const outcome = await requestRefresh(source, server, timeoutMs, path);
+		const outcome = await requestRefresh(source, server, timeoutMs, path, strictOrigin);
 		if (outcome.ok || outcome.action !== "reauth") return outcome;
 
 		const after = readCredentials(path);
@@ -133,6 +136,7 @@ export async function refreshIfNeeded(
 			deleteCredentials(path);
 			return outcome;
 		}
+		if (strictOrigin && !matchesOrigin(after, server)) return originMismatch();
 		return isExpired(after) ? outcome : { ok: true, creds: after };
 	} finally {
 		release();
@@ -148,6 +152,7 @@ async function requestRefresh(
 	server: string,
 	timeoutMs: number,
 	path?: string,
+	strictOrigin = false,
 ): Promise<RefreshOutcome> {
 	// Guard: refresh token itself expired. No point hitting the server — the
 	// grant will fail with invalid_grant. Short-circuit to reauth.
@@ -170,6 +175,7 @@ async function requestRefresh(
 			body: JSON.stringify({
 				refresh_token: creds.refresh_token,
 			}),
+			redirect: strictOrigin ? "error" : undefined,
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (err) {
@@ -266,9 +272,11 @@ async function requestRefresh(
 export async function loadAndRefresh(
 	server: string,
 	path?: string,
+	strictOrigin = false,
 ): Promise<RefreshOutcome | null> {
 	const creds = readCredentials(path);
 	if (!creds) return null;
+	if (strictOrigin && !matchesOrigin(creds, server)) return originMismatch();
 
 	// Access token still valid — no refresh needed.
 	const expiresAt = new Date(creds.expires_at).getTime();
@@ -277,5 +285,26 @@ export async function loadAndRefresh(
 		return { ok: true, creds };
 	}
 
-	return refreshIfNeeded(creds, server, path);
+	return refreshIfNeeded(creds, server, path, undefined, strictOrigin);
+}
+
+/** A fixed-origin caller must never send credentials issued by another server. */
+function matchesOrigin(creds: Credentials, server: string): boolean {
+	try {
+		return new URL(creds.sse_url).origin === new URL(server).origin;
+	} catch {
+		return false;
+	}
+}
+
+function originMismatch(): RefreshOutcome {
+	return { ok: false, action: "transient", message: "Credentials belong to a different server" };
+}
+
+/** Refresh for a client that accepts credentials only from its configured origin. */
+export function originBoundRefresh(server: string, path?: string) {
+	return {
+		load: () => loadAndRefresh(server, path, true),
+		renew: (creds: Credentials) => refreshIfNeeded(creds, server, path, undefined, true),
+	};
 }
