@@ -44,11 +44,11 @@ const paths = [
 	"trace-app.html",
 	"LICENSE",
 ];
-function fixture() {
+function fixture(packPaths = paths, packageFiles) {
 	const root = mkdtempSync(join(tmpdir(), "pharaoh-release-test-"));
 	const directory = join(root, "release");
 	mkdirSync(directory);
-	for (const path of paths) {
+	for (const path of packPaths) {
 		mkdirSync(dirname(join(root, "package", path)), { recursive: true });
 		writeFileSync(
 			join(root, "package", path),
@@ -57,6 +57,7 @@ function fixture() {
 						name: PACKAGE,
 						version,
 						repository: { type: "git", url: PACKAGE_REPOSITORY },
+						files: packageFiles,
 					})
 				: `public ${path}`,
 		);
@@ -64,7 +65,7 @@ function fixture() {
 	const tarballFile = `pharaoh-so-mcp-${version}.tgz`;
 	execFileSync(
 		"tar",
-		["-czf", join(directory, tarballFile), ...paths.map((path) => `package/${path}`)],
+		["-czf", join(directory, tarballFile), ...packPaths.map((path) => `package/${path}`)],
 		{ cwd: root },
 	);
 	const bytes = readFileSync(join(directory, tarballFile));
@@ -134,6 +135,8 @@ test("npm boundary rejects private source, release credentials, traversal, links
 		"npx-skills/.gitkeep",
 		"npx-skills/plan/run.sh",
 		"npx-skills/plan/nested/SKILL.md",
+		"project-memory/credentials.json",
+		"project-memory/unlisted.mjs",
 	])
 		assert.throws(() => verifyPackPaths([...paths, path]));
 	assert.throws(() => verifyPackPaths(paths.filter((path) => path !== "dist/index.js")));
@@ -159,6 +162,35 @@ test("npm boundary rejects private source, release credentials, traversal, links
 		);
 	} finally {
 		item.clean();
+	}
+});
+
+test("the release handoff requires the complete allowlisted project memory package", () => {
+	const packageFiles = ["project-memory"];
+	const runtimePaths = [
+		"bundle.mjs",
+		"execute-turn.mjs",
+		"hook-config.mjs",
+		"hook-events.mjs",
+		"local.mjs",
+		"memory-api.mjs",
+		"pharaoh-memory-hook.mjs",
+		"pharaoh-memory.mjs",
+		"setup.d.mts",
+		"setup.mjs",
+		"user-target.mjs",
+	].map((path) => `project-memory/${path}`);
+	const complete = fixture([...paths, ...runtimePaths], packageFiles);
+	const incomplete = fixture([...paths, ...runtimePaths.slice(1)], packageFiles);
+	try {
+		assert.equal(validateArtifact(complete.directory, commit, complete.save()).version, version);
+		assert.throws(
+			() => validateArtifact(incomplete.directory, commit, incomplete.save()),
+			/Missing npm asset: project-memory\/bundle\.mjs/,
+		);
+	} finally {
+		complete.clean();
+		incomplete.clean();
 	}
 });
 
