@@ -25,7 +25,7 @@ Authentication happens separately when the MCP server first runs (not during `--
 
 No background processes are installed. No cron jobs. No system services.
 
-**Architecture:** The `@pharaoh-so/mcp` package runs a local stdio proxy process — it starts when your AI client launches it and stops when the session ends. This proxy relays MCP messages to the remote Pharaoh server at `mcp.pharaoh.so`, where parsing and graph queries execute. Your repository metadata is sent to and stored on Pharaoh's servers (see Data & Privacy below). The proxy itself does not parse code or store data locally.
+**Architecture:** The `@pharaoh-so/mcp` package runs a local stdio proxy process — it starts when your agent launches it and stops when the session ends. This proxy relays MCP messages to the remote Pharaoh server at `mcp.pharaoh.so`, where parsing and graph queries execute. Your repository metadata is sent to and stored on Pharaoh's servers (see Data & Privacy below). The proxy itself does not parse code or store data locally.
 
 ## Authentication & Permissions
 

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "09de76ee0a6443a6dc2d98d03fbffb41da85e646",
-  "payloadSha256": "1a1a476bcffdfa87487d8d66558320541dab25f372577b04b52445a073b0a074",
+  "commit": "63b83d2e32d8ebbc973fb23501f561660a92f2d8",
+  "payloadSha256": "db0179b23b233f33be05f38d9d90a0182879740cd865b7638abf041cf5f0bc62",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -26,7 +26,7 @@
     },
     {
       "path": "clawhub/pharaoh/SKILL.md",
-      "sha256": "e38190d160f34ad7172a94ba15246fe91a6362b3f13fbbf6d3f1b7d6d89e8c38",
+      "sha256": "d569ed7675cc164292a53ca6c7592b0b0f2b4352ee390d8d73a1720f0a9e382e",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "6d05b024ceddeb570c9489f08fdae2f08d1038ee6dda32371aba4e7e88ddd29f",
+      "sha256": "4d8c50a19d9d7fc76f4872e7cf8e73f652203d9bb7ef24350e2a49bdbdf43413",
       "mode": "100644"
     },
     {
