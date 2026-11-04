@@ -24,6 +24,19 @@ const REGISTRY = "https://registry.npmjs.org";
 const SHA = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const PROJECT_MEMORY_PACK_PATHS = [
+	"project-memory/bundle.mjs",
+	"project-memory/execute-turn.mjs",
+	"project-memory/hook-config.mjs",
+	"project-memory/hook-events.mjs",
+	"project-memory/local.mjs",
+	"project-memory/memory-api.mjs",
+	"project-memory/pharaoh-memory-hook.mjs",
+	"project-memory/pharaoh-memory.mjs",
+	"project-memory/setup.d.mts",
+	"project-memory/setup.mjs",
+	"project-memory/user-target.mjs",
+];
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 export const hash = (bytes, algorithm = "sha256") =>
 	createHash(algorithm).update(bytes).digest("hex");
@@ -76,16 +89,17 @@ export function verifySource(root) {
 }
 
 /** Only public runtime assets can enter npm; source, tests and release machinery stay out. */
-export function verifyPackPaths(paths) {
+export function verifyPackPaths(paths, packageFiles = []) {
 	assert.ok(paths.length > 0 && paths.length < 300);
 	assert.equal(new Set(paths).size, paths.length, "Duplicate archive entries");
 	for (const path of paths) {
 		assert.ok(safePath(path), `Unsafe archive path: ${path}`);
 		// skills/ is the pre-npx-skills layout; drop it once main's package.json no longer ships it.
 		assert.ok(
-			/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
-				path,
-			),
+			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
+				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
+					path,
+				),
 			`Unexpected npm file: ${path}`,
 		);
 	}
@@ -96,6 +110,7 @@ export function verifyPackPaths(paths) {
 		"inspect-tools.json",
 		"trace-app.html",
 		"LICENSE",
+		...(packageFiles.includes("project-memory") ? PROJECT_MEMORY_PACK_PATHS : []),
 	])
 		assert.ok(paths.includes(required), `Missing npm asset: ${required}`);
 }
@@ -165,7 +180,6 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 	);
 	const names = run("tar", ["-tzf", tarball]).trim().split("\n");
 	assert.ok(names.every((name) => name.startsWith("package/")));
-	verifyPackPaths(names.map((name) => name.slice(8)));
 	assert.ok(
 		run("tar", ["-tvzf", tarball])
 			.trim()
@@ -178,6 +192,7 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 	assert.equal(pkg.version, manifest.version);
 	assert.equal(pkg.repository?.url, PACKAGE_REPOSITORY);
 	assert.equal(pkg.repository?.directory, undefined);
+	verifyPackPaths(names.map((name) => name.slice(8)), pkg.files);
 	return manifest;
 }
 
@@ -441,7 +456,7 @@ async function main() {
 			),
 			pkg.version,
 		);
-		verifyPackPaths(packed.files.map((file) => file.path));
+		verifyPackPaths(packed.files.map((file) => file.path), pkg.files);
 		const bytes = readFileSync(join(directory, packed.filename));
 		const manifest = {
 			schemaVersion: 1,
