@@ -151,10 +151,10 @@ describe("no `claude` CLI on PATH (the desktop app's built-in one isn't)", () =>
 		const interactive = main.slice(main.indexOf("if (isInteractive) {"));
 		const at = (code: string) => interactive.indexOf(code);
 
-		expect(interactive).toMatch(/if \(!hasClaude\(\)\) \{[^}]*process\.exit\(1\)/);
-		expect(at("if (!hasClaude())")).toBeLessThan(at("deleteCredentials()"));
-		expect(interactive).toMatch(/if \(!runSetup\([^)]*\)\)\s*\{?\s*process\.exit\(1\)/);
-		expect(at("if (!runSetup(")).toBeLessThan(at("Pharaoh is ready"));
+		expect(interactive).toMatch(/if \(!claude && !codex\) \{[^}]*process\.exit\(1\)/);
+		expect(at("if (!claude && !codex)")).toBeLessThan(at("deleteCredentials()"));
+		expect(interactive).toMatch(/if \(!clients\.length\) process\.exit\(1\)/);
+		expect(at("runSetup({ silent: true })")).toBeLessThan(at("Pharaoh is ready"));
 	});
 
 	// The CLAUDE.md line is the user's file: asked about only here, never on a proxy start.
@@ -167,7 +167,7 @@ describe("no `claude` CLI on PATH (the desktop app's built-in one isn't)", () =>
 		const at = (code: string) => interactive.indexOf(code);
 
 		expect(main.match(/offerClaudeMdLine\(/g)).toHaveLength(1);
-		expect(at("if (!runSetup(")).toBeLessThan(at("offerClaudeMdLine("));
+		expect(at("runSetup({ silent: true })")).toBeLessThan(at("offerClaudeMdLine("));
 		expect(at("offerClaudeMdLine(")).toBeLessThan(at("Pharaoh is ready"));
 	});
 

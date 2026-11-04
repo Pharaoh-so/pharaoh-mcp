@@ -225,3 +225,70 @@ export function runSetup(options?: {
 
 	return true;
 }
+
+/** Detect the local Codex CLI before touching any settings. */
+export function hasCodex(): boolean {
+	try {
+		execFileSync("codex", ["--version"], { stdio: "pipe", timeout: 10_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function codexMcp(args: string[]): string {
+	return execFileSync("codex", ["mcp", ...args], {
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+		timeout: 30_000,
+	});
+}
+
+function configuredCodexPharaoh(): { owned: boolean; enabled?: boolean } | null {
+	try {
+		const { transport, enabled } = JSON.parse(codexMcp(["get", "pharaoh", "--json"]));
+		return {
+			owned:
+				transport?.type === "stdio" &&
+				transport.command === "npx" &&
+				transport.args?.length === 1 &&
+				/^@pharaoh-so\/mcp@\d+\.\d+\.\d+$/.test(transport.args[0]) &&
+				!transport.env &&
+				!transport.env_vars?.length &&
+				!transport.cwd,
+			enabled,
+		};
+	} catch (error) {
+		if (
+			error &&
+			typeof error === "object" &&
+			"stderr" in error &&
+			typeof error.stderr === "string" &&
+			error.stderr.includes("No MCP server named 'pharaoh' found.")
+		)
+			return null;
+		throw error;
+	}
+}
+
+/** Preserve custom registrations and any existing disabled setting. */
+export function runCodexSetup(): boolean {
+	try {
+		const existing = configuredCodexPharaoh();
+		if (existing && (!existing.owned || existing.enabled === false)) return true;
+		codexMcp(["add", "pharaoh", "--", "npx", pinnedPackageSpec()]);
+		return true;
+	} catch {
+		printLines("Pharaoh: Codex setup could not update its MCP registration.");
+		return false;
+	}
+}
+
+export function cleanCodexSetup(): void {
+	if (!hasCodex()) return;
+	try {
+		if (configuredCodexPharaoh()?.owned) codexMcp(["remove", "pharaoh"]);
+	} catch {
+		printLines("Pharaoh: Codex setup could not remove its MCP registration.");
+	}
+}

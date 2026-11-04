@@ -32,6 +32,8 @@ export interface TokenResponse {
 	github_login?: string;
 	tenant_name?: string;
 	repos?: string[];
+	project_memory?: Array<{ repo: string; revision: string | null }>;
+	project_memory_status?: "unavailable";
 	provisional?: boolean;
 	install_url?: string;
 }

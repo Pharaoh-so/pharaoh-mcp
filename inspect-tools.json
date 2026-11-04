@@ -1,5 +1,5 @@
 {
-  "instructions": "Pharaoh answers structural questions about mapped repos from a graph of each repo's default branch: functions, callers, modules, dependencies, endpoints, cron jobs and reachability, for TypeScript, JavaScript and Python. No source code is stored.\n\n## Which tool answers which question\n\nPharaoh answers these questions from the graph:\n\n| Question | Tool |\n|---|---|\n| Does X already exist? Where is Y implemented? | search_functions |\n| What calls X? What breaks if I change it? Which endpoints or cron jobs reach it? | get_blast_radius |\n| What's in this module, what does it depend on, who calls into it? | get_module_context |\n| Is this code dead or wired in? What can I delete? | get_unused_code |\n| How is the repo laid out? Which module owns this? What's the repo called? | get_codebase_map |\n| Several of these at once (planning a change, reviewing a PR) | pharaoh_recon |\n\nThe graph reflects the default branch at its last mapped push, and a response says when a newer push is still being mapped. Grep and file reads cover what it leaves out: code that isn't on the default branch yet (other branches, uncommitted edits), literal text (strings, error messages, config values, comments, non-code files) and renames, which change every reference, tests and mocks included.\n\n## Repos\n\nRepos are mapped through the Pharaoh GitHub App, installed on the account or org that owns them: `https://github.com/apps/pharaoh-so/installations/new`. The App reads the repositories it is installed on and the organization's membership; its only write permission is posting check results. Live repos re-map on every push. search_functions accepts any of the user's mapped repo names.\n\nTools take the short repo name in their `repo` parameter (e.g. \"pharaoh\", not \"org/pharaoh\"). Unambiguous short names resolve automatically. A name that doesn't resolve returns suggestions and the user's repos grouped by organization.\n\n## Account\n\npharaoh_account shows the plan and which repos are live: every repo on the trial and on Pro; after the trial, get_codebase_map keeps answering and the other tools say what's needed. pharaoh_manage_repo queues a re-map of a live repo, or switches a free workspace's live repo.",
+  "instructions": "Pharaoh answers structural questions about mapped repos from a graph of each repo's default branch: functions, callers, modules, dependencies, endpoints, cron jobs and reachability, for TypeScript, JavaScript and Python. No source code is stored.\n\n## Which tool answers which question\n\nPharaoh answers these questions from the graph:\n\n| Question | Tool |\n|---|---|\n| Does X already exist? Where is Y implemented? | search_functions |\n| What calls X? What breaks if I change it? Which endpoints or cron jobs reach it? | get_blast_radius |\n| What's in this module, what does it depend on, who calls into it? | get_module_context |\n| Is this code dead or wired in? What can I delete? | get_unused_code |\n| How is the repo laid out? Which module owns this? What's the repo called? | get_codebase_map |\n| Several of these at once (planning a change, reviewing a PR) | pharaoh_recon |\n\nThe graph reflects the default branch at its last mapped push, and a response says when a newer push is still being mapped. Grep and file reads cover what it leaves out: code that isn't on the default branch yet (other branches, uncommitted edits), literal text (strings, error messages, config values, comments, non-code files) and renames, which change every reference, tests and mocks included.\n\n## Repos\n\nRepos are mapped through the Pharaoh GitHub App, installed on the account or org that owns them: `https://github.com/apps/pharaoh-so/installations/new`. The App reads the repositories it is installed on and the organization's membership; its only write permission is posting check results. Mapped repos re-map on every push. search_functions accepts any of the user's mapped repo names.\n\nTools take the short repo name in their `repo` parameter (e.g. \"pharaoh\", not \"org/pharaoh\"). Unambiguous short names resolve automatically. A name that doesn't resolve returns suggestions and the user's repos grouped by organization.\n\n## Account\n\npharaoh_account shows each workspace's plan. Every repo is mapped during the trial and on Pro; after the trial, get_codebase_map keeps answering and the other tools say what's needed. pharaoh_manage_repo queues a re-map of a repo now.",
   "tools": [
     {
       "name": "get_codebase_map",
@@ -340,13 +340,13 @@
     {
       "name": "pharaoh_account",
       "title": "Account Status",
-      "description": "Your Pharaoh plan and live repo in each workspace. Changes nothing.\n\nCALL THIS WHEN:\n• Checking which plan a workspace is on, or which repo is live\n• A repo doesn't answer because it isn't live\n• Finding the plans page or the billing page\n\nRETURNS: Each workspace you can access with its plan, live repo and tracked-repo count, a link to the plans page for free workspaces, the setup page, and the billing page when a workspace has a billing account.",
+      "description": "Your Pharaoh plan and mapped repos in each workspace. Changes nothing.\n\nCALL THIS WHEN:\n• Checking which plan a workspace is on\n• A tool says the plan doesn't include it, or a repo isn't mapped\n• Finding the setup page or the billing page\n\nRETURNS: Each workspace you can access with its plan and tracked-repo count, whether its repos are mapped on every push, the setup page, and the billing page when a workspace has a billing account.",
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "properties": {
           "action": {
-            "description": "Only status; pharaoh_manage_repo switches the live repo or refreshes one",
+            "description": "Only status; pharaoh_manage_repo re-maps a repo",
             "type": "string",
             "const": "status"
           }
@@ -369,8 +369,8 @@
     },
     {
       "name": "pharaoh_manage_repo",
-      "title": "Switch or Refresh Live Repo",
-      "description": "Switch a free workspace's live repo, or re-map a live repo now.\n\n• set_free_repo { repo }: make repo the workspace's live repo. The previous live repo stops answering and refreshing; its graph is deleted after 30 days unless it is made live again.\n• refresh_repo { repo, full? }: queue a re-map of one live repo. Live repos also re-map on every push.\n\nCALL THIS WHEN:\n• A repo doesn't answer because it isn't live, and the user wants it to be the live one\n• A live repo's graph looks out of date, or needs a full rebuild\n\nRETURNS: The new live repo and the repos no longer live, or the queued job.",
+      "title": "Refresh Repo",
+      "description": "Re-map a repo now. Every repo is mapped during the trial and on Pro, and re-maps on every push.\n\n• refresh_repo { repo, full? }: queue a re-map of one repo.\n• set_free_repo { repo }: retired; it changes nothing, since there is no live repo to choose.\n\nCALL THIS WHEN:\n• A repo's graph looks out of date, or needs a full rebuild\n\nRETURNS: The queued job.",
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -401,7 +401,7 @@
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": true,
-        "title": "Switch or Refresh Live Repo",
+        "title": "Refresh Repo",
         "openWorldHint": false
       },
       "execution": {

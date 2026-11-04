@@ -22,7 +22,7 @@ The graph reflects the default branch at its last mapped push, and a response sa
 
 ## Repos that aren't mapped
 
-Repos are mapped through the Pharaoh GitHub App, installed on the account or org that owns them, and live repos re-map on every push. `pharaoh_account` shows each workspace's live repo and, where the App isn't installed, its install link. `search_functions` accepts any of the user's mapped repo names.
+Repos are mapped through the Pharaoh GitHub App, installed on the account or org that owns them. Every repo is mapped during the trial and on Pro, and mapped repos re-map on every push; after the trial, get_codebase_map keeps answering. `pharaoh_account` shows each workspace's plan and, where the App isn't installed, its install link. `search_functions` accepts any of the user's mapped repo names.
 
 ## Workflows
 
@@ -30,8 +30,8 @@ Repos are mapped through the Pharaoh GitHub App, installed on the account or org
 
 ## Utilities
 
-- `pharaoh_account` — plan and live repo
-- `pharaoh_manage_repo` — switch the live repo, or refresh a repo now
+- `pharaoh_account` — plan and mapped repos in each workspace
+- `pharaoh_manage_repo` — re-map a repo now
 
 Full docs at [pharaoh.so/docs](https://pharaoh.so/docs).
 

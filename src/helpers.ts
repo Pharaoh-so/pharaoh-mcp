@@ -2,6 +2,7 @@
  * Pure helper functions for the mcp-proxy CLI — no side effects on import.
  * Separated from index.ts so tests can import without triggering main().
  */
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import type { TokenResponse } from "./auth.js";
 import type { Credentials } from "./credentials.js";
@@ -119,7 +120,7 @@ export function printUsage(): void {
 		"Options:",
 		"  --server <url>    Pharaoh server URL (default: https://mcp.pharaoh.so)",
 		"  --logout          Clear credentials, MCP config, the Claude Code plugin and the CLAUDE.md line, then exit",
-		"  --clean           Remove Pharaoh's MCP entries, plugin and CLAUDE.md line from Claude Code",
+		"  --clean           Remove Pharaoh setup, including managed local project memory hooks",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --version, -v     Print the version",
 		"  --help, -h        Show this help",
@@ -159,7 +160,11 @@ export function resolveSseUrl(tokenSseUrl: string | undefined, server: string): 
  * will eventually hit the same silent-expiry cliff we're trying to eliminate.
  * Fail loud so the server regression surfaces instead of being absorbed.
  */
-export function tokenToCredentials(token: TokenResponse, sseUrl: string): Credentials {
+export function tokenToCredentials(
+	token: TokenResponse,
+	sseUrl: string,
+	server?: string,
+): Credentials {
 	if (!token.refresh_token || !token.refresh_token_expires_in) {
 		throw new Error(
 			"Pharaoh server response missing refresh_token — server is older than this client. " +
@@ -167,6 +172,18 @@ export function tokenToCredentials(token: TokenResponse, sseUrl: string): Creden
 		);
 	}
 	const now = Date.now();
+	const production = server === DEFAULT_SERVER && new URL(sseUrl).origin === DEFAULT_SERVER;
+	const memory =
+		production && Array.isArray(token.project_memory)
+			? token.project_memory.filter(
+					(entry) =>
+						typeof entry?.repo === "string" &&
+						/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(entry.repo) &&
+						(entry.revision === null ||
+							(typeof entry.revision === "string" &&
+								/^(?!0{40}$)[a-f0-9]{40}$/.test(entry.revision))),
+				)
+			: [];
 	return {
 		version: 2,
 		access_token: token.access_token,
@@ -178,6 +195,13 @@ export function tokenToCredentials(token: TokenResponse, sseUrl: string): Creden
 		github_login: token.github_login ?? null,
 		tenant_name: token.tenant_name ?? null,
 		repos: token.repos ?? [],
+		...(memory.length ? { project_memory: memory } : {}),
+		...(memory.some((entry) => entry.revision === null)
+			? { project_memory_session: randomUUID() }
+			: {}),
+		...(production && token.project_memory_status === "unavailable"
+			? { project_memory_status: "unavailable" }
+			: {}),
 	};
 }
 

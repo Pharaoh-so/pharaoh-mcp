@@ -56,6 +56,11 @@ export interface Credentials {
 	github_login: string | null;
 	tenant_name: string | null;
 	repos: string[];
+	/** Device sign-in hint only; the server authorizes every memory operation. */
+	project_memory?: Array<{ repo: string; revision: string | null }>;
+	project_memory_status?: "unavailable";
+	/** Local readiness binding, stable only across refreshes of this sign-in. */
+	project_memory_session?: string;
 }
 
 /** Default credential file path (route-grep-hook.ts checks the same file to know Pharaoh is signed in). */
