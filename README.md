@@ -5,9 +5,9 @@
 [![node](https://img.shields.io/node/v/@pharaoh-so/mcp)](https://nodejs.org)
 [![pharaoh MCP server](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh/badges/score.svg)](https://glama.ai/mcp/servers/Pharaoh-so/pharaoh)
 
-MCP proxy for [Pharaoh](https://pharaoh.so) — maps codebases into queryable knowledge graphs for AI agents.
+MCP proxy for [Pharaoh](https://pharaoh.so) — maps codebases into queryable knowledge graphs for coding agents.
 
-Pharaoh gives AI coding assistants a complete architectural map of your codebase: every function, dependency, module, and connection. Instead of reading files one at a time, your AI agent queries the knowledge graph and gets instant answers about blast radius, unused code, dependency chains, and more.
+Pharaoh gives coding agents such as Claude Code, Cursor, Codex and OpenClaw a complete architectural map of your codebase: every function, dependency, module, and connection. Instead of reading files one at a time, your agent queries the knowledge graph and gets instant answers about blast radius, unused code, dependency chains, and more.
 
 This package enables [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) to connect to Pharaoh in **headless environments** (VPS, SSH, containers, CI) where a browser isn't available for OAuth. It acts as a stdio-to-SSE proxy, presenting itself as a local MCP server while relaying all communication to the remote Pharaoh server.
 
@@ -144,7 +144,7 @@ claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp@<version> --server ht
 ## Requirements
 
 - **Node.js** >= 18
-- **Claude Code** or any MCP-compatible AI client
+- **Claude Code** or any MCP-compatible agent
 - A **Pharaoh account** — sign up at [pharaoh.so](https://pharaoh.so)
 
 ## Security
@@ -244,7 +244,7 @@ Pharaoh parses your repositories using [tree-sitter](https://tree-sitter.github.
 - **Dependencies** — import/export relationships, call chains, module connections
 - **Vision specs** — PRD/spec documents linked to implementation
 
-No source code is stored — only structural metadata. When an AI agent queries Pharaoh, it gets architectural facts in minimal tokens, not raw code dumps. This means your AI assistant can understand your entire codebase architecture without consuming its context window reading files one by one.
+No source code is stored — only structural metadata. When an agent queries Pharaoh, it gets architectural facts in minimal tokens, not raw code dumps. This means your agent can understand your entire codebase architecture without consuming its context window reading files one by one.
 
 ## Supported Languages
 
