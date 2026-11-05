@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "28dfd6f9194f52d9aaf821fb03d85434595239dd",
-  "payloadSha256": "ccdf6dc40fe483ce2b1d7938242c0a63bcbc0dfd6fcdd281ea646365a5d89c43",
+  "commit": "193e4e87bbf61ef5a9d9501f5eb9017b698c3c6f",
+  "payloadSha256": "93928a891ac5d99e4336ed1d9de9b8a86699898920a181bf727cd78005aedab2",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "9945be2df800f93719a8a3b59b7e8e1ed5ef482468d8903c79ce9920f751ec4a",
+      "sha256": "f2f65f6947d8647fbc03d0906f51226dea7e3987ca0c3f9697d247dd0dc7d760",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "4449e86952bb12c4af413bbf840f70a57e162fad5f219483d75fddddf03b5fef",
+      "sha256": "4a66058b1cf4a32c0be093049997749e45d1335c4f972c722fe6bfe3963bca8a",
       "mode": "100644"
     },
     {
@@ -26,7 +26,7 @@
     },
     {
       "path": "clawhub/pharaoh/SKILL.md",
-      "sha256": "f3216ac18e5a48a3891a0ce756eebeebb4958e7a7871b7f5a783975a08ce2485",
+      "sha256": "2e6c445346ff34b23882fb60009fd2790becfb699c98203da8d5a064372cb427",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "9851d079809cc1ede7a361d0e1697b606e5d5c069dc88659e77692ccb4459724",
+      "sha256": "aca2239927ac8d4a421955921937f55834a41e5f4ad984eca9b4f793a00f3eb9",
       "mode": "100644"
     },
     {
@@ -106,7 +106,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "8e5dd3495c2a1ffa0495d9f9e8c2228a878249bf932e3ad78ee6d562504129bd",
+      "sha256": "82f7820342e061d22806f723de8a588ac54854e28700df824c56dc518efa0aa7",
       "mode": "100644"
     },
     {
