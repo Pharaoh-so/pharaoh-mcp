@@ -320,8 +320,13 @@ describe("ProxyServer.setBackend swap", () => {
 		finishStart();
 		await swap;
 		process.env.HOME = home;
+		// project reads the test's own working directory, so only its shape is fixed here.
 		expect(identified).toEqual([
-			{ client: { name: "claude-code", version: "2.1.3" }, plugin: "absent" },
+			{
+				client: { name: "claude-code", version: "2.1.3" },
+				plugin: "absent",
+				instructions: { user: "missing", managed: "absent", project: expect.any(String) },
+			},
 		]);
 		await client.close();
 		await proxy.stop();

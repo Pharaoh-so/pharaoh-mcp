@@ -345,6 +345,8 @@ function spawnProxy(opts: { serverUrl: string; homeDir: string }): ProxyHarness 
 		[tsxCli, INDEX_PATH, "--server", opts.serverUrl],
 		{
 			stdio: ["pipe", "pipe", "pipe"],
+			// Outside any repo, so the project instruction state is a stable "unknown".
+			cwd: opts.homeDir,
 			env: {
 				...process.env,
 				// Primary kill switch — the only guard that works for child
@@ -571,7 +573,11 @@ describe("auth-flow E2E", () => {
 		});
 		// The backend swapped in after sign-in names the client to its session.
 		expect(mockServer.state.clientReports).toEqual([
-			{ client: { name: "e2e-test", version: "0.0.0" }, plugin: "absent" },
+			{
+				client: { name: "e2e-test", version: "0.0.0" },
+				plugin: "absent",
+				instructions: { user: "missing", managed: "absent", project: "unknown" },
+			},
 		]);
 	}, 30_000);
 
@@ -592,7 +598,11 @@ describe("auth-flow E2E", () => {
 			join(homeDir, ".claude", "settings.json"),
 			JSON.stringify({ enabledPlugins: { "pharaoh@pharaoh": true } }),
 		);
-		const report = { client: { name: "claude-code", version: "2.1.3" }, plugin: "enabled" };
+		const report = {
+			client: { name: "claude-code", version: "2.1.3" },
+			plugin: "enabled",
+			instructions: { user: "missing", managed: "absent", project: "unknown" },
+		};
 		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
 		await initializeProxy(
 			harness,
@@ -761,7 +771,11 @@ describe("auth-flow E2E", () => {
 		expect(mockServer.state.initializedCapabilities).toEqual([{}]);
 		// The warm backend that keeps serving names the client after all.
 		expect(mockServer.state.clientReports).toEqual([
-			{ client: { name: "e2e-test", version: "0.0.0" }, plugin: "absent" },
+			{
+				client: { name: "e2e-test", version: "0.0.0" },
+				plugin: "absent",
+				instructions: { user: "missing", managed: "absent", project: "unknown" },
+			},
 		]);
 	});
 
