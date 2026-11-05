@@ -53,12 +53,19 @@ function gitProcess(cwd, args) {
 }
 
 export function git(cwd, ...command) {
+	return gitBefore(cwd, Infinity, ...command);
+}
+
+export function gitBefore(cwd, deadline, ...command) {
 	const { args, ...options } = gitProcess(cwd, command);
+	const timeout = Math.min(GIT_TIMEOUT_MS, Math.floor(deadline - performance.now()));
+	if (timeout < 1) throw new Error("Project memory Git deadline expired.");
 	return execFileSync(GIT, args, {
 		...options,
 		encoding: "utf8",
 		maxBuffer: 8192,
-		timeout: GIT_TIMEOUT_MS,
+		timeout,
+		killSignal: "SIGKILL",
 	}).trim();
 }
 
@@ -118,11 +125,11 @@ export async function visibleGitIndex(cwd, path) {
 }
 
 /** Accept only an unambiguous GitHub origin, independent of the branch name. */
-export function checkout(cwd) {
+export function checkout(cwd, deadline = Infinity) {
 	if (typeof cwd !== "string" || !isAbsolute(cwd)) return;
 	try {
-		const root = realpathSync(git(cwd, "rev-parse", "--show-toplevel"));
-		const origin = git(root, "config", "--local", "--get-all", "remote.origin.url");
+		const root = realpathSync(gitBefore(cwd, deadline, "rev-parse", "--show-toplevel"));
+		const origin = gitBefore(root, deadline, "config", "--local", "--get-all", "remote.origin.url");
 		const repo = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^\n]+)$/i
 			.exec(origin)?.[1]
 			.replace(/\.git$/i, "");
@@ -291,7 +298,7 @@ export function turnStore(home = homedir(), now = Date.now) {
 		return (
 			state?.root === target.root &&
 			state.repo.toLowerCase() === target.repo.toLowerCase() &&
-			(!state.runtime || state.runtime === target.runtime)
+			state.runtime === target.runtime
 		);
 	}
 	function withTurn(token, target, fn) {
@@ -302,8 +309,25 @@ export function turnStore(home = homedir(), now = Date.now) {
 			if (sameCheckout(state, target) && state.token === token) return fn(key, state);
 		});
 	}
+	function close(key, state) {
+		if (!state.nativeTurn) return remove(key, state);
+		if (TOKEN.test(state.token)) rmSync(indexPath(state.token), { force: true });
+		put(key, { ...state, token: undefined, phase: "closed" });
+	}
+	function saveReceipt(token, target, outcome, record) {
+		if (!TOKEN.test(token)) return;
+		atomicWrite(
+			receiptPath(token),
+			JSON.stringify({
+				...target,
+				outcome,
+				record: record && { id: record.id, status: record.status },
+				expires: now() + TURN_TTL,
+			}),
+		);
+	}
 	return {
-		begin(key, target, client, nativeTurn, { skip, readOnly }) {
+		begin(key, target, client, nativeTurn, { skip, readOnly, memorySession }) {
 			return lock(
 				key,
 				(previous) => {
@@ -311,7 +335,7 @@ export function turnStore(home = homedir(), now = Date.now) {
 						if (nativeTurn && previous.nativeTurn === nativeTurn) {
 							// Duplicate native events belong to the same task. Keep its
 							// token unless the user expressly opted out of this turn.
-							if (skip) remove(key, previous);
+							if (skip) close(key, previous);
 							return;
 						}
 						if (nativeTurn) {
@@ -334,6 +358,7 @@ export function turnStore(home = homedir(), now = Date.now) {
 						expires: now() + TURN_TTL,
 						phase: "pending",
 						readOnly,
+						memorySession,
 					};
 					atomicWrite(indexPath(token), JSON.stringify(key));
 					put(key, state);
@@ -349,52 +374,50 @@ export function turnStore(home = homedir(), now = Date.now) {
 				},
 			);
 		},
-		stop(key, target, nativeTurn, mayNudge, isContinuation) {
-			return lock(
-				key,
-				(state, fenced) => {
-					if (!sameCheckout(state, target)) return;
-					if (fenced) {
-						if (state.nativeTurn === nativeTurn) remove(key, state);
-						return;
-					}
-					if (
-						nativeTurn &&
-						state.nativeTurn !== nativeTurn &&
-						!(isContinuation && state.continuationTurn === nativeTurn)
-					)
-						return;
-					if (state.phase === "ambiguous" && !nativeTurn) return;
-					if (!mayNudge || state.readOnly || !["recalled", "expanding"].includes(state.phase)) {
-						remove(key, state);
-						return;
-					}
-					put(key, { ...state, phase: "nudged" });
-					return state.token;
-				},
-				{
-					canClearFence: (entry) => Boolean(nativeTurn && nativeTurn === entry.nativeTurn),
-				},
-			);
-		},
-		registerContinuation(key, target, nativeTurn, token) {
-			lock(key, (state) => {
-				if (sameCheckout(state, target) && state.token === token && state.phase === "nudged") {
-					put(key, { ...state, continuationTurn: nativeTurn });
+		startCapture(token, target, memorySession, send) {
+			return withTurn(token, target, (key, state) => {
+				if (
+					state.phase !== "recalled" ||
+					state.readOnly ||
+					!memorySession ||
+					state.memorySession !== memorySession
+				)
+					return;
+				put(key, { ...state, phase: "capturing" });
+				saveReceipt(token, target, "uncertain");
+				if (readJson(overlapPath(key))?.expires > now()) {
+					rmSync(receiptPath(token), { force: true });
+					return;
 				}
+				// Begin dispatch under the turn lease. Await the response outside it.
+				return send({ repo: state.repo, client: state.client, operationId: state.operationId });
 			});
 		},
-		cancel(key, target, nativeTurn) {
+		stop(key, target, nativeTurn) {
 			lock(
 				key,
 				(state) => {
 					if (
 						sameCheckout(state, target) &&
-						(!nativeTurn ||
-							state.nativeTurn === nativeTurn ||
-							state.continuationTurn === nativeTurn)
+						state.nativeTurn === nativeTurn &&
+						(state.phase !== "ambiguous" || nativeTurn)
 					)
-						remove(key, state);
+						close(key, state);
+				},
+				{
+					onBusy: () => fence(key, nativeTurn),
+					canClearFence: (entry) => Boolean(nativeTurn && nativeTurn === entry.nativeTurn),
+				},
+			);
+		},
+		cancel(key, target, nativeTurn) {
+			lock(
+				key,
+				(state) => {
+					if (sameCheckout(state, target) && (!nativeTurn || state.nativeTurn === nativeTurn)) {
+						if (nativeTurn) close(key, state);
+						else remove(key, state);
+					}
 				},
 				{
 					onBusy: () => fence(key, nativeTurn),
@@ -438,17 +461,7 @@ export function turnStore(home = homedir(), now = Date.now) {
 				return true;
 			});
 		},
-		saveReceipt(token, target, record) {
-			if (!TOKEN.test(token)) return;
-			atomicWrite(
-				receiptPath(token),
-				JSON.stringify({
-					...target,
-					record: { id: record.id, status: record.status },
-					expires: now() + TURN_TTL,
-				}),
-			);
-		},
+		saveReceipt,
 		readReceipt(token, target) {
 			if (!TOKEN.test(token)) return;
 			const path = receiptPath(token);
@@ -457,7 +470,11 @@ export function turnStore(home = homedir(), now = Date.now) {
 				rmSync(path, { force: true });
 				return;
 			}
-			if (sameCheckout(receipt, target)) return { record: receipt.record };
+			if (sameCheckout(receipt, target))
+				return {
+					outcome: receipt.outcome ?? "confirmed",
+					...(receipt.record && { record: receipt.record }),
+				};
 		},
 	};
 }

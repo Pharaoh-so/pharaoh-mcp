@@ -1,14 +1,32 @@
 import { git, visibleGitIndex } from "./local.mjs";
 import { PilotError, requestMemory } from "./memory-api.mjs";
+import { projectMemorySession } from "./user-target.mjs";
 
 const SHA = /^[a-f0-9]{40}$/i;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const TERMS = /^[\p{L}\p{N}._+@ $/#:-]+$/u;
 const SECRET =
 	/\b(?:[a-f0-9]{32,}|ph(?:at|rt)_[a-z0-9_-]{12,})\b|:\/\/|\b[\w.-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i;
-const UNSAFE_RECAP =
-	/\x60{3}|~~~|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:(?:phat|phrt|pss|dev)_[a-f0-9]{64}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b|\bBearer[ \t]+[A-Za-z0-9_.~+/=-]{12,}|\b(?:password|secret|api[_ -]?key|access[_ -]?token)\s*[:=]\s*\S{6,}|(?:^|\n)\s*(?:assistant|user|system|tool)\s*:/i;
+// Apply the hosted recap safety rules before any agent-written text hits disk.
+const UNSAFE_RECAP = [
+	/(?:phat|phrt|pss|dev)_[a-f\d]{64}/i,
+	/\x60{3}|~~~|-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
+	/\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/i,
+	/\bBearer[ \t]+[A-Za-z0-9_.~+/=-]{12,}|\b(?:password|secret|api[_ -]?key|access[_ -]?token)\s*[:=]\s*\S{6,}/i,
+	/^\s*(?:assistant|user|system|tool)\s*:/im,
+	/^\s*(?:import\s.+\sfrom\s+["']|(?:const|let|var)\s+\w+\s*=|(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(|def\s+\w+\s*\()/m,
+	/\p{Bidi_Control}/u,
+];
 const REF_PATH = /^[\p{L}\p{N}._+@ -]+(?:\/[\p{L}\p{N}._+@ -]+)*$/u;
+
+function safeRecap(text) {
+	return (
+		![...text].some((char) => {
+			const code = char.charCodeAt(0);
+			return (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127;
+		}) && !UNSAFE_RECAP.some((pattern) => pattern.test(text))
+	);
+}
 
 function hasKeys(input, allowed) {
 	return (
@@ -27,7 +45,7 @@ function normalizeTerm(value) {
 		term.split(" ").length <= 8 &&
 		TERMS.test(term) &&
 		!SECRET.test(term) &&
-		!UNSAFE_RECAP.test(term)
+		safeRecap(term)
 	) {
 		return term;
 	}
@@ -57,23 +75,23 @@ function validRef(ref) {
 				ref.path.length <= 180 &&
 				REF_PATH.test(ref.path) &&
 				!ref.path.split("/").some((part) => part === "." || part === "..") &&
-				!UNSAFE_RECAP.test(ref.path))) &&
+				safeRecap(ref.path))) &&
 		(ref.symbol === undefined ||
 			(typeof ref.symbol === "string" &&
 				ref.symbol.length <= 100 &&
 				/^[\w$][\w$.#:-]*$/u.test(ref.symbol) &&
-				!UNSAFE_RECAP.test(ref.symbol))) &&
-		(ref.pullRequest === undefined || (Number.isInteger(ref.pullRequest) && ref.pullRequest > 0)) &&
+				safeRecap(ref.symbol))) &&
+		(ref.pullRequest === undefined ||
+			(Number.isInteger(ref.pullRequest) &&
+				ref.pullRequest > 0 &&
+				ref.pullRequest <= 1_000_000_000)) &&
 		(ref.commit === undefined || (typeof ref.commit === "string" && SHA.test(ref.commit)))
 	);
 }
 
 function validRecap(text, limit) {
 	return (
-		typeof text === "string" &&
-		text.trim().length > 0 &&
-		text.length <= limit &&
-		!UNSAFE_RECAP.test(text)
+		typeof text === "string" && text.trim().length > 0 && text.length <= limit && safeRecap(text)
 	);
 }
 
@@ -88,7 +106,7 @@ function captureDraft(input) {
 			(!Array.isArray(input.refs) || input.refs.length > 6 || !input.refs.every(validRef)))
 	) {
 		throw new PilotError(
-			"Use a bounded JSON candidate with kind, summary, and optional detail, refs, and verification.",
+			"Use a JSON candidate with kind, summary (500 characters), optional detail (1,000), verification (300), and up to six refs.",
 		);
 	}
 	return input;
@@ -148,20 +166,19 @@ function validPair(id, version) {
 export async function executeTurn(
 	operation,
 	token,
-	{ target, store, read, request = requestMemory, compact = false },
+	{ target, store, read, request = requestMemory, compact = true, loadCaptureCredentials },
 ) {
 	const change = (from, to) => {
 		const state = store.transition(token, target, from, to);
 		if (!state) throw new PilotError("This project memory turn is stale or not eligible.");
 		return state;
 	};
-	if (operation === "nothing-material") {
-		change(["nudged"], "acknowledged");
-		return { acknowledged: true };
-	}
 	if (operation === "receipt") {
 		const receipt = store.readReceipt(token, target);
-		if (!receipt) throw new PilotError("No confirmed capture receipt is available for this turn.");
+		if (!receipt)
+			throw new PilotError(
+				"No confirmed capture receipt is available for this turn. Check Project Memory before retrying.",
+			);
 		return receipt;
 	}
 	let input;
@@ -193,48 +210,60 @@ export async function executeTurn(
 			throw new PilotError("This project memory turn ended before its expansion returned.");
 		return result;
 	}
-	const recall = operation === "recall";
-	const draft = recall ? { terms: recallTerms(input) } : captureDraft(input);
+	const capture = operation === "capture";
+	if (!capture && operation !== "recall") throw new PilotError("Unknown project memory operation.");
+	const draft = capture ? captureDraft(input) : { terms: recallTerms(input) };
 	if (JSON.stringify(draft).includes(token))
 		throw new PilotError("The local turn token cannot appear in a memory request.");
-	const gitRev = recall ? null : git(target.root, "rev-parse", "HEAD");
-	if (!recall && !SHA.test(gitRev))
-		throw new PilotError("The checkout has no full Git commit to cite.");
-	const refs = !recall && draft.refs ? await citeRefs(target.root, gitRev, draft.refs) : undefined;
-	const running = recall ? "recalling" : "capturing";
-	const state = change([recall ? "pending" : "nudged"], running);
+	if (capture) {
+		const gitRev = git(target.root, "rev-parse", "HEAD");
+		if (!SHA.test(gitRev)) throw new PilotError("The checkout has no full Git commit to cite.");
+		const refs = draft.refs ? await citeRefs(target.root, gitRev, draft.refs) : undefined;
+		const credentials = await loadCaptureCredentials?.();
+		const session = projectMemorySession(credentials);
+		if (!session || !(Date.parse(credentials.expires_at) > Date.now()))
+			throw new PilotError("Reconnect to Pharaoh to save project memory.");
+		const dispatched = store.startCapture(token, target, session, (identity) =>
+			request("capture", { ...draft, gitRev, refs, ...identity }, { credentials }),
+		);
+		if (!dispatched)
+			throw new PilotError("This turn is stale, read-only, or has already attempted a capture.");
+		let record;
+		try {
+			({ record } = await dispatched);
+		} catch (error) {
+			if (error instanceof PilotError && error.rejected)
+				store.saveReceipt(token, target, "rejected");
+			throw error;
+		}
+		try {
+			store.saveReceipt(token, target, "confirmed", record);
+		} catch {
+			throw new PilotError("Pharaoh saved the candidate. Check Project Memory for the record.");
+		}
+		return;
+	}
+	const state = change(["pending"], "recalling");
 	const payload = {
 		repo: state.repo,
 		...draft,
-		...(recall && compact && { format: "compact-v1" }),
-		...(!recall && { gitRev, client: state.client, operationId: state.operationId }),
-		...(refs && { refs }),
+		...(compact && { format: "compact-v1" }),
 	};
 	let result;
 	try {
 		result = await request(operation, payload);
 	} catch (error) {
-		store.transition(token, target, [running], "failed");
+		store.transition(token, target, ["recalling"], "failed");
 		throw error;
 	}
-	if (recall) {
-		const pairs =
-			result?.format === "compact-v1" ? result.records.map(({ id, version }) => [id, version]) : [];
-		if (
-			pairs.length > 5 ||
-			!pairs.every(([id, version]) => validPair(id, version)) ||
-			!store.finishRecall(token, target, pairs)
-		) {
-			throw new PilotError("This project memory turn ended before recall returned.");
-		}
-	} else {
-		try {
-			store.saveReceipt(token, target, result.record);
-			store.transition(token, target, [running], "acknowledged");
-		} catch {
-			// The service already committed. Local disk or a stale turn cannot turn a confirmed record into a failed write.
-			return { ...result, localReceiptUnavailable: true };
-		}
+	const pairs =
+		result?.format === "compact-v1" ? result.records.map(({ id, version }) => [id, version]) : [];
+	if (
+		pairs.length > 5 ||
+		!pairs.every(([id, version]) => validPair(id, version)) ||
+		!store.finishRecall(token, target, pairs)
+	) {
+		throw new PilotError("This project memory turn ended before recall returned.");
 	}
 	return result;
 }

@@ -21,26 +21,31 @@ async function main(args) {
 		!/^[a-f0-9]{64}$/.test(token) ||
 		extra.length > 0 ||
 		(compactFlag !== undefined && (compactFlag !== "--compact" || operation !== "recall")) ||
-		!["recall", "expand", "capture", "nothing-material", "receipt"].includes(operation)
+		!["recall", "expand", "capture", "receipt"].includes(operation)
 	) {
 		throw new PilotError(
-			"Use doctor, or recall, expand, capture, receipt, or nothing-material with the active hook's --turn token.",
+			"Use doctor, or recall, expand, capture, or receipt with the active hook's --turn token.",
 		);
 	}
 	const cwd = process.cwd();
 	const target = checkout(cwd);
 	if (!target) throw new PilotError("Run this inside the enrolled GitHub checkout.");
 	const runtime = dirname(fileURLToPath(import.meta.url));
-	const active =
+	const isActive = () =>
 		activeMemoryRuntime("claude-code", runtime) || activeMemoryRuntime("codex", runtime);
-	const eligible = active && (await cachedMemoryCheckout(cwd, await readMemoryCredentials()));
+	const credentials = await readMemoryCredentials();
+	const eligible = isActive() && (await cachedMemoryCheckout(cwd, credentials));
 	const result = await executeTurn(operation, token, {
 		target: eligible ? { ...target, runtime } : target,
 		store: turnStore(),
 		read: () => readStdin(8_192),
-		compact: compactFlag === "--compact" || process.env.PHARAOH_PROJECT_MEMORY_COMPACT === "true",
+		compact: compactFlag === "--compact" || process.env.PHARAOH_PROJECT_MEMORY_COMPACT !== "false",
+		loadCaptureCredentials: async () => {
+			const current = await readMemoryCredentials();
+			if (eligible && (await cachedMemoryCheckout(cwd, current)) && isActive()) return current;
+		},
 	});
-	process.stdout.write(`${JSON.stringify(result)}\n`);
+	if (result !== undefined) process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 try {

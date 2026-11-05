@@ -1,10 +1,16 @@
 export const PROJECT_MEMORY_ORIGIN = "https://mcp.pharaoh.so";
 const READY_TIMEOUT_MS = 1_200;
+const REQUEST_TIMEOUT_MS = 12_000;
 const BUILD = new URL("runtime/refresh.js", import.meta.url);
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const STATUS = new Set(["candidate", "approved", "superseded", "retracted"]);
 
-export class PilotError extends Error {}
+export class PilotError extends Error {
+	constructor(message, rejected = false) {
+		super(message);
+		this.rejected = rejected;
+	}
+}
 
 async function responseJson(response) {
 	if (!response.body) throw new PilotError("Pharaoh returned an incomplete response.");
@@ -32,9 +38,11 @@ export async function refreshHelper() {
 
 /** Check only mapping metadata using the current device session. Normal proxy
  * startup handles token refresh; the prompt hook never waits on a refresh lock. */
-export async function requestMemoryReadiness(repo, credentials) {
+export async function requestMemoryReadiness(repo, credentials, deadline = Infinity) {
 	const expiresAt = Date.parse(credentials?.expires_at);
 	if (typeof credentials?.access_token !== "string" || !(expiresAt > Date.now())) return;
+	const timeout = Math.min(READY_TIMEOUT_MS, Math.floor(deadline - performance.now()));
+	if (timeout < 1) return;
 	try {
 		if (new URL(credentials.sse_url).origin !== PROJECT_MEMORY_ORIGIN) return;
 		const response = await fetch(`${PROJECT_MEMORY_ORIGIN}/api/project-memory/readiness`, {
@@ -45,7 +53,7 @@ export async function requestMemoryReadiness(repo, credentials) {
 				Authorization: `Bearer ${credentials.access_token}`,
 			},
 			body: JSON.stringify({ repo }),
-			signal: AbortSignal.timeout(READY_TIMEOUT_MS),
+			signal: AbortSignal.timeout(timeout),
 		});
 		if (!response.ok) {
 			await response.body?.cancel();
@@ -58,61 +66,71 @@ export async function requestMemoryReadiness(repo, credentials) {
 	}
 }
 
-export async function requestMemory(operation, payload, { fetcher = fetch, helper } = {}) {
+export async function requestMemory(
+	operation,
+	payload,
+	{ fetcher = fetch, helper, credentials } = {},
+) {
 	if (!["recall", "capture", "expand"].includes(operation))
 		throw new PilotError("Unknown memory request.");
-	const { originBoundRefresh } = helper ?? (await refreshHelper());
-	const refresh = originBoundRefresh(PROJECT_MEMORY_ORIGIN);
-	const outcome = await refresh.load();
-	if (!outcome?.ok)
+	// Capture supplies its session snapshot so dispatch cannot adopt a different sign-in.
+	if (!credentials) {
+		const { originBoundRefresh } = helper ?? (await refreshHelper());
+		const outcome = await originBoundRefresh(PROJECT_MEMORY_ORIGIN).load();
+		if (outcome?.ok) credentials = outcome.creds;
+	}
+	if (!credentials)
 		throw new PilotError(
 			"Connect to Pharaoh with its device sign-in, or retry if sign-in is temporarily unavailable.",
 		);
-	const send = async (creds) => {
-		try {
-			return await fetcher(`${PROJECT_MEMORY_ORIGIN}/api/project-memory/${operation}`, {
-				method: "POST",
-				redirect: "error",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${creds.access_token}`,
-				},
-				body: JSON.stringify(payload),
-				signal: AbortSignal.timeout(12_000),
-			});
-		} catch {
-			throw new PilotError(
-				operation === "capture"
-					? "Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying."
-					: "Pharaoh project memory could not respond before the request ended.",
-			);
-		}
-	};
-	const response = await send(outcome.creds);
+	let response;
+	try {
+		response = await fetcher(`${PROJECT_MEMORY_ORIGIN}/api/project-memory/${operation}`, {
+			method: "POST",
+			redirect: "error",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${credentials.access_token}`,
+			},
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		});
+	} catch {
+		throw new PilotError(
+			operation === "capture"
+				? "Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying."
+				: "Pharaoh project memory could not respond before the request ended.",
+		);
+	}
 	if (!response.ok) {
 		await response.body?.cancel();
 		// The shared credential file can now name a different OAuth session. Do
 		// not reuse an already prepared operation under newly loaded credentials.
 		if (response.status === 401)
-			throw new PilotError("Pharaoh rejected this sign-in. Reconnect before trying again.");
+			throw new PilotError("Pharaoh rejected this sign-in. Reconnect before trying again.", true);
 		if (response.status === 404)
-			throw new PilotError("Project memory is unavailable for this repository or account.");
+			throw new PilotError("Project memory is unavailable for this repository or account.", true);
 		if (response.status === 400 || response.status === 413)
 			throw new PilotError(
 				"Pharaoh rejected the memory payload. Check its shape, size, and sensitive content.",
+				true,
 			);
 		if (response.status === 409)
 			throw new PilotError(
 				"Pharaoh could not save this candidate because the operation conflicts or the project log is full.",
+				true,
 			);
 		if (response.status === 429)
-			throw new PilotError("Pharaoh project memory reached its request limit.");
+			throw new PilotError("Pharaoh project memory reached its request limit.", true);
 		if (operation === "capture" && response.status >= 500) {
 			throw new PilotError(
 				"Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying.",
 			);
 		}
-		throw new PilotError("Pharaoh project memory is temporarily unavailable.");
+		throw new PilotError(
+			"Pharaoh project memory is temporarily unavailable.",
+			response.status >= 400 && response.status < 500,
+		);
 	}
 	let result;
 	try {
