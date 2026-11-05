@@ -23,8 +23,9 @@ const CLI_TOOLS = [
 ];
 const CALL_TIMEOUT_MS = 5 * 60_000;
 const SIGN_IN = `Pharaoh: not signed in. Run ${NPX_COMMAND} in a terminal to sign in.`;
-// Text-coupled until the server exposes a refusal marker: src/mcp/plan-wall.ts.
-const PLAN_WALL_PREFIX = "This needs Pro: ";
+// Wire code from src/mcp/plan-wall.ts; the npm proxy ships independently.
+const PLAN_WALL_ERROR_CODE = "plan_wall:map_only";
+const LEGACY_PLAN_WALL_PREFIX = "This needs Pro: ";
 const EXIT = { answer: 0, failure: 1, usage: 2, signIn: 3, plan: 4 };
 
 function authFailure(action: RefreshFailureAction = "reauth"): void {
@@ -193,6 +194,19 @@ async function call(creds: Credentials, name: string, args: Record<string, unkno
 	}
 }
 
+function resultExitCode(name: string, result: CallToolResult): number {
+	if (result.isError) return EXIT.failure;
+	const { errorCode, guidance } = result._meta ?? {};
+	if (errorCode === PLAN_WALL_ERROR_CODE) return EXIT.plan;
+	if ((typeof errorCode === "string" && errorCode.length > 0) || guidance === true)
+		return EXIT.failure;
+	// Older servers expose the plan refusal only in the first text block.
+	const firstText = result.content.find((block) => block.type === "text");
+	return name !== "get_codebase_map" && firstText?.text.startsWith(LEGACY_PLAN_WALL_PREFIX)
+		? EXIT.plan
+		: EXIT.answer;
+}
+
 /**
  * Execute one question tool, printing its result and setting the shell exit code.
  * @param argv - Tool name followed by schema-derived flags and CLI options.
@@ -237,12 +251,7 @@ export async function runCli(argv: string[]): Promise<void> {
 				return authFailure();
 			}
 		}
-		const firstText = result.content.find((block) => block.type === "text");
-		process.exitCode = result.isError
-			? EXIT.failure
-			: name !== "get_codebase_map" && firstText?.text.startsWith(PLAN_WALL_PREFIX)
-				? EXIT.plan
-				: EXIT.answer;
+		process.exitCode = resultExitCode(name, result);
 		const output = asJson
 			? JSON.stringify(result)
 			: result.content

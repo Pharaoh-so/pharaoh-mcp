@@ -19,6 +19,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { CallToolResult, ClientCapabilities, Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { MemoryHookState } from "../project-memory/preferences.mjs";
 import { loadBundledCatalog } from "./catalog.js";
 import type { DeviceFlowGateway } from "./gateway.js";
 import type { InstructionState, ManagedBlockState } from "./install-skills.js";
@@ -38,7 +39,9 @@ export type DownstreamClient = {
 	/** The client's own `initialize` clientInfo (e.g. claude-code 2.1.3). */
 	client: { name?: string; version?: string };
 	/** Pharaoh's Claude Code plugin as ~/.claude/settings.json lists it. */
-	plugin: "enabled" | "disabled" | "absent";
+	plugin: "enabled" | "disabled" | "absent" | "unknown";
+	/** Client-reported reminder configuration, never native trust or execution. */
+	memoryHooks?: MemoryHookState;
 	/** What the client's instruction files say about Pharaoh (install-skills.ts instructionStates); never their text. */
 	instructions?: {
 		user: InstructionState;

@@ -32,6 +32,10 @@ import {
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+	memoryDiagnosticsForClient,
+	memoryHookStateForClient,
+} from "../project-memory/preferences.mjs";
+import {
 	AuthRequiredBackend,
 	type Backend,
 	createSseBackend,
@@ -90,6 +94,7 @@ export class ProxyServer {
 			const downstream: DownstreamClient = {
 				client: { name: info?.name, version: info?.version },
 				plugin: claudePluginState(),
+				memoryHooks: memoryHookStateForClient(info),
 				instructions: instructionStates(info?.name),
 			};
 			this.downstream = downstream;
@@ -138,7 +143,27 @@ export class ProxyServer {
 			await this.capabilityUpdate;
 			extra.signal.throwIfAborted();
 			const { name } = req.params;
-			const args = req.params.arguments ?? {};
+			let args = req.params.arguments ?? {};
+			if (
+				["pharaoh_memory_recall", "pharaoh_memory_expand", "pharaoh_memory_capture"].includes(name)
+			) {
+				const diagnostics = memoryDiagnosticsForClient(this.downstream?.client ?? {});
+				const claimed =
+					args.diagnostics &&
+					typeof args.diagnostics === "object" &&
+					!Array.isArray(args.diagnostics)
+						? (args.diagnostics as Record<string, unknown>)
+						: undefined;
+				if (diagnostics || claimed) {
+					const baseline = Object.fromEntries(
+						["taskSummary", "intendedNextAction", "turnRef", "sessionRef", "recallId"].flatMap(
+							(key) => (claimed?.[key] === undefined ? [] : [[key, claimed[key]]]),
+						),
+					);
+					// Native consent controls identity/version; agent baselines never restore an opted-out generation.
+					args = { ...args, diagnostics: { ...baseline, ...diagnostics } };
+				}
+			}
 			const backend = this.backend;
 			// The CLI's longer deadline must reach the upstream SDK request too.
 			const options = { signal: extra.signal, timeout: this.requestTimeout };

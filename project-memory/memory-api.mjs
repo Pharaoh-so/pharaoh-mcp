@@ -38,7 +38,13 @@ export async function refreshHelper() {
 
 /** Check only mapping metadata using the current device session. Normal proxy
  * startup handles token refresh; the prompt hook never waits on a refresh lock. */
-export async function requestMemoryReadiness(repo, credentials, deadline = Infinity) {
+export async function requestMemoryReadiness(
+	repo,
+	credentials,
+	deadline = Infinity,
+	clientName,
+	metadata = false,
+) {
 	const expiresAt = Date.parse(credentials?.expires_at);
 	if (typeof credentials?.access_token !== "string" || !(expiresAt > Date.now())) return;
 	const timeout = Math.min(READY_TIMEOUT_MS, Math.floor(deadline - performance.now()));
@@ -52,7 +58,7 @@ export async function requestMemoryReadiness(repo, credentials, deadline = Infin
 				"Content-Type": "application/json",
 				Authorization: `Bearer ${credentials.access_token}`,
 			},
-			body: JSON.stringify({ repo }),
+			body: JSON.stringify({ repo, ...(clientName && { clientName }) }),
 			signal: AbortSignal.timeout(timeout),
 		});
 		if (!response.ok) {
@@ -60,18 +66,48 @@ export async function requestMemoryReadiness(repo, credentials, deadline = Infin
 			return;
 		}
 		const result = await responseJson(response);
-		return result?.revision;
+		return metadata ? result : result?.revision;
 	} catch {
 		// Pending, denied, unavailable and timed-out lookups leave hooks dormant.
 	}
 }
 
+/** Server policy is independent of local consent; absent policy never enables collection. */
+export async function requestMemoryPolicy(repo, credentials, deadline = Infinity, clientName) {
+	const result = await requestMemoryReadiness(repo, credentials, deadline, clientName, true);
+	const policy = result?.diagnosticsPolicy;
+	if (!policy || typeof policy !== "object") return;
+	if (!clientName) return policy;
+	const control = result?.diagnosticsControl;
+	return {
+		...policy,
+		generation: control?.enabled === true ? control.generation : undefined,
+		control,
+	};
+}
+
+function diagnosticResponseFields(result) {
+	return {
+		...(result?.recallId === null ||
+		(typeof result?.recallId === "string" && UUID.test(result.recallId))
+			? { recallId: result.recallId }
+			: {}),
+		...(typeof result?.collection === "string" && { collection: result.collection }),
+		...(result?.feedbackRequest &&
+			typeof result.feedbackRequest === "object" && { feedbackRequest: result.feedbackRequest }),
+	};
+}
+
 export async function requestMemory(
 	operation,
 	payload,
-	{ fetcher = fetch, helper, credentials } = {},
+	{ fetcher = fetch, helper, credentials, client, timeoutMs = REQUEST_TIMEOUT_MS } = {},
 ) {
-	if (!["recall", "capture", "expand"].includes(operation))
+	if (
+		!["recall", "capture", "expand", "diagnostics", "diagnostics/control", "feedback"].includes(
+			operation,
+		)
+	)
 		throw new PilotError("Unknown memory request.");
 	// Capture supplies its session snapshot so dispatch cannot adopt a different sign-in.
 	if (!credentials) {
@@ -83,6 +119,19 @@ export async function requestMemory(
 		throw new PilotError(
 			"Connect to Pharaoh with its device sign-in, or retry if sign-in is temporarily unavailable.",
 		);
+	if (["recall", "expand", "capture"].includes(operation) && (client || payload.client)) {
+		const { memoryDiagnosticsForClient } = await import("./preferences.mjs");
+		const diagnostic = memoryDiagnosticsForClient({ name: client ?? payload.client });
+		if (diagnostic || payload.diagnostics) {
+			const claimed = payload.diagnostics;
+			const baseline = Object.fromEntries(
+				["taskSummary", "intendedNextAction", "turnRef", "sessionRef", "recallId"].flatMap((key) =>
+					claimed?.[key] === undefined ? [] : [[key, claimed[key]]],
+				),
+			);
+			payload = { ...payload, diagnostics: { ...baseline, ...diagnostic } };
+		}
+	}
 	let response;
 	try {
 		response = await fetcher(`${PROJECT_MEMORY_ORIGIN}/api/project-memory/${operation}`, {
@@ -93,7 +142,7 @@ export async function requestMemory(
 				Authorization: `Bearer ${credentials.access_token}`,
 			},
 			body: JSON.stringify(payload),
-			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+			signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, Math.max(1, timeoutMs))),
 		});
 	} catch {
 		throw new PilotError(
@@ -142,6 +191,7 @@ export async function requestMemory(
 			);
 		throw error;
 	}
+	if (["diagnostics", "diagnostics/control", "feedback"].includes(operation)) return result;
 	if (
 		operation === "recall" &&
 		Array.isArray(result?.records) &&
@@ -167,7 +217,7 @@ export async function requestMemory(
 				return result;
 			throw new PilotError("Pharaoh returned an incomplete compact recall packet.");
 		}
-		return { records: result.records, graph: result.graph };
+		return { records: result.records, graph: result.graph, ...diagnosticResponseFields(result) };
 	}
 	if (
 		operation === "expand" &&
@@ -182,6 +232,7 @@ export async function requestMemory(
 		return {
 			record: result.record,
 			current: result.current,
+			...diagnosticResponseFields(result),
 			...(Number.isInteger(omitted) && omitted >= 0 && { omittedHistoricalEvidence: omitted }),
 		};
 	}
@@ -190,7 +241,10 @@ export async function requestMemory(
 		typeof result?.record?.id === "string" &&
 		UUID.test(result.record.id)
 	) {
-		return { record: { id: result.record.id, status: result.record.status } };
+		return {
+			record: { id: result.record.id, status: result.record.status },
+			...diagnosticResponseFields(result),
+		};
 	}
 	if (operation === "capture")
 		throw new PilotError(

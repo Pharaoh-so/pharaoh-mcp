@@ -1,9 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { bundledHook, installMemoryBundle, packagedMemoryBundle } from "./bundle.mjs";
 import { hasLegacyHooks, hasUserHooks, updateHooks, updateUserHooks } from "./hook-config.mjs";
 import { atomicWrite, checkout, git, hasMemoryGit } from "./local.mjs";
+import {
+	clearDiagnosticQueue,
+	diagnosticsPolicyEligible,
+	revokeDiagnosticConsent,
+} from "./diagnostics-collector.mjs";
+import { requestMemory, requestMemoryPolicy } from "./memory-api.mjs";
 import { MEMORY_HOOK_CLIENTS, readHookPreferences, writeHookPreferences } from "./preferences.mjs";
 import {
 	legacySettingsPath,
@@ -81,7 +88,17 @@ function migrateCheckout(client, target, notices) {
 	}
 }
 
-function syncUserHooks(client, home, env, target, hookPath, node, alreadyActive, graphCues) {
+function syncUserHooks(
+	client,
+	home,
+	env,
+	target,
+	hookPath,
+	node,
+	alreadyActive,
+	graphCues,
+	diagnostics,
+) {
 	let known = Boolean(alreadyActive);
 	try {
 		const settings = inspectSettings(userSettings(client, home, env));
@@ -94,7 +111,7 @@ function syncUserHooks(client, home, env, target, hookPath, node, alreadyActive,
 				hasLegacyHooks(settings.config, client, target.root);
 			writeSettings(
 				settings,
-				updateUserHooks(settings.config, client, hookPath, node, graphCues),
+				updateUserHooks(settings.config, client, hookPath, node, graphCues, diagnostics),
 				target,
 				checkoutHook,
 			);
@@ -140,9 +157,27 @@ export async function chooseMemoryHooks({
 			choices.notices.push("Pharaoh: project memory hooks need a POSIX client with system Git.");
 		return choices;
 	}
+	for (const client of clients) {
+		try {
+			await revokeDiagnosticConsent(client, { home, readCredentials: async () => credentials });
+		} catch {
+			/* A pending content-free tombstone retries at the next setup. */
+		}
+	}
 	const previous = readHookPreferences(home);
 	const active = readActiveMemoryClients(home);
 	const next = { ...previous };
+	// A policy lookup failure never prevents ordinary memory setup.
+	let diagnosticPolicy;
+	try {
+		diagnosticPolicy = await requestMemoryPolicy(
+			projectMemoryHint(credentials)[0]?.repo,
+			credentials,
+			performance.now() + 500,
+		);
+	} catch {
+		/* Closed until the server supplies eligible disclosure policy. */
+	}
 	for (const client of MEMORY_HOOK_CLIENTS) {
 		if (!clients.includes(client)) continue;
 		const label = client === "codex" ? "Codex" : "Claude Code";
@@ -166,6 +201,10 @@ export async function chooseMemoryHooks({
 			if (answer === null) continue;
 			choice.memory = answer;
 			if (!answer && choice.graph === true) delete choice.graph;
+			if (!answer) {
+				choice.diagnostics = false;
+				clearDiagnosticQueue(client, home);
+			}
 		}
 		if (choice.memory === true) {
 			let graphEnabled =
@@ -181,6 +220,66 @@ export async function chooseMemoryHooks({
 				if (answer !== null) {
 					choice.graph = answer;
 					graphEnabled = answer;
+				}
+			}
+			if (
+				(requested || choice.diagnostics === undefined) &&
+				diagnosticsPolicyEligible(diagnosticPolicy)
+			) {
+				const answer = await ask(
+					`Share bounded project-memory task/action/final excerpts and record links from ${label} for diagnostics? Includes prompt text (1 KB), action descriptions (2 KB), final text (2 KB), edited paths and tool result metadata; incidental source may occur. No file-read bodies, patches, arbitrary shell output or hidden reasoning. Local queue: 1 MB/24 h; server retention: ${diagnosticPolicy.retentionDays ?? 90} days. Native hook review/trust remains required. [y/N] `,
+					false,
+				);
+				if (answer !== null) {
+					choice.diagnostics = false;
+					if (!answer) {
+						clearDiagnosticQueue(client, home);
+						if (choice.diagnosticsGeneration)
+							for (const hint of projectMemoryHint(credentials)) {
+								try {
+									await requestMemory(
+										"diagnostics/control",
+										{
+											repo: hint.repo,
+											clientName: client,
+											enabled: false,
+											generation: choice.diagnosticsGeneration,
+											policyVersion: choice.diagnosticsPolicyVersion,
+										},
+										{ credentials, timeoutMs: 1_200 },
+									);
+								} catch {
+									/* Local decline still prevents collection. */
+								}
+							}
+					}
+					if (answer) {
+						const generation = randomUUID();
+						try {
+							for (const hint of projectMemoryHint(credentials)) {
+								const control = await requestMemory(
+									"diagnostics/control",
+									{
+										repo: hint.repo,
+										clientName: client,
+										enabled: true,
+										generation,
+										policyVersion: diagnosticPolicy.policyVersion,
+									},
+									{ credentials },
+								);
+								if (control?.enabled !== true || control.generation !== generation)
+									throw new Error("Diagnostic consent was not confirmed.");
+							}
+							choice.diagnostics = true;
+							choice.diagnosticsGeneration = generation;
+							choice.diagnosticsPolicyVersion = diagnosticPolicy.policyVersion;
+						} catch {
+							choices.notices.push(
+								`Pharaoh: ${label} diagnostics remain off because consent could not be confirmed. Retry setup later.`,
+							);
+						}
+					}
 				}
 			}
 			choices.accepted.push(client);
@@ -236,6 +335,7 @@ export function syncMemoryHooks({
 	const target = checkout(cwd);
 	const notices = [];
 	const configured = [];
+	const preferences = readHookPreferences(home);
 
 	let installed;
 	let digest;
@@ -260,6 +360,12 @@ export function syncMemoryHooks({
 	for (const client of MEMORY_HOOK_CLIENTS) {
 		if (!clients.includes(client)) continue;
 		const next = { ...active, [client]: digest };
+		if (
+			!enable ||
+			preferences[client]?.memory === false ||
+			preferences[client]?.diagnostics !== true
+		)
+			clearDiagnosticQueue(client, home);
 		try {
 			// Enable the replacement before swapping any settings, so failed
 			// activation cannot strand an existing hook or remove a legacy one.
@@ -275,6 +381,7 @@ export function syncMemoryHooks({
 					node,
 					active[client],
 					graphClients.includes(client),
+					preferences[client]?.memory !== false && preferences[client]?.diagnostics === true,
 				);
 			} catch (error) {
 				if (replacing) writeActivation(activePath, active);
