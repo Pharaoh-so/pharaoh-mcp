@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "c24533fc56c07c3e9d88f9065795c586c5175939",
-  "payloadSha256": "f09e2abd09802fdb6a2d28851f1a9097fc2190019214e702104266440fcc1812",
+  "commit": "13aa8128c295a6846e3c8e0044480c55e0424324",
+  "payloadSha256": "43bc930257eb6bb4e7fd6c8fe04dc92ac59329dd062efd055d231ade13940502",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "87b2c0d499dc761a062a96e0fc34db9de273eb39551c362919d7242bb40a71e0",
+      "sha256": "5c6014d7d1b2cbe18672c6ad7c0f569e0f09fa03c9c03c15c38db468c172ee80",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "e74edaf1b860c42f988a6c499903cf29e02260bed04c7d45c786a130d96b0def",
+      "sha256": "82b9debd9b24f449ed83374d748c5272219b67c6da440d8ef3e13a4d135ff717",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "e938f4ae1f67a6a06cf67758eb8bbbe566db81b2c71aaa6939a07b4ae848451f",
+      "sha256": "65604b647f734ac3781ade67d5a246c6fe90cb89bdf77204b06c58551dea2dfc",
       "mode": "100644"
     },
     {
@@ -106,7 +106,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "c2bd6f5b63d7afe9ca3ce51b960c0d2b42bddacdc012871c80b3f79b8c12afc4",
+      "sha256": "643318574095bc37feb6d5db03411a130f8aa92a84d2ef621f7bc5a97eae65d9",
       "mode": "100644"
     },
     {
@@ -256,7 +256,7 @@
     },
     {
       "path": "src/backend.ts",
-      "sha256": "2bcc95e06b39dfe48259cc364a3705844e5642d733f9e314cfc482f7e83eb373",
+      "sha256": "c7c27e5ceeb0f491bbf8e1b9663312cff8c5f7f43afd950ff9cd867ab726851f",
       "mode": "100644"
     },
     {
@@ -291,7 +291,7 @@
     },
     {
       "path": "src/install-skills.ts",
-      "sha256": "4ab40d02c31923a59091d72e79963a705e4919364c19d1ed4589b69f654b5497",
+      "sha256": "81f44b2a44792f639664bf6508547c1e625e417ab30d3f0ac3a1394f2a482ded",
       "mode": "100644"
     },
     {
@@ -301,7 +301,7 @@
     },
     {
       "path": "src/proxy-server.ts",
-      "sha256": "0bdb1b5e36cb077d8ea1ad004f6f4a43bf1f7b50d00cd4b18991c01070adbe13",
+      "sha256": "8abda5068e06ca44db058c905e6652865132625962c47a6a4bdfd4b59dc47e86",
       "mode": "100644"
     },
     {
@@ -331,7 +331,7 @@
     },
     {
       "path": "tests/auth-flow-e2e.integration.test.ts",
-      "sha256": "e05a6470ed92b9dea430db036c76142e99b6d591900985450abdeb75af54dfc4",
+      "sha256": "520c9c660a392e46f3c0103b58bf2e272837c71b171734e60664b5209fb01e3a",
       "mode": "100644"
     },
     {
@@ -341,7 +341,7 @@
     },
     {
       "path": "tests/backend.integration.test.ts",
-      "sha256": "2f418dbc87f4cf9112264388016d8b6a91f4b507e65802281740c36ade4696bd",
+      "sha256": "f6ce3cfadffb376335fd8b199094fdb73d8bf3b23595923a0109db79e9182160",
       "mode": "100644"
     },
     {
@@ -351,7 +351,7 @@
     },
     {
       "path": "tests/install-skills.test.ts",
-      "sha256": "210c74d8566517e654b8db6afe0f0d6d930b470e43fbaa682309bf4e57591c69",
+      "sha256": "b5c9c12698166039b24e5ccfff1f0e87dc1137a475d7945bf2a86e3cc32071fc",
       "mode": "100644"
     },
     {

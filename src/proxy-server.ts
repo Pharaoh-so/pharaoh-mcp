@@ -39,7 +39,7 @@ import {
 import { loadBundledCatalog } from "./catalog.js";
 import type { Credentials } from "./credentials.js";
 import { createGateway, type DeviceFlowGateway } from "./gateway.js";
-import { claudePluginState } from "./install-skills.js";
+import { claudePluginState, instructionStates } from "./install-skills.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { registerTraceResource } from "./trace-resource.js";
 import { getPackageVersion } from "./version.js";
@@ -86,6 +86,7 @@ export class ProxyServer {
 			const downstream: DownstreamClient = {
 				client: { name: info?.name, version: info?.version },
 				plugin: claudePluginState(),
+				instructions: instructionStates(info?.name),
 			};
 			this.downstream = downstream;
 			this.clientCapabilities = this.server.getClientCapabilities() ?? {};

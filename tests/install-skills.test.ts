@@ -3,6 +3,7 @@
  * installed through `claude plugin`), OpenClaw install, detection, config
  * merging, and backward compat of parseArgs.
  */
+import { execFileSync } from "node:child_process";
 import {
 	appendFileSync,
 	chmodSync,
@@ -25,6 +26,7 @@ import {
 	claudePluginState,
 	describeClaudeMdOutcome,
 	installSkills,
+	instructionStates,
 	mergeOpenClawConfig,
 	offerClaudeMdLine,
 	PHARAOH_ALLOW_RULES,
@@ -1134,5 +1136,97 @@ describe("manifest-based cleanup — cut skills between versions", () => {
 		runInstallSkills(home, NO_CLI);
 
 		expect(existsSync(join(skillsDir, "pharaoh", "SKILL.md"))).toBe(true);
+	});
+});
+
+// ── Instruction state reported to Pharaoh ───────────────────────────
+//
+// Breaks when: file text leaves in the report, a stale block counts as the
+// exact line, a big file or a FIFO stalls initialize instead of reading
+// "unknown", a symlinked CLAUDE.md is skipped, or project files are read for a
+// client not known to start the proxy in the project folder.
+
+const SUGGESTED_LINE =
+	"In repos Pharaoh has mapped, before searching or reading files, ask Pharaoh where the relevant code is, what calls it, and whether what you need already exists.";
+
+describe("instruction state", () => {
+	let home: string;
+	const claudeMd = () => join(home, ".claude", "CLAUDE.md");
+	/** The user-level part of the report; no client reads project files. */
+	const user = () => {
+		const { user, managed } = instructionStates(undefined, home, home);
+		return { user, managed };
+	};
+
+	beforeEach(() => {
+		home = makeTempHome();
+		mkdirSync(join(home, ".claude"));
+	});
+	afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+	it.each([
+		["no file", null, { user: "missing", managed: "absent" }],
+		[
+			"setup's block",
+			`# mine\n<!-- pharaoh-mcp:start (managed) -->\n${SUGGESTED_LINE}\n<!-- pharaoh-mcp:end -->\n`,
+			{ user: "exact", managed: "current" },
+		],
+		[
+			"a stale block",
+			"<!-- pharaoh-mcp:start (managed) -->\nAsk Pharaoh first.\n<!-- pharaoh-mcp:end -->\n",
+			{ user: "mention", managed: "stale" },
+		],
+		[
+			"the user's own routing",
+			"## Code navigation: Pharaoh, then Grep\n",
+			{ user: "mention", managed: "absent" },
+		],
+		["no mention", "Use pnpm.\n", { user: "none", managed: "absent" }],
+		["text that reads like a state", "missing", { user: "none", managed: "absent" }],
+		[
+			"an oversized file",
+			`pharaoh ${"x".repeat(64 * 1024)}`,
+			{ user: "unknown", managed: "unknown" },
+		],
+	])("reads %s", (_name, text, expected) => {
+		if (text !== null) writeFileSync(claudeMd(), text);
+		expect(user()).toEqual(expected);
+	});
+
+	it("follows a symlink and never blocks on a FIFO", () => {
+		const target = join(home, "shared-claude.md");
+		writeFileSync(target, `${SUGGESTED_LINE}\n`);
+		symlinkSync(target, claudeMd());
+		expect(user().user).toBe("exact");
+		rmSync(claudeMd());
+		execFileSync("mkfifo", [claudeMd()]);
+		expect(user()).toEqual({ user: "unknown", managed: "unknown" });
+	});
+
+	it("reads project files only at a git root, for a client known to start there, never sending text", () => {
+		const project = join(home, "repo");
+		const state = () => instructionStates("claude-code", project, home).project;
+		mkdirSync(project);
+		writeFileSync(join(project, "CLAUDE.md"), "Use pnpm.\n");
+		expect(state()).toBe("unknown");
+		mkdirSync(join(project, ".git"));
+		expect(state()).toBe("none");
+		writeFileSync(join(project, "AGENTS.md"), "Check Pharaoh before grepping. SENTINEL\n");
+		writeFileSync(claudeMd(), "SENTINEL\n");
+		const report = instructionStates("claude-code", project, home);
+		expect(report).toEqual({ user: "none", managed: "absent", project: "mention" });
+		expect(JSON.stringify(report)).not.toContain("SENTINEL");
+		expect(instructionStates("cursor", project, home).project).toBe("unknown");
+		expect(instructionStates("claude-code", home, home).project).toBe("unknown");
+		// A folder where a file should be can't be read, even by root.
+		rmSync(join(project, "AGENTS.md"));
+		mkdirSync(join(project, "AGENTS.md"));
+		writeFileSync(join(project, "CLAUDE.local.md"), `${SUGGESTED_LINE}\n`);
+		expect(state()).toBe("exact");
+		rmSync(join(project, "CLAUDE.local.md"));
+		expect(state()).toBe("unknown");
+		rmSync(join(project, "AGENTS.md"), { recursive: true });
+		rmSync(join(project, "CLAUDE.md"));
+		expect(state()).toBe("missing");
 	});
 });

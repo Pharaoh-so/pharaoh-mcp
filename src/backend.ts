@@ -21,6 +21,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { CallToolResult, ClientCapabilities, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { loadBundledCatalog } from "./catalog.js";
 import type { DeviceFlowGateway } from "./gateway.js";
+import type { InstructionState, ManagedBlockState } from "./install-skills.js";
 import { classifySSEError, TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { TRACE_MIME_TYPE } from "./trace-resource.js";
 import { getPackageVersion } from "./version.js";
@@ -38,6 +39,12 @@ export type DownstreamClient = {
 	client: { name?: string; version?: string };
 	/** Pharaoh's Claude Code plugin as ~/.claude/settings.json lists it. */
 	plugin: "enabled" | "disabled" | "absent";
+	/** What the client's instruction files say about Pharaoh (install-skills.ts instructionStates); never their text. */
+	instructions?: {
+		user: InstructionState;
+		managed: ManagedBlockState;
+		project: InstructionState;
+	};
 };
 
 /** The contract ProxyServer uses to delegate tool handling. */

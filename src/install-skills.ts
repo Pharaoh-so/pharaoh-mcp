@@ -11,17 +11,19 @@ import {
 	constants,
 	cpSync,
 	existsSync,
+	fstatSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readFileSync,
+	readSync,
 	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePharaohHome } from "./credentials.js";
 import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
@@ -963,6 +965,134 @@ function readClaudeMd(home: string): ClaudeMdFile {
 	}
 	const current = text.slice(block.body, block.to) === `${PHARAOH_CLAUDE_MD_LINE}\n`;
 	return { state: current ? "current" : "stale", path, text, block };
+}
+
+// ── Instruction state reported to Pharaoh ───────────────────────────
+//
+// The proxy tells Pharaoh what the agent's instruction files say about it, so
+// adoption can be compared with and without the line in production. Only these
+// values leave the machine, never file text (privacy policy § 9, connection records).
+
+/** What an instruction file says about Pharaoh: the suggested line, another mention, none, no file, or unreadable. */
+export type InstructionState = "exact" | "mention" | "none" | "missing" | "unknown";
+
+/** Whether the block setup wrote into ~/.claude/CLAUDE.md is there and holds the current line. */
+export type ManagedBlockState = "current" | "stale" | "absent" | "unknown";
+
+/** A CLAUDE.md is a few KB; anything bigger reads as "unknown" instead of slowing initialize. */
+const INSTRUCTION_READ_CAP = 64 * 1024;
+
+/**
+ * A project's instruction files, read only for clients confirmed to start the
+ * proxy in the project folder (Claude Code 2.1.310 does: probed 2026-11-04).
+ */
+const PROJECT_INSTRUCTION_FILES = [
+	"CLAUDE.md",
+	"CLAUDE.local.md",
+	join(".claude", "CLAUDE.md"),
+	"AGENTS.md",
+];
+const PROJECT_CWD_CLIENTS: ReadonlySet<string> = new Set(["claude-code"]);
+
+/**
+ * Up to `cap` bytes of a regular file, read from the descriptor that was
+ * checked, so a FIFO or device swapped in can't block `initialize`. A symlink
+ * is followed: only a state is derived from what it points at.
+ *
+ * @returns The file's text, wrapped so no content can read as a state;
+ *   "missing" when there's no file; "unknown" when it's over the cap, not a
+ *   regular file, or unreadable
+ */
+function readBoundedText(
+	path: string,
+	cap = INSTRUCTION_READ_CAP,
+): { text: string } | "missing" | "unknown" {
+	let fd: number;
+	try {
+		fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+	}
+	try {
+		if (!fstatSync(fd).isFile()) return "unknown";
+		const buf = Buffer.alloc(cap + 1);
+		let length = 0;
+		while (length <= cap) {
+			const n = readSync(fd, buf, length, cap + 1 - length, null);
+			if (n === 0) break;
+			length += n;
+		}
+		return length > cap ? "unknown" : { text: buf.toString("utf-8", 0, length) };
+	} catch {
+		return "unknown";
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/** Whether `text` holds the suggested line, otherwise mentions Pharaoh, or neither. */
+function classifyInstructionText(text: string): "exact" | "mention" | "none" {
+	if (text.includes(PHARAOH_CLAUDE_MD_LINE)) return "exact";
+	return /\bpharaoh\b/i.test(text) ? "mention" : "none";
+}
+
+/** What ~/.claude/CLAUDE.md says about Pharaoh, and whether setup's block is there and current. */
+function userInstructionState(home = homedir()): {
+	user: InstructionState;
+	managed: ManagedBlockState;
+} {
+	const file = readBoundedText(join(home, ".claude", "CLAUDE.md"));
+	if (file === "missing") return { user: "missing", managed: "absent" };
+	if (file === "unknown") return { user: "unknown", managed: "unknown" };
+	const { text } = file;
+	const block = findClaudeMdBlock(text);
+	const managed =
+		block === null
+			? "absent"
+			: block === "broken"
+				? "unknown"
+				: text.slice(block.body, block.to) === `${PHARAOH_CLAUDE_MD_LINE}\n`
+					? "current"
+					: "stale";
+	return { user: classifyInstructionText(text), managed };
+}
+
+/**
+ * The strongest state across a project's instruction files: any exact line,
+ * then any mention, then any unreadable file, then a file without a mention.
+ * "unknown" outside a git repository's root or in the home folder.
+ */
+function projectInstructionState(cwd: string, home = homedir()): InstructionState {
+	if (resolve(cwd) === resolve(home) || !existsSync(join(cwd, ".git"))) return "unknown";
+	const states = PROJECT_INSTRUCTION_FILES.map((file) => {
+		const read = readBoundedText(join(cwd, file));
+		return typeof read === "string" ? read : classifyInstructionText(read.text);
+	});
+	return (
+		(["exact", "mention", "unknown", "none"] as const).find((s) => states.includes(s)) ?? "missing"
+	);
+}
+
+/**
+ * The instruction state the proxy reports for its client. Project files only
+ * for clients known to start the proxy in the project folder. Never throws.
+ */
+export function instructionStates(
+	clientName: string | undefined,
+	cwd?: string,
+	home = homedir(),
+): { user: InstructionState; managed: ManagedBlockState; project: InstructionState } {
+	try {
+		// process.cwd() throws when the folder was deleted: inside the try, so it reads as unknown.
+		const project =
+			clientName && PROJECT_CWD_CLIENTS.has(clientName)
+				? projectInstructionState(cwd ?? process.cwd(), home)
+				: "unknown";
+		return { ...userInstructionState(home), project };
+	} catch {
+		return { user: "unknown", managed: "unknown", project: "unknown" };
+	}
 }
 
 /** What `offerClaudeMdLine` did; `describeClaudeMdOutcome` words it. */
