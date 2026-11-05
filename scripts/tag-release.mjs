@@ -9,10 +9,11 @@ import {
 	REPOSITORY,
 	registryPackument,
 	validateArtifact,
+	verifySource,
 } from "./release.mjs";
 
 const [directory, commit, manifestHash] = process.argv.slice(2);
-const manifest = validateArtifact(directory, commit, manifestHash);
+const manifest = validateArtifact(directory, commit, manifestHash, verifySource(process.cwd()));
 assert.equal(process.env.GITHUB_REPOSITORY, REPOSITORY);
 assert.equal(process.env.GITHUB_REF, "refs/heads/main");
 assert.ok(process.env.GH_TOKEN);

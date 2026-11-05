@@ -37,6 +37,11 @@ const PROJECT_MEMORY_PACK_PATHS = [
 	"project-memory/setup.mjs",
 	"project-memory/user-target.mjs",
 ];
+const WORKTREE_CUE_PACK_PATHS = [
+	"project-memory/graph-cues.mjs",
+	"project-memory/preferences.d.mts",
+	"project-memory/preferences.mjs",
+];
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 export const hash = (bytes, algorithm = "sha256") =>
 	createHash(algorithm).update(bytes).digest("hex");
@@ -89,7 +94,7 @@ export function verifySource(root) {
 }
 
 /** Only public runtime assets can enter npm; source, tests and release machinery stay out. */
-export function verifyPackPaths(paths, packageFiles = []) {
+export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 	assert.ok(paths.length > 0 && paths.length < 300);
 	assert.equal(new Set(paths).size, paths.length, "Duplicate archive entries");
 	for (const path of paths) {
@@ -97,10 +102,23 @@ export function verifyPackPaths(paths, packageFiles = []) {
 		// skills/ is the pre-npx-skills layout; drop it once main's package.json no longer ships it.
 		assert.ok(
 			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
+				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
 					path,
 				),
 			`Unexpected npm file: ${path}`,
+		);
+	}
+	const hasMemory = packageFiles.includes("project-memory");
+	const worktreeInPack = WORKTREE_CUE_PACK_PATHS.some((path) => paths.includes(path));
+	const worktreeInSource = sourcePaths?.some((path) => WORKTREE_CUE_PACK_PATHS.includes(path));
+	if (sourcePaths && worktreeInPack) {
+		assert.ok(worktreeInSource, "Worktree cue assets are absent from the verified source");
+	}
+	if (worktreeInSource) {
+		assert.ok(
+			WORKTREE_CUE_PACK_PATHS.every((path) => sourcePaths.includes(path)),
+			"Verified source must declare the complete worktree cue runtime",
 		);
 	}
 	for (const required of [
@@ -110,7 +128,8 @@ export function verifyPackPaths(paths, packageFiles = []) {
 		"inspect-tools.json",
 		"trace-app.html",
 		"LICENSE",
-		...(packageFiles.includes("project-memory") ? PROJECT_MEMORY_PACK_PATHS : []),
+		...(hasMemory ? PROJECT_MEMORY_PACK_PATHS : []),
+		...(worktreeInSource || worktreeInPack ? WORKTREE_CUE_PACK_PATHS : []),
 	])
 		assert.ok(paths.includes(required), `Missing npm asset: ${required}`);
 }
@@ -149,7 +168,7 @@ export function shouldPublish(root, { eventName, ref, before }) {
 }
 
 /** Reject altered, unexpected or identity-mismatched immutable release artifacts. */
-export function validateArtifact(directory, expectedCommit, expectedManifestHash) {
+export function validateArtifact(directory, expectedCommit, expectedManifestHash, source) {
 	assert.match(expectedCommit, SHA);
 	assert.match(expectedManifestHash, SHA256);
 	const manifestBytes = readFileSync(join(directory, "release-manifest.json"));
@@ -161,6 +180,11 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 	assert.equal(manifest.sourceRepository, "Pharaoh-so/pharaoh");
 	assert.match(manifest.sourceCommit, SHA);
 	assert.match(manifest.sourcePayloadSha256, SHA256);
+	if (source) {
+		assert.equal(manifest.sourceRepository, source.repository);
+		assert.equal(manifest.sourceCommit, source.commit);
+		assert.equal(manifest.sourcePayloadSha256, source.payloadSha256);
+	}
 	assert.equal(manifest.packageName, PACKAGE);
 	assert.match(manifest.version, VERSION);
 	assert.equal(manifest.packageRepository, PACKAGE_REPOSITORY);
@@ -192,7 +216,11 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 	assert.equal(pkg.version, manifest.version);
 	assert.equal(pkg.repository?.url, PACKAGE_REPOSITORY);
 	assert.equal(pkg.repository?.directory, undefined);
-	verifyPackPaths(names.map((name) => name.slice(8)), pkg.files);
+	verifyPackPaths(
+		names.map((name) => name.slice(8)),
+		pkg.files,
+		source?.files.map((file) => file.path),
+	);
 	return manifest;
 }
 
@@ -456,7 +484,11 @@ async function main() {
 			),
 			pkg.version,
 		);
-		verifyPackPaths(packed.files.map((file) => file.path), pkg.files);
+		verifyPackPaths(
+			packed.files.map((file) => file.path),
+			pkg.files,
+			source.files.map((file) => file.path),
+		);
 		const bytes = readFileSync(join(directory, packed.filename));
 		const manifest = {
 			schemaVersion: 1,
@@ -474,13 +506,18 @@ async function main() {
 		};
 		const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
 		writeFileSync(join(directory, "release-manifest.json"), manifestBytes);
-		validateArtifact(directory, publicCommit, hash(manifestBytes));
+		validateArtifact(directory, publicCommit, hash(manifestBytes), source);
 		output("manifest-sha256", hash(manifestBytes));
 		output("version", manifest.version);
 		output("source-commit", source.commit);
 		console.log(JSON.stringify(manifest, null, 2));
 	} else if (["validate", "publish", "verify"].includes(command)) {
-		const manifest = validateArtifact(directory, expectedCommit, expectedHash);
+		const manifest = validateArtifact(
+			directory,
+			expectedCommit,
+			expectedHash,
+			verifySource(process.cwd()),
+		);
 		if (command === "publish") {
 			assert.equal(process.env.GITHUB_REPOSITORY, REPOSITORY);
 			assert.equal(process.env.GITHUB_REF, "refs/heads/main");

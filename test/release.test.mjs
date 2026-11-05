@@ -180,17 +180,54 @@ test("the release handoff requires the complete allowlisted project memory packa
 		"setup.mjs",
 		"user-target.mjs",
 	].map((path) => `project-memory/${path}`);
-	const complete = fixture([...paths, ...runtimePaths], packageFiles);
+	const worktreePaths = ["graph-cues.mjs", "preferences.d.mts", "preferences.mjs"].map(
+		(path) => `project-memory/${path}`,
+	);
+	const earlier = [...paths, ...runtimePaths];
+	const declared = (files) => ({
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: "c".repeat(64),
+		files: files.map((path) => ({ path })),
+	});
+	const olderSource = declared(runtimePaths);
+	const worktreeSource = declared([...runtimePaths, ...worktreePaths]);
+	const complete = fixture(earlier, packageFiles);
 	const incomplete = fixture([...paths, ...runtimePaths.slice(1)], packageFiles);
+	const worktree = fixture([...earlier, ...worktreePaths], packageFiles);
+	const incompleteWorktree = fixture([...earlier, ...worktreePaths.slice(1)], packageFiles);
 	try {
-		assert.equal(validateArtifact(complete.directory, commit, complete.save()).version, version);
+		assert.equal(
+			validateArtifact(complete.directory, commit, complete.save(), olderSource).version,
+			version,
+		);
 		assert.throws(
-			() => validateArtifact(incomplete.directory, commit, incomplete.save()),
+			() => validateArtifact(incomplete.directory, commit, incomplete.save(), olderSource),
 			/Missing npm asset: project-memory\/bundle\.mjs/,
+		);
+		assert.equal(
+			validateArtifact(worktree.directory, commit, worktree.save(), worktreeSource).version,
+			version,
+		);
+		assert.throws(
+			() =>
+				validateArtifact(
+					incompleteWorktree.directory,
+					commit,
+					incompleteWorktree.save(),
+					worktreeSource,
+				),
+			/Missing npm asset: project-memory\/graph-cues\.mjs/,
+		);
+		assert.throws(
+			() => validateArtifact(worktree.directory, commit, worktree.save(), olderSource),
+			/Worktree cue assets are absent from the verified source/,
 		);
 	} finally {
 		complete.clean();
 		incomplete.clean();
+		worktree.clean();
+		incompleteWorktree.clean();
 	}
 });
 
