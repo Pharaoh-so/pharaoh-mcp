@@ -1,8 +1,8 @@
 /**
- * End-to-end integration test for the auth-required → SSE swap flow.
+ * End-to-end integration tests for auth-required → SSE swaps and the built CLI.
  *
  * Spawns the real proxy as a child process (via tsx so we can run from source
- * without a prior build) and drives it through three scenarios that together
+ * without a prior build; CLI cases use the built binary) and drives it through three scenarios that together
  * prove the "session never disconnects" property:
  *
  *   1. Cold start with empty credentials → proxy serves shim catalog → mock
@@ -25,8 +25,8 @@
  * is a contract, not an aspiration. See CLAUDE.md for the rationale.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
@@ -36,15 +36,22 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import {
 	CallToolRequestSchema,
+	type CallToolResult,
 	type ClientCapabilities,
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 // Point at the package source via an absolute path so tsx can run index.ts
 // directly, no prior build required. Using pathResolve so the test passes
 // regardless of where vitest was invoked from.
 const INDEX_PATH = pathResolve(__dirname, "..", "src", "index.ts");
+const BUILT_INDEX_PATH = pathResolve(__dirname, "..", "dist", "index.js");
+const ACCESS_TOKEN = "phat_initial";
+const REFRESH_TOKEN = "phrt_initial";
+// Opaque tokens deliberately evade index.ts's legacy phat_/phrt_ regex mask.
+const CLI_ACCESS_TOKEN = "opaque.access+[1](token)";
+const CLI_REFRESH_TOKEN = "opaque.refresh$[2](token)";
 
 /** A single ISO timestamp expiry helper for fixtures. */
 function iso(offsetMs: number): string {
@@ -52,13 +59,17 @@ function iso(offsetMs: number): string {
 }
 
 /** Signed-in credentials for alice@acme, pointing the proxy at the mock server. */
-function writeValidCredentials(homeDir: string, serverUrl: string): void {
+function writeValidCredentials(
+	homeDir: string,
+	serverUrl: string,
+	overrides: Record<string, unknown> = {},
+): void {
 	writeFileSync(
 		join(homeDir, ".pharaoh", "credentials.json"),
 		JSON.stringify({
 			version: 2,
-			access_token: "phat_initial",
-			refresh_token: "phrt_initial",
+			access_token: ACCESS_TOKEN,
+			refresh_token: REFRESH_TOKEN,
 			expires_at: iso(3600_000),
 			refresh_expires_at: iso(180 * 86_400_000),
 			expires_in: 3600,
@@ -66,6 +77,7 @@ function writeValidCredentials(homeDir: string, serverUrl: string): void {
 			github_login: "alice",
 			tenant_name: "acme",
 			repos: [],
+			...overrides,
 		}),
 	);
 }
@@ -100,6 +112,15 @@ interface MockState {
 	failClientReport: boolean;
 	toolCalls: Array<{ name: string; arguments?: Record<string, unknown> }>;
 	holdCapture: boolean;
+	/** Optional CLI result and HTTP failure body, including hostile token echoes. */
+	toolResult?: CallToolResult;
+	errorBody?: string;
+	failToolPost?: boolean;
+	failAllSseGets?: boolean;
+	refreshFailureStatus?: number;
+	refreshRedirect?: string;
+	requestCount: number;
+	refreshCount: number;
 }
 
 interface MockServer {
@@ -133,6 +154,8 @@ async function startMockServer(): Promise<MockServer> {
 		failClientReport: false,
 		toolCalls: [],
 		holdCapture: false,
+		requestCount: 0,
+		refreshCount: 0,
 	};
 
 	const ctx: { mcpSession: MockServer["mcpSession"]; baseUrl: string } = {
@@ -141,6 +164,7 @@ async function startMockServer(): Promise<MockServer> {
 	};
 
 	const httpServer: Server = createServer(async (req, res) => {
+		state.requestCount++;
 		const url = new URL(req.url ?? "/", "http://localhost");
 		// Read body for POST; needed for /device/token's POST-messages handling.
 		let body = "";
@@ -194,6 +218,11 @@ async function startMockServer(): Promise<MockServer> {
 				}
 
 				if (req.method === "POST" && url.pathname === "/device/token-refresh") {
+					state.refreshCount++;
+					if (state.refreshRedirect) {
+						res.writeHead(307, { Location: state.refreshRedirect }).end();
+						return;
+					}
 					if (state.refreshInvalidGrant) {
 						res.statusCode = 400;
 						res.setHeader("Content-Type", "application/json");
@@ -219,19 +248,22 @@ async function startMockServer(): Promise<MockServer> {
 						res.end(JSON.stringify(payload));
 						return;
 					}
-					res.statusCode = 500;
+					res.statusCode = state.refreshFailureStatus ?? 500;
 					res.end(JSON.stringify({ error: "refresh_not_configured" }));
 					return;
 				}
 
 				if (req.method === "GET" && url.pathname === "/sse") {
 					state.sseGetCount++;
-					if (state.failSseGetAttempt > 0 && state.sseGetCount === state.failSseGetAttempt) {
+					if (
+						state.failAllSseGets ||
+						(state.failSseGetAttempt > 0 && state.sseGetCount === state.failSseGetAttempt)
+					) {
 						// Simulate token rejection — the proxy's classifier looks at
 						// SseError.code === 401 to throw TokenExpiredError.
 						res.statusCode = state.failSseGetStatus;
 						res.setHeader("Content-Type", "application/json");
-						res.end(JSON.stringify({ error: "token_rejected" }));
+						res.end(state.errorBody ?? JSON.stringify({ error: "token_rejected" }));
 						return;
 					}
 					// Real MCP SSE session. Build a small server that advertises a
@@ -265,6 +297,7 @@ async function startMockServer(): Promise<MockServer> {
 								extra.signal.addEventListener("abort", () => resolve(), { once: true }),
 							);
 						}
+						if (state.toolResult) return state.toolResult;
 						return {
 							content: [{ type: "text", text: `mock pharaoh: tool=${req2.params.name}` }],
 							isError: false,
@@ -293,9 +326,12 @@ async function startMockServer(): Promise<MockServer> {
 					}
 					// Hand-parse the body JSON (we already drained the stream above)
 					const message = JSON.parse(body);
-					if (state.failClientReport && message.method === "notifications/pharaoh/client") {
+					if (
+						(state.failClientReport && message.method === "notifications/pharaoh/client") ||
+						(state.failToolPost && message.method === "tools/call")
+					) {
 						res.statusCode = 500;
-						res.end("report rejected");
+						res.end(state.errorBody ?? "report rejected");
 						return;
 					}
 					await ctx.mcpSession.transport.handlePostMessage(req, res, message);
@@ -342,14 +378,25 @@ interface ProxyHarness {
 	/** Wait for a JSON-RPC response with the given id. */
 	waitForResponse(id: number, timeoutMs?: number): Promise<Record<string, unknown>>;
 	kill(): Promise<void>;
+	/** Wait for a CLI process to exit after its single call. */
+	waitForExit(): Promise<number | null>;
 }
 
-function spawnProxy(opts: { serverUrl: string; homeDir: string }): ProxyHarness {
+function spawnProxy(opts: {
+	serverUrl: string;
+	homeDir: string;
+	cliArgs?: string[];
+	brokenPipe?: boolean;
+}): ProxyHarness {
 	const require = createRequire(import.meta.url);
 	const tsxCli = require.resolve("tsx/cli");
 	const child: ChildProcess = spawn(
 		process.execPath,
-		[tsxCli, INDEX_PATH, "--server", opts.serverUrl],
+		[
+			...(opts.cliArgs ? [BUILT_INDEX_PATH, ...opts.cliArgs] : [tsxCli, INDEX_PATH]),
+			"--server",
+			opts.serverUrl,
+		],
 		{
 			stdio: ["pipe", "pipe", "pipe"],
 			// Outside any repo, so the project instruction state is a stable "unknown".
@@ -365,11 +412,13 @@ function spawnProxy(opts: { serverUrl: string; homeDir: string }): ProxyHarness 
 				HOME: opts.homeDir,
 				// Suppress skill-install chatter during tests — not load-bearing
 				// for the flow, noisy in stderr.
-				PHARAOH_DEBUG: "0",
+				PHARAOH_DEBUG: opts.cliArgs ? "1" : "0",
 			},
 		},
 	);
 
+	const exited = new Promise<number | null>((resolve) => child.once("close", resolve));
+	if (opts.brokenPipe) child.stdout?.destroy();
 	const stdoutBuf: string[] = [];
 	const stderrBuf: string[] = [];
 	// Line buffer for JSON-RPC on stdout.
@@ -447,6 +496,7 @@ function spawnProxy(opts: { serverUrl: string; homeDir: string }): ProxyHarness 
 		writeMessage,
 		waitForResponse,
 		kill,
+		waitForExit: () => exited,
 	};
 }
 
@@ -483,6 +533,16 @@ describe("auth-flow E2E", () => {
 	let mockServer: MockServer;
 	let homeDir: string;
 	let harness: ProxyHarness | null;
+	let otherServer: MockServer | null;
+
+	// Root builds omit this package; compile current sources once, including standalone exports.
+	beforeAll(() => {
+		execFileSync(
+			process.execPath,
+			[createRequire(import.meta.url).resolve("typescript/bin/tsc")],
+			{ cwd: pathResolve(__dirname, ".."), stdio: "pipe" },
+		);
+	}, 30_000);
 
 	beforeEach(async () => {
 		mockServer = await startMockServer();
@@ -491,13 +551,306 @@ describe("auth-flow E2E", () => {
 		// doesn't race on mkdirSync-recursive timing.
 		mkdirSync(join(homeDir, ".pharaoh"), { recursive: true, mode: 0o700 });
 		harness = null;
+		otherServer = null;
 	});
 
 	afterEach(async () => {
 		if (harness) await harness.kill();
 		await mockServer.close();
+		await otherServer?.close();
 		rmSync(homeDir, { recursive: true, force: true });
 	});
+
+	// These invoke dist/index.js: main used to enter stdio proxy mode and hang.
+	// One table exercises the real parser, auth, SSE dispatch and output boundary.
+	const answer: CallToolResult = {
+		content: [
+			{ type: "text", text: "- src/a.ts: caller\n\n---\n_Freshness: {}_" },
+			{
+				type: "text",
+				text: "[DISPLAY TO USER]\n\u001b[33mpanel",
+				annotations: { audience: ["user"] },
+			},
+			{ type: "text", text: "shared", annotations: { audience: ["user", "assistant"] } },
+		],
+		isError: false,
+		_meta: { trace: "preserved" },
+	};
+	const blast = ["get_blast_radius", "--repo", "r", "--entity", "f", "--entity-type", "function"];
+	const refusal = {
+		type: "text" as const,
+		text: "This needs Pro: acme is limited. https://pharaoh.so/plans",
+	};
+	type CliCase = {
+		name: string;
+		args?: string[];
+		code: number;
+		state?: Partial<MockState>;
+		result?: CallToolResult;
+		stdout?: string;
+		parsed?: CallToolResult;
+		received?: Record<string, unknown>;
+		connections?: number;
+		noCredentials?: boolean;
+		brokenPipe?: boolean;
+		credentials?: Record<string, unknown>;
+		preservesCredentials?: boolean;
+		unchangedCredentials?: boolean;
+		foreignCredentials?: boolean;
+		redirectRefresh?: boolean;
+		requests?: number;
+		refreshes?: number;
+	};
+	const cliCases: CliCase[] = [
+		{
+			name: "text, exact audience filtering and freshness",
+			code: 0,
+			result: answer,
+			stdout: "- src/a.ts: caller\n\n---\n_Freshness: {}_\nshared\n",
+			received: { repo: "r", entity: "f", entity_type: "function" },
+		},
+		{
+			name: "complete JSON result",
+			args: [...blast, "--json"],
+			code: 0,
+			result: answer,
+			parsed: answer,
+		},
+		{
+			name: "repeated, nested and overriding flags",
+			code: 0,
+			args: [
+				"pharaoh_recon",
+				"--repo",
+				"r",
+				"--modules",
+				"one",
+				"--modules",
+				"two",
+				"--blast-radius",
+				'[{"entity":"f","entity_type":"function"}]',
+				"--include_map",
+				"false",
+				"--args",
+				'{"repo":"overridden","modules":["replaced"],"functions":["find"]}',
+			],
+			received: {
+				repo: "r",
+				modules: ["one", "two"],
+				blast_radius: [{ entity: "f", entity_type: "function" }],
+				include_map: false,
+				functions: ["find"],
+			},
+		},
+		{
+			name: "integer flag",
+			args: [...blast, "--depth", "2"],
+			code: 0,
+			received: { repo: "r", entity: "f", entity_type: "function", depth: 2 },
+		},
+		{
+			name: "implicit true boolean",
+			args: ["pharaoh_recon", "--repo", "r", "--include-map"],
+			code: 0,
+			received: { repo: "r", include_map: true },
+		},
+		...[
+			[...blast, "--unknown", "value"],
+			[...blast, "--args", "{"],
+			["get_codebase_map"],
+			["not_a_tool", "--repo", "r"],
+			[...blast, "--depth", "not-an-integer"],
+			["pharaoh_recon", "--repo", "r", "--blast-radius", "{}"],
+		].map((args, index) => ({ name: `usage ${index}`, args, code: 2, connections: 0 })),
+		{
+			name: "server tool error",
+			code: 1,
+			result: { content: [{ type: "text", text: "repo missing" }], isError: true },
+			stdout: "repo missing\n",
+		},
+		{
+			name: "authenticated HTTP 500 with hostile body",
+			code: 1,
+			state: {
+				failToolPost: true,
+				errorBody: "opaque.access+[1](token) opaque.refresh$[2](token)",
+			},
+		},
+		...[false, true].map((warning) => ({
+			name: `plan refusal warning=${warning}`,
+			code: 4,
+			result: {
+				content: [
+					refusal,
+					...(warning ? [{ type: "text" as const, text: "ACCOUNT_SCOPE_WARNING" }] : []),
+				],
+				isError: false,
+			},
+		})),
+		{
+			name: "map is never plan-walled",
+			args: ["get_codebase_map", "--repo", "r"],
+			code: 0,
+			result: { content: [refusal], isError: false },
+		},
+		{ name: "signed out without setup writes", code: 3, noCredentials: true, connections: 0 },
+		{
+			name: "expired credentials from another origin never leave disk",
+			code: 1,
+			credentials: { expires_at: iso(-3600_000) },
+			foreignCredentials: true,
+			connections: 0,
+			requests: 0,
+			refreshes: 0,
+			unchangedCredentials: true,
+		},
+		{
+			name: "refresh redirect never forwards credentials",
+			code: 1,
+			credentials: { expires_at: iso(-3600_000) },
+			redirectRefresh: true,
+			connections: 0,
+			requests: 1,
+			refreshes: 1,
+			unchangedCredentials: true,
+		},
+		...[500, 400].map((refreshFailureStatus) => ({
+			name: `initial expired refresh preserves credentials on HTTP ${refreshFailureStatus}`,
+			code: 1,
+			connections: 0,
+			credentials: { expires_at: iso(-3600_000) },
+			state: { refreshFailureStatus },
+			preservesCredentials: true,
+		})),
+		{
+			name: "initial expired refresh requires sign-in",
+			code: 3,
+			connections: 0,
+			credentials: { expires_at: iso(-3600_000), refresh_expires_at: iso(-3600_000) },
+			preservesCredentials: false,
+		},
+		{
+			name: "suspended tenant",
+			code: 1,
+			connections: 1,
+			state: { failSseGetAttempt: 1, failSseGetStatus: 403 },
+		},
+		{
+			name: "one refresh after rejected access token",
+			code: 0,
+			connections: 2,
+			state: { failSseGetAttempt: 1, refreshSuccess: true },
+		},
+		...[500, 400].map((refreshFailureStatus) => ({
+			name: `rejected access token preserves credentials on refresh HTTP ${refreshFailureStatus}`,
+			code: 1,
+			connections: 1,
+			refreshes: 1,
+			unchangedCredentials: true,
+			state: { failSseGetAttempt: 1, refreshFailureStatus },
+		})),
+		{
+			name: "second rejected access token stops retrying",
+			code: 3,
+			connections: 2,
+			state: { failAllSseGets: true, refreshSuccess: true },
+		},
+		{
+			name: "failed refresh requires sign-in",
+			code: 3,
+			connections: 1,
+			state: { failSseGetAttempt: 1, refreshInvalidGrant: true },
+		},
+		{
+			name: "failed client report masks echoed credentials",
+			code: 1,
+			state: {
+				failClientReport: true,
+				failToolPost: true,
+				errorBody: "opaque.access+[1](token) opaque.refresh$[2](token)",
+			},
+		},
+		{
+			name: "tokens in successful text are masked exactly",
+			code: 0,
+			result: {
+				content: [{ type: "text", text: "opaque.access+[1](token) opaque.refresh$[2](token)" }],
+			},
+			stdout: "[REDACTED] [REDACTED]\n",
+		},
+		{
+			name: "help without credentials or connection",
+			args: ["get_blast_radius", "--help"],
+			code: 0,
+			noCredentials: true,
+			connections: 0,
+		},
+		{ name: "broken stdout pipe", code: 0, result: answer, brokenPipe: true },
+	];
+	it.each(cliCases)("CLI $name", async (scenario) => {
+		if (scenario.foreignCredentials || scenario.redirectRefresh)
+			otherServer = await startMockServer();
+		const credentialsPath = join(homeDir, ".pharaoh", "credentials.json");
+		if (!scenario.noCredentials)
+			writeValidCredentials(homeDir, mockServer.url, {
+				access_token: CLI_ACCESS_TOKEN,
+				refresh_token: CLI_REFRESH_TOKEN,
+				...scenario.credentials,
+				...(scenario.foreignCredentials ? { sse_url: `${otherServer?.url}/sse` } : {}),
+			});
+		const before = existsSync(credentialsPath) ? readFileSync(credentialsPath) : null;
+		if (scenario.redirectRefresh)
+			mockServer.state.refreshRedirect = `${otherServer?.url}/device/token-refresh`;
+		Object.assign(mockServer.state, scenario.state, { toolResult: scenario.result });
+		harness = spawnProxy({
+			serverUrl: mockServer.url,
+			homeDir,
+			cliArgs: scenario.args ?? blast,
+			brokenPipe: scenario.brokenPipe,
+		});
+		expect(await harness.waitForExit()).toBe(scenario.code);
+		const stdout = harness.stdout.join("");
+		const stderr = harness.stderr.join("");
+		if (scenario.stdout !== undefined) expect(stdout).toBe(scenario.stdout);
+		if (scenario.parsed) expect(JSON.parse(stdout)).toEqual(scenario.parsed);
+		if (scenario.received)
+			expect(mockServer.state.toolCalls).toEqual([
+				{ name: scenario.args?.[0] ?? "get_blast_radius", arguments: scenario.received },
+			]);
+		if (scenario.connections !== undefined)
+			expect(mockServer.state.sseGetCount).toBe(scenario.connections);
+		if (scenario.requests !== undefined)
+			expect(mockServer.state.requestCount).toBe(scenario.requests);
+		if (scenario.refreshes !== undefined)
+			expect(mockServer.state.refreshCount).toBe(scenario.refreshes);
+		if (otherServer) expect(otherServer.state.requestCount).toBe(0);
+		if (scenario.unchangedCredentials) {
+			expect(readFileSync(credentialsPath)).toEqual(before);
+			expect(stderr).not.toContain("not signed in");
+		}
+		if (scenario.code === 2 || scenario.code === 3) expect(stdout).toBe("");
+		if (scenario.code !== 0) expect(stderr).not.toBe("");
+		if (scenario.name === "signed out without setup writes") {
+			expect(stderr).toContain(
+				"Pharaoh: not signed in. Run npx @pharaoh-so/mcp in a terminal to sign in.",
+			);
+		}
+		if (scenario.preservesCredentials !== undefined)
+			expect(existsSync(credentialsPath)).toBe(scenario.preservesCredentials);
+		const current = existsSync(credentialsPath)
+			? JSON.parse(readFileSync(credentialsPath, "utf8"))
+			: {};
+		for (const token of [
+			CLI_ACCESS_TOKEN,
+			CLI_REFRESH_TOKEN,
+			...mockServer.state.issuedAccessTokens,
+			current.access_token,
+			current.refresh_token,
+		].filter(Boolean)) {
+			expect(stdout + stderr).not.toContain(token);
+		}
+		expect(existsSync(join(homeDir, ".claude"))).toBe(false);
+	}, 15_000);
 
 	// Claude Code reads server instructions and the tool list once, at connect —
 	// before the user has signed in. A proxy that answers with a stub teaches the
@@ -872,8 +1225,8 @@ describe("auth-flow E2E", () => {
 		// the initial successful connection.
 		const validCreds = {
 			version: 2,
-			access_token: "phat_initial",
-			refresh_token: "phrt_initial",
+			access_token: ACCESS_TOKEN,
+			refresh_token: REFRESH_TOKEN,
 			expires_at: iso(3600_000),
 			refresh_expires_at: iso(180 * 86_400_000),
 			expires_in: 3600,

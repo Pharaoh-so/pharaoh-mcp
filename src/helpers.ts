@@ -119,6 +119,7 @@ export function parseArgs(argv: string[] = process.argv.slice(2)): {
 export function printUsage(): void {
 	printLines(
 		"Usage: pharaoh-mcp [options]",
+		"       pharaoh-mcp <tool> --repo <name> [flags] [--json] (use <tool> --help)",
 		"",
 		"Options:",
 		"  --server <url>    Pharaoh server URL (default: https://mcp.pharaoh.so)",

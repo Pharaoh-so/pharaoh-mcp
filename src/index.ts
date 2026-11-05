@@ -111,6 +111,10 @@ async function setupMemoryHooks(credentials: Credentials, clients: string[], req
 
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
+	if (args[0] && !args[0].startsWith("-")) {
+		const { runCli } = await import("./cli.js");
+		return runCli(args);
+	}
 
 	if (args.includes("--help") || args.includes("-h")) {
 		printUsage();

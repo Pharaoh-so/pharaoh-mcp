@@ -30,6 +30,8 @@ Ask Pharaoh first for these questions, then read the files you're about to chang
 
 If your client shows Pharaoh's tools by name only (behind tool search), load them before your first code search.
 
+From a shell, `npx @pharaoh-so/mcp <tool> --repo <name> [flags]` runs the same six tools and prints the answer to stdout, to pipe into grep, a file or a script (`--json` for the full result, `<tool> --help` for flags). Exit code 3 means not signed in, 4 means the plan doesn't cover the tool.
+
 ## CRITICAL: Surface insight blocks
 
 Surface the facts in each ★ Pharaoh block in your visible response. Preserve its counts, labels and analysis limits. When a block says "Trace view available", do not reproduce the ASCII panel; summarize its findings and limits in plain language. Otherwise, if the client hides or breaks ASCII panels, present those facts as plain text or a table; do not rely on the raw tool panel being visible.

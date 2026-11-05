@@ -24,6 +24,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
 	CallToolRequestSchema,
 	type CallToolResult,
@@ -50,7 +51,7 @@ import { getPackageVersion } from "./version.js";
  */
 export class ProxyServer {
 	private server: Server;
-	private transport: StdioServerTransport | null = null;
+	private transport: Transport | null = null;
 	private backend: Backend;
 	private started = false;
 	private stopping = false;
@@ -61,7 +62,10 @@ export class ProxyServer {
 	private transportClosed: Promise<void>;
 	private transportClosedResolve!: () => void;
 
-	constructor(initialBackend: Backend) {
+	constructor(
+		initialBackend: Backend,
+		private readonly requestTimeout?: number,
+	) {
 		this.backend = initialBackend;
 		this.server = new Server(
 			{ name: "pharaoh-proxy", version: getPackageVersion() },
@@ -136,14 +140,14 @@ export class ProxyServer {
 			const { name } = req.params;
 			const args = req.params.arguments ?? {};
 			const backend = this.backend;
-			const result = await backend.callTool(name, args, { signal: extra.signal });
+			// The CLI's longer deadline must reach the upstream SDK request too.
+			const options = { signal: extra.signal, timeout: this.requestTimeout };
+			const result = await backend.callTool(name, args, options);
 			// The call that completed sign-in swapped in the real backend — answer
 			// it from there instead of asking the agent to call again.
 			if (backend.name === "auth-required" && this.backend !== backend && !result.isError) {
 				extra.signal.throwIfAborted();
-				return (await this.backend.callTool(name, args, {
-					signal: extra.signal,
-				})) as CallToolResult;
+				return (await this.backend.callTool(name, args, options)) as CallToolResult;
 			}
 			return result as CallToolResult;
 		});
@@ -167,15 +171,15 @@ export class ProxyServer {
 	}
 
 	/**
-	 * Test hook: start with a caller-supplied transport (e.g. InMemoryTransport).
-	 * Kept separate from start() so the stdio wiring stays implicit in prod.
+	 * Start with a caller-supplied transport, including the CLI's in-memory pair.
+	 * @param transport - The MCP transport to connect after starting the backend.
+	 * @returns When the proxy is ready to accept client requests.
 	 */
-	async startWithTransport(transport: StdioServerTransport): Promise<void> {
+	async startWithTransport(transport: Transport): Promise<void> {
 		if (this.started) return;
 		if (this.backend.start) await this.backend.start();
 		this.transport = transport;
-		// biome-ignore lint/suspicious/noExplicitAny: test transport is a Transport, but the type import chain is awkward here
-		await this.server.connect(transport as any);
+		await this.server.connect(transport);
 		this.server.onclose = () => this.transportClosedResolve();
 		this.started = true;
 	}
@@ -320,8 +324,17 @@ export async function startInAuthRequiredMode(
  * SSE backend. Returned proxy is running and ready for tool calls.
  */
 export async function startInSseMode(creds: Credentials): Promise<ProxyServer> {
-	const backend = createSseBackend(creds.sse_url, creds.access_token);
-	const proxy = new ProxyServer(backend);
+	const proxy = createSseProxyServer(creds);
 	await proxy.start();
 	return proxy;
+}
+
+/**
+ * Build the shared SSE dispatch path for stdio and one-shot CLI clients.
+ * @param creds - Credentials used to authenticate the upstream connection.
+ * @param requestTimeout - Optional upstream request deadline in milliseconds.
+ * @returns An unstarted proxy; the caller supplies its transport and lifetime.
+ */
+export function createSseProxyServer(creds: Credentials, requestTimeout?: number): ProxyServer {
+	return new ProxyServer(createSseBackend(creds.sse_url, creds.access_token), requestTimeout);
 }

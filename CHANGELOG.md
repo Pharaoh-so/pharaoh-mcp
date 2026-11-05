@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `pharaoh` skill's connection URL is `https://mcp.pharaoh.so/mcp` instead of `/sse`. The skill also carries the guidance that was only in the server instructions: one Pharaoh call answers what grep and file reads take many turns to piece together, load Pharaoh's tools before the first code search when your client defers them, summarize a block marked "Trace view available" instead of reproducing it, and check related repos when a change touches shared interfaces.
 - The server instructions state facts: what Pharaoh maps, which tool answers which question, what the graph leaves to grep, how repos are mapped and what each account tool does. Asking Pharaoh first, not re-checking its answers with grep, surfacing and crediting its ★ blocks and the rest of that guidance now live in the `pharaoh` skill. Claude Code and OpenClaw list the skill in every session and load its body only when they use it. The Grep hook and the optional `~/.claude/CLAUDE.md` line are unchanged and apply from the start of a session.
 
+## [0.3.64] - 2026-11-05
+
+### Added
+- Shell commands for the six question tools: `npx @pharaoh-so/mcp <tool> --repo <name> [flags]`. Answers go to stdout for pipes and files; `--json` returns the complete MCP result, and `<tool> --help` lists flags from the bundled schema.
+- CLI exit codes distinguish tool or connection errors (1), usage errors (2), sign-in required (3), and tools outside the account's plan (4). Commands use stored credentials without running setup, and mask access and refresh tokens in output.
+
 ## [0.3.63] - 2026-11-05
 
 ### Fixed
