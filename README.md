@@ -152,10 +152,11 @@ claude mcp add --scope user pharaoh -- npx @pharaoh-so/mcp@<version> --server ht
 - Credentials are stored with restrictive file permissions (`0600` — owner-read/write only)
 - Authentication uses the [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628) device authorization flow — no secrets are embedded in the package
 - All communication with the Pharaoh server uses HTTPS/TLS
-- The proxy never reads or sends your local files. Pharaoh reads your code from GitHub through its GitHub App, maps it into a knowledge graph of structural metadata (function names, file paths, dependency relationships), and deletes the clone when mapping ends.
+- The proxy never sends your code or the text of any file. Pharaoh reads your code from GitHub through its GitHub App, maps it into a knowledge graph of structural metadata (function names, file paths, dependency relationships), and deletes the clone when mapping ends.
+- When it connects, the proxy tells Pharaoh whether your `~/.claude/CLAUDE.md` holds the line setup suggests, mentions Pharaoh another way, doesn't, or is missing, and whether setup's block is still in it. In Claude Code started at a git repo's root, it does the same for that project's `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and `AGENTS.md`. Only these values are sent, never the files' text.
 - Tokens expire after 7 days and are refreshed automatically
 - Only use trusted server URLs — the proxy sends your auth token to the configured server
-- No telemetry. The proxy's only network calls are the device flow, token refresh, the MCP connection, and one registry lookup during interactive setup (below).
+- The proxy's only network calls are the device flow, token refresh, the MCP connection, and one registry lookup during interactive setup (below). Over the MCP connection it tells Pharaoh which client it serves (the name and version that client reports) and whether Pharaoh's Claude Code plugin is enabled, which it reads from `~/.claude/settings.json`. Nothing else about your machine is sent.
 
 ### What the installer writes on your machine
 
