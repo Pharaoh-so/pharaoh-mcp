@@ -12,54 +12,30 @@
  *                      mode until device flow completes, then swap to SSE in
  *                      place — the stdio session never disconnects.
  */
+import { fileURLToPath } from "node:url";
 import { resetHookPreferences } from "../project-memory/preferences.mjs";
 import {
 	applyMemoryHookChoices,
 	chooseMemoryHooks,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
-import {
-	pollForToken,
-	printActivationPrompt,
-	printAuthSuccess,
-	requestDeviceCode,
-} from "./auth.js";
 import { AuthRequiredBackend, createSseBackend } from "./backend.js";
-import {
-	type Credentials,
-	deleteCredentials,
-	readCredentials,
-	writeCredentials,
-} from "./credentials.js";
+import { type Credentials, deleteCredentials, readCredentials } from "./credentials.js";
 import { createGateway } from "./gateway.js";
-import {
-	askYesNo,
-	formatTtl,
-	parseArgs,
-	printLines,
-	printUsage,
-	resolveSseUrl,
-	tokenToCredentials,
-} from "./helpers.js";
+import { askYesNo, formatTtl, parseArgs, printLines, printUsage } from "./helpers.js";
 import {
 	allowReadTools,
-	CLAUDE_MD_QUESTION,
+	describeAgentInstructionOutcome,
 	describeAllowReadTools,
-	describeClaudeMdOutcome,
 	formatKeptCommands,
-	offerClaudeMdLine,
+	offerAgentInstructionLines,
 	runInstallSkills,
 } from "./install-skills.js";
 import { handleRefreshFailure, tryMidSessionRefresh } from "./lifecycle.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { type ProxyServer, startInAuthRequiredMode, startInSseMode } from "./proxy-server.js";
 import { loadAndRefresh } from "./refresh.js";
-import {
-	fetchLatestVersion,
-	getPackageVersion,
-	isNewerVersion,
-	UPGRADE_COMMAND,
-} from "./version.js";
+import { getPackageVersion } from "./version.js";
 
 const BANNER = [
 	"",
@@ -109,9 +85,39 @@ async function setupMemoryHooks(credentials: Credentials, clients: string[], req
 	}
 }
 
+/** Explicit reset retains its old broad Claude cleanup; logout removes managed connections only. */
+async function cleanupClientRegistrations(reset: boolean): Promise<boolean> {
+	const { cleanCodexSetup, cleanupManagedClients, cleanSlate } = await import("./setup.js");
+	let outcomes: ReturnType<typeof cleanupManagedClients> = [];
+	let provenanceFailed = false;
+	try {
+		outcomes = cleanupManagedClients();
+	} catch {
+		printLines(
+			"Pharaoh: the installation record could not be read; managed cleanup could not be verified.",
+		);
+		provenanceFailed = true;
+	}
+	if (reset) cleanSlate();
+	cleanCodexSetup();
+	for (const outcome of outcomes) {
+		if (outcome.status === "failed" || outcome.status === "ambiguous") {
+			printLines(
+				`Pharaoh: ${outcome.client} cleanup needs attention. ${outcome.recovery ?? "Retry the install command."}`,
+			);
+		}
+	}
+	return (
+		!provenanceFailed &&
+		!outcomes.some((outcome) => outcome.status === "failed" || outcome.status === "ambiguous")
+	);
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
-	if (args[0] && !args[0].startsWith("-")) {
+	const explicitInstall = args[0] === "install";
+	if (explicitInstall) args.shift();
+	if (!explicitInstall && args[0] && !args[0].startsWith("-")) {
 		const { runCli } = await import("./cli.js");
 		return runCli(args);
 	}
@@ -124,6 +130,14 @@ async function main(): Promise<void> {
 	// Stdout, alone on its line, so a script can capture the version to pin
 	if (args.includes("--version") || args.includes("-v")) {
 		process.stdout.write(`${getPackageVersion()}\n`);
+		return;
+	}
+
+	if (args.includes("--doctor")) {
+		const { diagnoseLocalSetup, renderLocalSetupDiagnosis } = await import("./doctor.js");
+		const clientFlag = args.indexOf("--client");
+		const clientName = clientFlag >= 0 ? args[clientFlag + 1] : undefined;
+		process.stdout.write(`${renderLocalSetupDiagnosis(diagnoseLocalSetup({ clientName }))}\n`);
 		return;
 	}
 
@@ -150,125 +164,84 @@ async function main(): Promise<void> {
 	// Clean mode — remove all pharaoh traces from Claude Code config (MCP entries,
 	// disabled states, project-scoped configs). Useful for resetting broken installs.
 	if (args.includes("--clean")) {
-		const { cleanCodexSetup, cleanSlate } = await import("./setup.js");
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
 		clearMemoryHookChoices(false);
 		reportMemorySetup();
-		cleanSlate();
+		const cleaned = await cleanupClientRegistrations(true);
 		uninstallClaudePlugin();
-		cleanCodexSetup();
 		printLines("Pharaoh: local setup cleanup finished.");
-		process.exit(0);
+		process.exit(cleaned ? 0 : 1);
 	}
 
 	const { server, logout } = parseArgs(args);
 
 	if (logout) {
-		const { cleanCodexSetup, cleanSlate } = await import("./setup.js");
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
 		// Credentials first: a cleanup step that fails must never leave the tokens behind.
 		deleteCredentials();
 		clearMemoryHookChoices(false);
 		reportMemorySetup();
-		cleanSlate();
+		const cleaned = await cleanupClientRegistrations(false);
 		uninstallClaudePlugin();
-		cleanCodexSetup();
 		printLines("Pharaoh: credentials cleared and local setup cleanup finished.");
-		process.exit(0);
+		process.exit(cleaned ? 0 : 1);
 	}
 
-	const isInteractive = Boolean(process.stdin.isTTY);
+	const isInteractive = explicitInstall || Boolean(process.stdin.isTTY);
 
 	// ── Interactive mode (user running in a terminal) ──
-	// Full setup every time: fresh auth → register MCP → install skills → done.
-	// Running `npx @pharaoh-so/mcp` is the only command a user needs.
+	// The explicit command also works on a pipe; the bare TTY command stays an alias.
 	if (isInteractive) {
 		process.stderr.write(`${BANNER}\n`);
 
-		const { claudeCliMissing, hasClaude, hasCodex, runCodexSetup, runSetup } = await import(
-			"./setup.js"
-		);
-		const claude = hasClaude();
-		const codex = hasCodex();
-		if (!claude && !codex) {
-			printLines(...claudeCliMissing());
-			process.exit(1);
+		const { runInstall, validateInstallArguments } = await import("./install.js");
+		const invalid = explicitInstall ? validateInstallArguments(args) : null;
+		if (invalid) {
+			printLines(invalid);
+			process.exitCode = 2;
+			return;
 		}
-
-		// Always re-authenticate for a fresh session
-		deleteCredentials();
-		const deviceCode = await requestDeviceCode(server);
-		printActivationPrompt(
-			deviceCode.user_code,
-			deviceCode.verification_uri,
-			deviceCode.verification_uri_complete,
-		);
-		const token = await pollForToken(server, deviceCode.device_code, deviceCode.interval);
-
-		if (token.provisional) {
-			printLines(
-				`Pharaoh: provisional access — install the GitHub App to map your repos: ${token.install_url ?? ""}`,
-			);
-		}
-
-		const sseUrl = resolveSseUrl(token.sse_url, server);
-		const newCreds = tokenToCredentials(token, sseUrl, server);
-		writeCredentials(newCreds);
-
-		printAuthSuccess(
-			token.github_login ?? null,
-			token.tenant_name ?? null,
-			token.repos?.length ?? 0,
-		);
-
-		const clients: string[] = [];
-		if (claude && runSetup({ silent: true })) clients.push("claude-code");
-		// Existing Claude-only installs stay unchanged for nonpilot accounts.
-		if (codex && (!claude || newCreds.project_memory?.length)) {
-			if (runCodexSetup()) clients.push("codex");
-		}
-		if (!clients.length) {
-			await setupMemoryHooks(newCreds, clients, args.includes("--memory-hooks"));
-			process.exit(1);
-		}
-		if (clients.includes("claude-code")) {
-			process.stderr.write("  Setting up...");
-			const { keptCommands } = runInstallSkills(undefined, { silent: true });
-			process.stderr.write(" done.\n");
-
-			printLines(describeAllowReadTools(allowReadTools()));
-			const kept = formatKeptCommands(keptCommands);
-			if (kept) printLines(kept);
-
-			const claudeMd = describeClaudeMdOutcome(
-				await offerClaudeMdLine(
-					() => askYesNo(CLAUDE_MD_QUESTION),
+		process.exitCode = await runInstall({
+			server,
+			migrateLegacy: args.includes("--migrate-legacy"),
+			afterConfigure: async (credentials, clients) => {
+				let extraFailures = false;
+				const codingClients = clients.filter(
+					(client): client is "claude-code" | "codex" =>
+						client === "claude-code" || client === "codex",
+				);
+				if (clients.length) {
+					const { keptCommands, errors } = runInstallSkills(undefined, {
+						silent: true,
+						clients: codingClients,
+					});
+					const kept = formatKeptCommands(keptCommands);
+					if (kept) printLines(kept);
+					if (errors.length) {
+						printLines(...errors);
+						extraFailures = true;
+					}
+				}
+				if (clients.includes("claude-code")) {
+					printLines(describeAllowReadTools(allowReadTools()));
+				}
+				const instructions = await offerAgentInstructionLines(
+					codingClients,
+					(question) => askYesNo(question),
 					Boolean(process.stdin.isTTY && process.stderr.isTTY),
-				),
-			);
-			if (claudeMd) printLines(claudeMd);
-		}
-		await setupMemoryHooks(newCreds, clients, args.includes("--memory-hooks"));
-
-		// The registration is pinned to this version; upgrading is a deliberate
-		// re-run. Interactive only, and quiet when the registry can't be reached.
-		const latest = await fetchLatestVersion();
-		const running = getPackageVersion();
-		if (latest && isNewerVersion(latest, running)) {
-			printLines(
-				`Pharaoh: ${latest} is available (this is ${running}). Upgrade: ${UPGRADE_COMMAND}`,
-			);
-		}
-
-		printLines(
-			"",
-			// The server's SETUP_TOOL_PROMPT (src/install-commands.ts); pharaoh_setup does the rest.
-			"Pharaoh is ready. In a new conversation in your repo, ask your agent:",
-			"",
-			'  "Run the Pharaoh setup tool"',
-			"",
-		);
-		process.exit(0);
+				);
+				for (const instruction of instructions) {
+					const message = describeAgentInstructionOutcome(instruction);
+					if (message) printLines(message);
+				}
+				if (instructions.some((instruction) => instruction.outcome === "failed")) {
+					extraFailures = true;
+				}
+				await setupMemoryHooks(credentials, clients, args.includes("--memory-hooks"));
+				if (extraFailures) throw new Error("Optional client setup needs attention.");
+			},
+		});
+		return;
 	}
 
 	// ── Proxy mode (Claude Code spawned us as a stdio MCP server) ──
@@ -285,7 +258,11 @@ async function main(): Promise<void> {
 	// issues, neither of which should prevent the proxy serving MCP traffic.
 	// Log the message so "silent" is still distinguishable from "never ran."
 	try {
-		runInstallSkills();
+		const { verifiedCodingClients } = await import("./setup.js");
+		const clients = verifiedCodingClients({
+			runningLaunch: { command: process.execPath, args: [fileURLToPath(import.meta.url)] },
+		});
+		if (clients.length) runInstallSkills(undefined, { clients });
 	} catch (err) {
 		// ALLOWED-CATCH: skill install failure must not block MCP proxy startup
 		const msg = err instanceof Error ? err.message : String(err);

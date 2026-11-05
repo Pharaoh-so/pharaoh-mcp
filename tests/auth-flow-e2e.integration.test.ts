@@ -537,11 +537,10 @@ describe("auth-flow E2E", () => {
 
 	// Root builds omit this package; compile current sources once, including standalone exports.
 	beforeAll(() => {
-		execFileSync(
-			process.execPath,
-			[createRequire(import.meta.url).resolve("typescript/bin/tsc")],
-			{ cwd: pathResolve(__dirname, ".."), stdio: "pipe" },
-		);
+		execFileSync(process.execPath, [createRequire(import.meta.url).resolve("typescript/bin/tsc")], {
+			cwd: pathResolve(__dirname, ".."),
+			stdio: "pipe",
+		});
 	}, 30_000);
 
 	beforeEach(async () => {
@@ -580,6 +579,12 @@ describe("auth-flow E2E", () => {
 	const refusal = {
 		type: "text" as const,
 		text: "This needs Pro: acme is limited. https://pharaoh.so/plans",
+	};
+	// Deliberately reuse the legacy plan text to make precedence observable.
+	const untracked: CallToolResult = {
+		content: [refusal],
+		isError: false,
+		_meta: { errorCode: "repo_ownership_denied:not_tracked" },
 	};
 	type CliCase = {
 		name: string;
@@ -663,10 +668,49 @@ describe("auth-flow E2E", () => {
 			["pharaoh_recon", "--repo", "r", "--blast-radius", "{}"],
 		].map((args, index) => ({ name: `usage ${index}`, args, code: 2, connections: 0 })),
 		{
-			name: "server tool error",
+			name: "hard tool error takes precedence over a plan marker",
 			code: 1,
-			result: { content: [{ type: "text", text: "repo missing" }], isError: true },
+			result: {
+				content: [{ type: "text", text: "repo missing" }],
+				isError: true,
+				_meta: { errorCode: "plan_wall:map_only" },
+			},
 			stdout: "repo missing\n",
+		},
+		{
+			name: "soft refusal code takes precedence over legacy plan wording",
+			code: 1,
+			result: untracked,
+			stdout: `${refusal.text}\n`,
+		},
+		{
+			name: "JSON soft refusal retains the complete reply and exit status",
+			args: [...blast, "--json"],
+			code: 1,
+			result: untracked,
+			parsed: untracked,
+		},
+		{
+			name: "setup guidance with a refusal code exits one",
+			code: 1,
+			result: {
+				content: [{ type: "text", text: "Install the GitHub App first." }],
+				isError: false,
+				_meta: { errorCode: "setup_required" },
+			},
+			stdout: "Install the GitHub App first.\n",
+		},
+		{
+			name: "guidance takes precedence over legacy plan wording",
+			code: 1,
+			result: { content: [refusal], _meta: { guidance: true } },
+			stdout: `${refusal.text}\n`,
+		},
+		{
+			name: "empty result is a successful answer",
+			code: 0,
+			result: { content: [{ type: "text", text: "No matches." }], _meta: { empty: true } },
+			stdout: "No matches.\n",
 		},
 		{
 			name: "authenticated HTTP 500 with hostile body",
@@ -677,7 +721,7 @@ describe("auth-flow E2E", () => {
 			},
 		},
 		...[false, true].map((warning) => ({
-			name: `plan refusal warning=${warning}`,
+			name: `legacy plan refusal warning=${warning}`,
 			code: 4,
 			result: {
 				content: [
@@ -687,6 +731,19 @@ describe("auth-flow E2E", () => {
 				isError: false,
 			},
 		})),
+		{
+			name: "plan marker classifies revised wording with a scope warning",
+			code: 4,
+			result: {
+				content: [
+					{ type: "text", text: "Upgrade this workspace to use this tool." },
+					{ type: "text", text: "ACCOUNT_SCOPE_WARNING" },
+				],
+				isError: false,
+				_meta: { errorCode: "plan_wall:map_only" },
+			},
+			stdout: "Upgrade this workspace to use this tool.\nACCOUNT_SCOPE_WARNING\n",
+		},
 		{
 			name: "map is never plan-walled",
 			args: ["get_codebase_map", "--repo", "r"],
@@ -811,7 +868,10 @@ describe("auth-flow E2E", () => {
 		expect(await harness.waitForExit()).toBe(scenario.code);
 		const stdout = harness.stdout.join("");
 		const stderr = harness.stderr.join("");
-		if (scenario.stdout !== undefined) expect(stdout).toBe(scenario.stdout);
+		if (scenario.stdout !== undefined) {
+			expect(stdout).toBe(scenario.stdout);
+			if (scenario.code === 1) expect(stderr).not.toContain(scenario.stdout.trim());
+		}
 		if (scenario.parsed) expect(JSON.parse(stdout)).toEqual(scenario.parsed);
 		if (scenario.received)
 			expect(mockServer.state.toolCalls).toEqual([
@@ -936,6 +996,7 @@ describe("auth-flow E2E", () => {
 			{
 				client: { name: "e2e-test", version: "0.0.0" },
 				plugin: "absent",
+				memoryHooks: "unsupported",
 				instructions: { user: "missing", managed: "absent", project: "unknown" },
 			},
 		]);
@@ -961,6 +1022,7 @@ describe("auth-flow E2E", () => {
 		const report = {
 			client: { name: "claude-code", version: "2.1.3" },
 			plugin: "enabled",
+			memoryHooks: process.platform === "win32" ? "unsupported" : "absent",
 			instructions: { user: "missing", managed: "absent", project: "unknown" },
 		};
 		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
@@ -1195,6 +1257,7 @@ describe("auth-flow E2E", () => {
 			{
 				client: { name: "e2e-test", version: "0.0.0" },
 				plugin: "absent",
+				memoryHooks: "unsupported",
 				instructions: { user: "missing", managed: "absent", project: "unknown" },
 			},
 		]);

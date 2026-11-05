@@ -1,25 +1,33 @@
 /**
- * --setup implementation for the Pharaoh MCP proxy CLI.
- *
- * Full automated install: authenticates via device flow, removes stale MCP
- * entries, registers Pharaoh as a global stdio MCP server, and installs skills.
- * One command does everything: `npx @pharaoh-so/mcp`
+ * Client installation exports and legacy cleanup used only by explicit clean/logout.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { NPX_COMMAND, printLines } from "./helpers.js";
-import { pinnedPackageSpec } from "./version.js";
+import { printLines } from "./helpers.js";
+
+export {
+	cleanupManagedClients,
+	configureClients,
+	discoverClients,
+	legacyMigrations,
+	verifiedCodingClients,
+} from "./client-install.js";
+export type {
+	ClientId,
+	ClientInstallOptions,
+	ClientOutcome,
+	ClientTarget,
+	LaunchConfig,
+	LegacyMigration,
+} from "./install-types.js";
 
 /** Runs one `claude` CLI command; true on success. */
 export type ClaudeCli = (args: string[]) => boolean;
 
 /** Anthropic's Claude Code CLI install page: every platform and install method. */
 export const CLAUDE_CLI_SETUP_URL = "https://code.claude.com/docs/en/setup";
-
-/** Pharaoh's setup guide for agents other than Claude Code (stdio server, sign-in on first call). */
-const HEADLESS_SETUP_URL = "https://pharaoh.so/docs/connect/headless";
 
 /**
  * Whether a `claude` CLI on PATH starts. It is launched the way `runClaude`
@@ -36,35 +44,6 @@ export function hasClaude(): boolean {
 		// A `claude` that can't be started is one setup can't use either.
 		return false;
 	}
-}
-
-/**
- * What setup prints when no `claude` CLI is on PATH: npx registers everything
- * through that CLI, the desktop app's copy doesn't count, and the CLI shares
- * ~/.claude with the desktop app, so installing it covers the Code tab too.
- *
- * @param platform - Picks the one-line installer (PowerShell on Windows).
- * @returns The lines to print.
- */
-export function claudeCliMissing(platform: NodeJS.Platform = process.platform): string[] {
-	// The shell goes in the label: anything after the command gets pasted with it.
-	const [shell, installer] =
-		platform === "win32"
-			? [" (PowerShell)", "irm https://claude.ai/install.ps1 | iex"]
-			: ["", "curl -fsSL https://claude.ai/install.sh | bash"];
-	return [
-		"Pharaoh: the claude command isn't on your PATH, so setup stopped.",
-		"",
-		"npx adds Pharaoh to Claude Code through the Claude Code CLI. The desktop app runs its own copy of Claude Code, and that copy isn't on your PATH.",
-		"",
-		`  Install the CLI${shell}: ${installer}`,
-		`  Other ways: ${CLAUDE_CLI_SETUP_URL}`,
-		`  Then, in a new terminal: ${NPX_COMMAND}`,
-		"",
-		"The CLI and the desktop app share ~/.claude, so the desktop app's Code tab gets Pharaoh too.",
-		`Not using Claude Code? OpenClaw: ${NPX_COMMAND} --install-skills. Other agents: ${HEADLESS_SETUP_URL}`,
-		"",
-	];
 }
 
 /** Run a claude CLI command, returning true on success. Surfaces stderr on failure. */
@@ -173,61 +152,8 @@ export function cleanSlate(home = homedir()): void {
 	}
 }
 
-/**
- * Full automated setup: clean slate removal, then register the MCP server
- * globally as `npx @pharaoh-so/mcp@<this version>`, so a new release on npm
- * runs only after the user upgrades on purpose (security review SC-2).
- * Requires valid credentials (caller handles auth first).
- *
- * @param options.silent - Print nothing on success.
- * @param options.home - Home whose Claude Code config is edited (tests).
- * @param options.claude - `claude` CLI runner (defaults to the real CLI for `home`).
- * @returns true if setup succeeded, false if Claude CLI not found or registration failed.
- */
-export function runSetup(options?: {
-	silent?: boolean;
-	home?: string;
-	claude?: ClaudeCli;
-}): boolean {
-	const silent = options?.silent ?? false;
-	const home = options?.home ?? homedir();
-
-	if (!options?.claude && !hasClaude()) {
-		printLines(...claudeCliMissing());
-		return false;
-	}
-	const claude = options?.claude ?? claudeCliFor(home);
-
-	if (!silent) printLines("Pharaoh: setting up...");
-
-	// Step 1: Clean slate — remove pharaoh from all scopes, disabled lists,
-	// and project-scoped configs. Direct file edit handles what CLI cannot.
-	cleanSlate(home);
-
-	// Step 2: Belt-and-suspenders — also remove via CLI (both scopes)
-	claude(["mcp", "remove", "pharaoh", "-s", "user"]);
-	claude(["mcp", "remove", "pharaoh", "-s", "project"]);
-
-	// Step 3: Register as global stdio MCP server, pinned to the running version
-	const spec = pinnedPackageSpec();
-	const addArgs = ["mcp", "add", "--scope", "user", "pharaoh", "--", "npx", spec];
-
-	if (!claude(addArgs)) {
-		printLines(
-			"Pharaoh: failed to register MCP server.",
-			`Try manually: claude ${addArgs.join(" ")}`,
-			"",
-		);
-		return false;
-	}
-
-	if (!silent) printLines(`Pharaoh: registered as global MCP server (scope: user) running ${spec}`);
-
-	return true;
-}
-
 /** Detect the local Codex CLI before touching any settings. */
-export function hasCodex(): boolean {
+function hasCodex(): boolean {
 	try {
 		execFileSync("codex", ["--version"], { stdio: "pipe", timeout: 10_000 });
 		return true;
@@ -268,19 +194,6 @@ function configuredCodexPharaoh(): { owned: boolean; enabled?: boolean } | null 
 		)
 			return null;
 		throw error;
-	}
-}
-
-/** Preserve custom registrations and any existing disabled setting. */
-export function runCodexSetup(): boolean {
-	try {
-		const existing = configuredCodexPharaoh();
-		if (existing && (!existing.owned || existing.enabled === false)) return true;
-		codexMcp(["add", "pharaoh", "--", "npx", pinnedPackageSpec()]);
-		return true;
-	} catch {
-		printLines("Pharaoh: Codex setup could not update its MCP registration.");
-		return false;
 	}
 }
 

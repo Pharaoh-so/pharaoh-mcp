@@ -1,8 +1,8 @@
 {
 	"name": "@pharaoh-so/mcp",
 	"mcpName": "so.pharaoh/pharaoh",
-	"version": "0.3.64",
-	"description": "MCP proxy for Pharaoh — maps codebases into queryable knowledge graphs for coding agents. Enables Claude Code in headless environments (VPS, SSH, CI) via device flow auth.",
+	"version": "0.3.69",
+	"description": "Pharaoh developer install for Claude Code, Codex and Claude Desktop: architecture tools, shell queries and agent workflows.",
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -63,7 +63,8 @@
 		"node": ">=18"
 	},
 	"dependencies": {
-		"@modelcontextprotocol/sdk": "^1.26.0"
+		"@modelcontextprotocol/sdk": "^1.26.0",
+		"smol-toml": "1.9.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.3.15",

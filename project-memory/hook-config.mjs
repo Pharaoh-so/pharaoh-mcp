@@ -55,7 +55,7 @@ function replaceHooks(config, events, matches, additions) {
 			if (rest.length === group.hooks.length) return [group];
 			return rest.length ? [{ ...group, hooks: rest }] : [];
 		});
-		if (install) kept.push(install);
+		if (install) kept.push(...(Array.isArray(install) ? install : [install]));
 		if (kept.length) hooks[event] = kept;
 		else delete hooks[event];
 	}
@@ -87,17 +87,30 @@ export function updateUserHooks(
 	hookPath,
 	node = process.execPath,
 	graphCues = false,
+	diagnostics = false,
 ) {
 	const additions = {};
 	if (hookPath) {
 		const command = (mode) =>
 			`${[node, hookPath, client, mode].map(shellWord).join(" ")} ${GLOBAL_MARKER}`;
 		additions.UserPromptSubmit = group(command("--user"));
+		if (diagnostics) {
+			const diagnostic = command("--diagnostics");
+			for (const event of EVENTS[client])
+				if (event !== "UserPromptSubmit") additions[event] = group(diagnostic);
+			const edit = client === "codex" ? "apply_patch" : "Edit|Write|MultiEdit";
+			additions.PostToolUse = group(
+				diagnostic,
+				`^(?:${edit}|Bash|exec_command|functions\\.exec_command|mcp__.*__pharaoh_memory_(?:recall|expand|capture|feedback))$`,
+			);
+		}
 		if (graphCues) {
 			const graph = command("--graph");
 			const edit = client === "codex" ? "apply_patch" : "Edit|Write|MultiEdit";
 			additions.PreToolUse = group(graph, "^Bash$");
-			additions.PostToolUse = group(graph, `^(?:${edit}|mcp__pharaoh__get_codebase_map)$`);
+			const graphGroup = group(graph, `^(?:${edit}|mcp__pharaoh__get_codebase_map)$`);
+			if (additions.PostToolUse) additions.PostToolUse = [additions.PostToolUse, graphGroup];
+			else additions.PostToolUse = graphGroup;
 		}
 	}
 	const toolEvents = TOOL_EVENTS.filter(

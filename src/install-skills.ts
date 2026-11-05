@@ -2,10 +2,11 @@
  * --install-skills implementation for the Pharaoh MCP proxy CLI.
  *
  * Installs Pharaoh's Claude Code plugin (skills plus the Grep routing hook,
- * through `claude plugin`), the review skill for Codex in ~/.agents/skills/,
+ * through `claude plugin`), portable Codex skills in ~/.agents/skills/,
  * and OpenClaw skills in ~/.openclaw/skills/. Also merges the Pharaoh MCP
  * server config into OpenClaw.
  */
+import { createHash } from "node:crypto";
 import {
 	closeSync,
 	constants,
@@ -23,7 +24,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePharaohHome } from "./credentials.js";
 import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
@@ -111,7 +112,8 @@ function detectClaudeCode(home = homedir()): boolean {
  * @returns True if ~/.codex/ exists.
  */
 function detectCodex(home = homedir()): boolean {
-	return existsSync(join(home, ".codex"));
+	const root = process.env.CODEX_HOME || join(home, ".codex");
+	return isAbsolute(root) && existsSync(root);
 }
 
 /**
@@ -229,15 +231,38 @@ function pluginSetting(home: string): boolean | undefined {
 }
 
 /**
- * Pharaoh's Claude Code plugin as ~/.claude/settings.json lists it. The proxy
- * reports this to Pharaoh, so adoption can be compared with and without it.
+ * Pharaoh's plugin marker in Claude's configured settings directory. An
+ * unreadable or invalid setting is unknown, not evidence of an absent plugin.
  *
  * @param home - Home directory override (defaults to os.homedir()).
+ * @param env - Honors an absolute CLAUDE_CONFIG_DIR when provided.
  */
-export function claudePluginState(home = homedir()): "enabled" | "disabled" | "absent" {
-	const setting = pluginSetting(home);
-	if (setting === undefined) return "absent";
-	return setting ? "enabled" : "disabled";
+export function claudePluginState(
+	home = homedir(),
+	env: NodeJS.ProcessEnv = process.env,
+): "enabled" | "disabled" | "absent" | "unknown" {
+	const directory = observationConfigDirectory(home, env);
+	if (!directory) return "unknown";
+	const file = readBoundedText(join(directory, "settings.json"));
+	if (file === "missing") return "absent";
+	if (file === "unknown") return "unknown";
+	try {
+		const settings = JSON.parse(file.text);
+		if (!settings || typeof settings !== "object" || Array.isArray(settings)) return "unknown";
+		const plugins = settings.enabledPlugins;
+		if (plugins === undefined) return "absent";
+		if (!plugins || typeof plugins !== "object" || Array.isArray(plugins)) return "unknown";
+		const state = plugins[PLUGIN_ID];
+		return state === true
+			? "enabled"
+			: state === false
+				? "disabled"
+				: state === undefined
+					? "absent"
+					: "unknown";
+	} catch {
+		return "unknown";
+	}
 }
 
 /**
@@ -300,6 +325,9 @@ export function uninstallClaudePlugin(
 	rmSync(claudeMarketplaceDir(home), { recursive: true, force: true });
 	removeLegacyClaudePlugin(home);
 	removeClaudeMdBlock(home);
+	removeAdditionalAgentInstructionLines(home);
+	removeManagedAgentSkills(home, "codex");
+	removeManagedAgentSkills(home, "claude-code");
 }
 
 /**
@@ -639,29 +667,155 @@ export function formatKeptCommands(kept: readonly string[]): string | null {
 
 // ── Codex installer ─────────────────────────────────────────────────
 
-/**
- * Skills installed for Codex. Only review: Codex lists every installed skill
- * in each session's context, and the others lean on Claude Code features and
- * are untested in Codex. Add a skill here once it is proven there.
- */
-const CODEX_SKILLS: readonly string[] = ["review"];
+/** Workflow skills rendered from the same reviewed text as the Claude plugin. */
+export const CODEX_SKILLS: readonly string[] = [
+	"pharaoh",
+	"plan",
+	"review",
+	"refactor",
+	"debug",
+	"verify",
+	"brainstorm",
+	"tdd",
+];
+const CODEX_SKILL_MARKER = ".pharaoh-managed-skill.json";
 
-/**
- * Install `CODEX_SKILLS` to `~/.agents/skills/` (where Codex reads personal
- * skills) as `pharaoh-<name>`, overwriting on reinstall. Other tools share that
- * directory, so the OpenClaw path's bare-name and manifest cleanups never run
- * here: they would delete a user's own `review` or `plan` skill.
- *
- * @param home - Home directory override (defaults to os.homedir()).
- * @returns Number of skill directories copied.
- */
-function installCodexSkills(home: string): number {
-	return installPrefixedSkills(
-		BUNDLED_SKILLS_DIR,
-		join(home, ".agents", "skills"),
-		SKILL_PREFIX,
-		CODEX_SKILLS,
+function codexSkillName(name: string): string {
+	return name === "pharaoh" ? name : `${SKILL_PREFIX}${name}`;
+}
+
+function renderAgentSkill(source: string, name: string, client: AgentInstructionClient): string {
+	let text = source.replace(
+		/^(---\n[\s\S]*?)(name:\s*).+(\n[\s\S]*?---)/,
+		`$1$2${codexSkillName(name)}$3`,
 	);
+	if (name === "pharaoh") {
+		text = text
+			.replace(
+				"This skill loads automatically in sessions where Pharaoh MCP tools are available. It is not manually invoked — it activates when the `pharaoh` MCP server is connected and tools like `get_codebase_map` are present.",
+				`Use this guide when a task needs repository structure and Pharaoh MCP tools are connected. ${client === "codex" ? "Codex" : "Claude Code"} can select it when relevant, or you can invoke it as ${client === "codex" ? "`$pharaoh`" : "`/pharaoh`"}. Discover the available tools before calling them.`,
+			)
+			.replace('"openclaw": {"always": true}, ', "")
+			.replace("**CLI** (Claude Code, OpenClaw — works everywhere):", "**CLI** (signed-in shell):");
+	}
+	if (name === "plan" && client === "codex") {
+		text = text.replace("(AskUserQuestion in Claude Code)", "(when available in Codex)");
+	}
+	return text;
+}
+
+function skillHash(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+/** A shared skills directory may contain the user's own pharaoh-prefixed skills. */
+function mayUpdateManagedSkill(
+	directory: string,
+	name: string,
+	legacy: string,
+	allowLegacyReview: boolean,
+): boolean {
+	const dir = lstatSync(directory, { throwIfNoEntry: false });
+	if (!dir) return true;
+	if (!dir.isDirectory()) return false;
+	const entries = readdirSync(directory).sort();
+	const file = join(directory, "SKILL.md");
+	if (!lstatSync(file, { throwIfNoEntry: false })?.isFile()) return false;
+	const current = readFileSync(file, "utf-8");
+	if (entries.length === 1 && allowLegacyReview && name === "review" && current === legacy)
+		return true;
+	if (entries.join(",") !== [CODEX_SKILL_MARKER, "SKILL.md"].sort().join(",")) return false;
+	const marker = join(directory, CODEX_SKILL_MARKER);
+	if (!lstatSync(marker, { throwIfNoEntry: false })?.isFile()) return false;
+	try {
+		const recorded = JSON.parse(readFileSync(marker, "utf-8"));
+		return (
+			recorded.version === 1 && recorded.source === name && recorded.hash === skillHash(current)
+		);
+	} catch {
+		// ALLOWED-CATCH: unreadable ownership is the user's skill to preserve.
+		return false;
+	}
+}
+
+function installManagedAgentSkills(
+	home: string,
+	client: AgentInstructionClient,
+): { installed: number; kept: string[] } {
+	const root =
+		client === "codex"
+			? join(home, ".agents")
+			: process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+	if (!isAbsolute(root)) throw new Error("The agent configuration directory must be absolute.");
+	const target = join(root, "skills");
+	for (const path of [root, target]) {
+		const entry = lstatSync(path, { throwIfNoEntry: false });
+		if (entry && !entry.isDirectory())
+			throw new Error("The agent skills directory is not a regular directory.");
+	}
+	mkdirSync(target, { recursive: true });
+	let installed = 0;
+	const kept: string[] = [];
+	for (const name of CODEX_SKILLS) {
+		const source = readFileSync(join(BUNDLED_SKILLS_DIR, name, "SKILL.md"), "utf-8");
+		const legacy = source.replace(
+			/^(---\n[\s\S]*?)(name:\s*).+(\n[\s\S]*?---)/,
+			`$1$2${codexSkillName(name)}$3`,
+		);
+		const directory = join(target, codexSkillName(name));
+		if (!mayUpdateManagedSkill(directory, name, legacy, client === "codex")) {
+			kept.push(codexSkillName(name));
+			continue;
+		}
+		const text = renderAgentSkill(source, name, client);
+		mkdirSync(directory, { recursive: true });
+		writeNoFollow(
+			join(directory, "SKILL.md"),
+			text,
+			lstatSync(join(directory, "SKILL.md"), { throwIfNoEntry: false })
+				? REWRITE_NO_FOLLOW
+				: APPEND_NO_FOLLOW,
+		);
+		writeNoFollow(
+			join(directory, CODEX_SKILL_MARKER),
+			JSON.stringify({ version: 1, source: name, hash: skillHash(text) }) + "\n",
+			lstatSync(join(directory, CODEX_SKILL_MARKER), { throwIfNoEntry: false })
+				? REWRITE_NO_FOLLOW
+				: APPEND_NO_FOLLOW,
+		);
+		installed++;
+	}
+	return { installed, kept };
+}
+
+function removeManagedAgentSkills(home: string, client: AgentInstructionClient): void {
+	const root =
+		client === "codex"
+			? join(home, ".agents")
+			: process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+	if (!isAbsolute(root)) return;
+	const target = join(root, "skills");
+	for (const path of [root, target]) {
+		const entry = lstatSync(path, { throwIfNoEntry: false });
+		if (!entry?.isDirectory()) return;
+	}
+	for (const name of CODEX_SKILLS) {
+		const directory = join(target, codexSkillName(name));
+		try {
+			const source = readFileSync(join(BUNDLED_SKILLS_DIR, name, "SKILL.md"), "utf-8");
+			const legacy = source.replace(
+				/^(---\n[\s\S]*?)(name:\s*).+(\n[\s\S]*?---)/,
+				`$1$2${codexSkillName(name)}$3`,
+			);
+			if (mayUpdateManagedSkill(directory, name, legacy, client === "codex"))
+				rmSync(directory, { recursive: true, force: true });
+		} catch {
+			// ALLOWED-CATCH: a custom or unreadable skill is retained during cleanup.
+			process.stderr.write(
+				`Pharaoh: kept the agent skill at ${directory}. Remove it by hand if needed.\n`,
+			);
+		}
+	}
 }
 
 // ── OpenClaw installer ──────────────────────────────────────────────
@@ -866,9 +1020,6 @@ export function describeAllowReadTools(result: AllowReadToolsResult): string {
 const PHARAOH_CLAUDE_MD_LINE =
 	"In repos Pharaoh has mapped, before searching or reading files, ask Pharaoh where the relevant code is, what calls it, and whether what you need already exists.";
 
-/** What the interactive setup asks before writing the line. */
-export const CLAUDE_MD_QUESTION = `Pharaoh: add one line to ~/.claude/CLAUDE.md so Claude checks Pharaoh before searching your code?\n  "${PHARAOH_CLAUDE_MD_LINE}"\n[Y/n] `;
-
 /** File under ~/.pharaoh holding the user's answer, so setup asks once. */
 const CLAUDE_MD_ANSWER_FILE = "claude-md-answer";
 
@@ -1038,12 +1189,27 @@ function classifyInstructionText(text: string): "exact" | "mention" | "none" {
 	return /\bpharaoh\b/i.test(text) ? "mention" : "none";
 }
 
-/** What ~/.claude/CLAUDE.md says about Pharaoh, and whether setup's block is there and current. */
-function userInstructionState(home = homedir()): {
+/** The configured Claude directory for observations; an invalid override never falls back. */
+function observationConfigDirectory(home: string, env: NodeJS.ProcessEnv): string | null {
+	const configured = env.CLAUDE_CONFIG_DIR;
+	return configured === undefined
+		? join(home, ".claude")
+		: isAbsolute(configured)
+			? configured
+			: null;
+}
+
+/** What the configured user instruction file says about Pharaoh and its managed block. */
+function userInstructionState(
+	home: string,
+	env: NodeJS.ProcessEnv,
+): {
 	user: InstructionState;
 	managed: ManagedBlockState;
 } {
-	const file = readBoundedText(join(home, ".claude", "CLAUDE.md"));
+	const directory = observationConfigDirectory(home, env);
+	if (!directory) return { user: "unknown", managed: "unknown" };
+	const file = readBoundedText(join(directory, "CLAUDE.md"));
 	if (file === "missing") return { user: "missing", managed: "absent" };
 	if (file === "unknown") return { user: "unknown", managed: "unknown" };
 	const { text } = file;
@@ -1083,6 +1249,7 @@ export function instructionStates(
 	clientName: string | undefined,
 	cwd?: string,
 	home = homedir(),
+	env: NodeJS.ProcessEnv = process.env,
 ): { user: InstructionState; managed: ManagedBlockState; project: InstructionState } {
 	try {
 		// process.cwd() throws when the folder was deleted: inside the try, so it reads as unknown.
@@ -1090,7 +1257,7 @@ export function instructionStates(
 			clientName && PROJECT_CWD_CLIENTS.has(clientName)
 				? projectInstructionState(cwd ?? process.cwd(), home)
 				: "unknown";
-		return { ...userInstructionState(home), project };
+		return { ...userInstructionState(home, env), project };
 	} catch {
 		return { user: "unknown", managed: "unknown", project: "unknown" };
 	}
@@ -1222,12 +1389,256 @@ function removeClaudeMdBlock(home: string): void {
 	}
 }
 
+export type AgentInstructionClient = "claude-code" | "codex";
+
+export interface AgentInstructionOutcome {
+	client: AgentInstructionClient;
+	path: string;
+	outcome: ClaudeMdOutcome;
+}
+
+interface AgentInstructionTarget {
+	client: AgentInstructionClient;
+	directory: string;
+	path: string;
+	answerPath: string;
+	blocked?: boolean;
+}
+
+interface AgentInstructionFile {
+	state: "absent" | "current" | "kept";
+	text: string;
+	block: ClaudeMdBlock | null;
+}
+
+/** Codex loads a nonempty global override before AGENTS.md. Unsafe overrides block setup. */
+function codexInstructionPath(directory: string): { path: string; blocked: boolean } {
+	const regular = join(directory, "AGENTS.md");
+	const override = join(directory, "AGENTS.override.md");
+	try {
+		if (!isAbsolute(directory)) return { path: regular, blocked: true };
+		const dir = lstatSync(directory, { throwIfNoEntry: false });
+		if (dir && !dir.isDirectory()) return { path: override, blocked: true };
+		const file = lstatSync(override, { throwIfNoEntry: false });
+		if (!file) return { path: regular, blocked: false };
+		if (!file.isFile() || file.size > INSTRUCTION_READ_CAP)
+			return { path: override, blocked: true };
+		const text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(override));
+		return { path: text.trim() ? override : regular, blocked: false };
+	} catch {
+		// ALLOWED-CATCH: an unreadable higher-priority override cannot safely be bypassed.
+		return { path: override, blocked: true };
+	}
+}
+
+function agentInstructionTarget(
+	client: AgentInstructionClient,
+	home: string,
+): AgentInstructionTarget {
+	const directory =
+		client === "codex"
+			? process.env.CODEX_HOME || join(home, ".codex")
+			: process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+	const selected =
+		client === "codex"
+			? codexInstructionPath(directory)
+			: { path: join(directory, "CLAUDE.md"), blocked: false };
+	return {
+		client,
+		directory,
+		path: selected.path,
+		blocked: selected.blocked,
+		answerPath: join(
+			home,
+			".pharaoh",
+			client === "codex" ? "codex-agents-answer" : CLAUDE_MD_ANSWER_FILE,
+		),
+	};
+}
+
+function readAgentInstruction(target: AgentInstructionTarget): AgentInstructionFile {
+	const kept: AgentInstructionFile = { state: "kept", text: "", block: null };
+	if (target.blocked || !isAbsolute(target.directory)) return kept;
+	const dir = lstatSync(target.directory, { throwIfNoEntry: false });
+	if (dir && !dir.isDirectory()) return kept;
+	const file = lstatSync(target.path, { throwIfNoEntry: false });
+	if (file && (!file.isFile() || file.size > INSTRUCTION_READ_CAP)) return kept;
+	let text = "";
+	if (file) {
+		try {
+			text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(target.path));
+		} catch {
+			// ALLOWED-CATCH: undecodable user instructions are preserved byte for byte.
+			return kept;
+		}
+	}
+	const block = findClaudeMdBlock(text);
+	if (block === "broken") return kept;
+	if (!block)
+		return { state: text.includes(PHARAOH_CLAUDE_MD_LINE) ? "current" : "absent", text, block };
+	if (text.slice(block.body, block.to) !== `${PHARAOH_CLAUDE_MD_LINE}\n`) return kept;
+	return { state: "current", text, block };
+}
+
+function hasAgentInstructionAnswer(target: AgentInstructionTarget): boolean {
+	const entry = lstatSync(target.answerPath, { throwIfNoEntry: false });
+	if (!entry) return false;
+	if (target.client !== "codex" || !entry.isFile() || entry.size > 4096) return true;
+	try {
+		const saved = readFileSync(target.answerPath, "utf-8").trim();
+		if (saved === "no") return true;
+		if (saved === "yes") return target.path === join(target.directory, "AGENTS.md");
+		const choice = JSON.parse(saved);
+		return choice.answer === "no" || (choice.answer === "yes" && choice.path === target.path);
+	} catch {
+		// ALLOWED-CATCH: malformed saved consent never authorizes a new write.
+		return true;
+	}
+}
+
+function saveAgentInstructionAnswer(
+	home: string,
+	target: AgentInstructionTarget,
+	answer: "yes" | "no",
+): void {
+	if (target.client !== "codex") {
+		saveClaudeMdAnswer(home, target.answerPath, answer);
+		return;
+	}
+	try {
+		ensurePharaohHome(join(home, ".pharaoh"));
+		const text = JSON.stringify({ answer, path: target.path }) + "\n";
+		const entry = lstatSync(target.answerPath, { throwIfNoEntry: false });
+		if (!entry) writeFileSync(target.answerPath, text, { mode: 0o600, flag: "wx" });
+		else if (entry.isFile()) writeNoFollow(target.answerPath, text, REWRITE_NO_FOLLOW);
+	} catch {
+		// ALLOWED-CATCH: the instruction result remains useful when consent cannot be saved.
+	}
+}
+
+/** Offer one consent for the verified coding clients, with one remembered answer per client. */
+export async function offerAgentInstructionLines(
+	clients: readonly AgentInstructionClient[],
+	ask: (question: string) => Promise<boolean | null>,
+	isTerminal: boolean,
+	home = homedir(),
+): Promise<AgentInstructionOutcome[]> {
+	const targets = [...new Set(clients)].map((client) => agentInstructionTarget(client, home));
+	if (!isTerminal)
+		return targets.map((target) => ({
+			client: target.client,
+			path: target.path,
+			outcome: "no-terminal",
+		}));
+	const pending: AgentInstructionTarget[] = [];
+	for (const target of targets) {
+		try {
+			if (readAgentInstruction(target).state === "absent" && !hasAgentInstructionAnswer(target))
+				pending.push(target);
+		} catch {
+			// ALLOWED-CATCH: each unreadable target gets its own failure below.
+		}
+	}
+	const answer = pending.length
+		? await ask(
+				`Pharaoh: add its instruction to ${pending.map((target) => target.path).join(" and ")} so your agents check Pharaoh before searching code?\n  "${PHARAOH_CLAUDE_MD_LINE}"\n[Y/n] `,
+			)
+		: null;
+	return targets.map((target) => {
+		const result = (outcome: ClaudeMdOutcome): AgentInstructionOutcome => ({
+			client: target.client,
+			path: target.path,
+			outcome,
+		});
+		try {
+			const selected = agentInstructionTarget(target.client, home);
+			if (selected.path !== target.path || selected.blocked) return result("kept");
+			let file = readAgentInstruction(target);
+			if (file.state === "absent") {
+				if (!pending.includes(target)) return result("answered");
+				if (answer === null) return result("cancelled");
+				if (!answer) {
+					saveAgentInstructionAnswer(home, target, "no");
+					return result("declined");
+				}
+				file = readAgentInstruction(target);
+			}
+			if (file.state === "absent") {
+				mkdirSync(target.directory, { recursive: true });
+				const newline = file.text !== "" && !file.text.endsWith("\n");
+				writeNoFollow(
+					target.path,
+					`${newline ? "\n" : ""}${claudeMdBlock(newline)}`,
+					APPEND_NO_FOLLOW,
+				);
+				saveAgentInstructionAnswer(home, target, "yes");
+				return result("added");
+			}
+			return result(file.state);
+		} catch {
+			// ALLOWED-CATCH: instruction setup is optional and other clients still get a result.
+			return result("failed");
+		}
+	});
+}
+
+export function describeAgentInstructionOutcome(result: AgentInstructionOutcome): string | null {
+	switch (result.outcome) {
+		case "added":
+			return `Pharaoh: added its instruction to ${result.path}. --clean removes the managed block.`;
+		case "updated":
+			return `Pharaoh: updated its instruction in ${result.path}.`;
+		case "declined":
+			return `Pharaoh: kept ${result.path}. Setup remembers your choice.`;
+		case "kept":
+			return `Pharaoh: preserved ${result.path} because its path or managed markers need attention. You can add the instruction by hand: ${PHARAOH_CLAUDE_MD_LINE}`;
+		case "failed":
+			return `Pharaoh: could not update ${result.path}. You can add the instruction by hand: ${PHARAOH_CLAUDE_MD_LINE}`;
+		case "no-terminal":
+			return `Pharaoh: add the instruction to ${result.path} interactively with npx ${PACKAGE_NAME}@latest install.`;
+		default:
+			return null;
+	}
+}
+
+function removeAdditionalAgentInstructionLines(home: string): void {
+	const codex = agentInstructionTarget("codex", home);
+	const targets: AgentInstructionTarget[] = [
+		{ ...codex, path: join(codex.directory, "AGENTS.md"), blocked: false },
+		{ ...codex, path: join(codex.directory, "AGENTS.override.md"), blocked: false },
+	];
+	if (process.env.CLAUDE_CONFIG_DIR) targets.push(agentInstructionTarget("claude-code", home));
+	for (const target of targets) {
+		try {
+			const file = readAgentInstruction(target);
+			if (file.block && file.state === "current") {
+				const ownsNewline =
+					file.block.addedNewline && file.block.from > 0 && file.block.through === file.text.length;
+				const from = ownsNewline ? file.block.from - 1 : file.block.from;
+				writeNoFollow(
+					target.path,
+					file.text.slice(0, from) + file.text.slice(file.block.through),
+					REWRITE_NO_FOLLOW,
+				);
+			}
+			rmSync(target.answerPath, { force: true });
+		} catch {
+			// ALLOWED-CATCH: one protected user file must not prevent the remaining cleanup.
+			process.stderr.write(
+				`Pharaoh: could not remove its instruction from ${target.path}. Remove its marked block by hand.\n`,
+			);
+		}
+	}
+}
+
 // ── Main entry point ────────────────────────────────────────────────
 
 /** What `runInstallSkills` wants the caller to tell the user. */
 export interface InstallResult {
 	/** Files in ~/.claude/commands/ left as they were because they are not Pharaoh's. */
 	keptCommands: string[];
+	warnings: string[];
+	errors: string[];
 }
 
 /**
@@ -1238,55 +1649,78 @@ export interface InstallResult {
  * Claude Code permissions: that is `allowReadTools`, interactive setup only.
  *
  * @param home - Home directory override (defaults to os.homedir()).
- * @param options.silent - Print nothing (the interactive setup prints its own summary).
+ * @param options.silent - Suppress normal summaries; warnings and errors are still reported.
  * @param options.claude - `claude` CLI runner (defaults to the real CLI for `home`).
  * @returns What was kept, for the caller's own summary.
  */
 export function runInstallSkills(
 	home = homedir(),
-	options?: { silent?: boolean; claude?: ClaudeCli },
+	options?: { silent?: boolean; claude?: ClaudeCli; clients?: readonly AgentInstructionClient[] },
 ): InstallResult {
 	const silent = options?.silent ?? false;
-	const hasClaudeCode = detectClaudeCode(home);
-	const hasOpenClaw = detectOpenClaw(home);
+	const hasClaudeCode = options?.clients
+		? options.clients.includes("claude-code")
+		: detectClaudeCode(home);
+	const hasOpenClaw = !options?.clients && detectOpenClaw(home);
 	let installed = false;
 	const keptCommands: string[] = [];
+	const warnings: string[] = [];
+	const errors: string[] = [];
 
 	// ── Claude Code ──
 	if (hasClaudeCode) {
-		// The marketplace lives under ~/.pharaoh, which may not exist yet: create
-		// it 0700 (and keep it 0700) before anything is written there.
-		ensurePharaohHome(join(home, ".pharaoh"));
-		removeLegacyClaudePlugin(home);
-		const skillCount = writeClaudeMarketplace(home);
-		const registration = registerClaudePlugin(home, options?.claude ?? claudeCliFor(home));
-		const commands = installClaudeCodeCommands(home);
-		keptCommands.push(...commands.kept);
-		const keptLine = formatKeptCommands(commands.kept);
+		try {
+			// The marketplace lives under ~/.pharaoh, which may not exist yet: create
+			// it 0700 (and keep it 0700) before anything is written there.
+			ensurePharaohHome(join(home, ".pharaoh"));
+			removeLegacyClaudePlugin(home);
+			const skillCount = writeClaudeMarketplace(home);
+			const registration = registerClaudePlugin(home, options?.claude ?? claudeCliFor(home));
+			if (registration === "failed") {
+				try {
+					const personal = installManagedAgentSkills(home, "claude-code");
+					const message = `Pharaoh: installed ${personal.installed} personal Claude Code skills. Plugin registration is unavailable, so plugin hooks are inactive.${personal.kept.length ? ` Preserved your skills: ${personal.kept.join(", ")}.` : ""}`;
+					warnings.push(message);
+					process.stderr.write(message + "\n");
+				} catch {
+					const message = "Pharaoh: optional Claude Code personal skills could not be installed.";
+					errors.push(message);
+					process.stderr.write(message + "\n");
+				}
+			}
+			const commands = installClaudeCodeCommands(home);
+			keptCommands.push(...commands.kept);
+			const keptLine = formatKeptCommands(commands.kept);
 
-		if (!silent) {
-			const registrationLine: Record<typeof registration, string> = {
-				installed:
-					"  → Installed through `claude plugin` — start a new Claude Code session to load it",
-				current: "  → Already installed and enabled",
-				disabled:
-					"  → Disabled in Claude Code; left off (`claude plugin enable pharaoh@pharaoh` turns it on)",
-				failed: `  → Couldn't run \`claude plugin install\`. Run: claude plugin marketplace add ${claudeMarketplaceDir(home)} && claude plugin install ${PLUGIN_ID}`,
-			};
-			process.stderr.write(
-				[
-					`Pharaoh: Claude Code plugin with ${skillCount} skills and the Grep routing hook`,
-					registrationLine[registration],
-					...(commands.installed > 0
-						? [
-								`  → Installed ${commands.installed} slash command${commands.installed === 1 ? "" : "s"} to ~/.claude/commands/`,
-							]
-						: []),
-					...(keptLine ? [`  → ${keptLine}`] : []),
-					...commands.removed.map((name) => `  → Removed retired ~/.claude/commands/${name}`),
-					"",
-				].join("\n"),
-			);
+			if (!silent) {
+				const registrationLine: Record<typeof registration, string> = {
+					installed:
+						"  → Installed through `claude plugin` — start a new Claude Code session to load it",
+					current: "  → Already installed and enabled",
+					disabled:
+						"  → Disabled in Claude Code; left off (`claude plugin enable pharaoh@pharaoh` turns it on)",
+					failed: `  → Couldn't run \`claude plugin install\`. Run: claude plugin marketplace add ${claudeMarketplaceDir(home)} && claude plugin install ${PLUGIN_ID}`,
+				};
+				process.stderr.write(
+					[
+						`Pharaoh: Claude Code plugin with ${skillCount} skills and the Grep routing hook`,
+						registrationLine[registration],
+						...(commands.installed > 0
+							? [
+									`  → Installed ${commands.installed} slash command${commands.installed === 1 ? "" : "s"} to ~/.claude/commands/`,
+								]
+							: []),
+						...(keptLine ? [`  → ${keptLine}`] : []),
+						...commands.removed.map((name) => `  → Removed retired ~/.claude/commands/${name}`),
+						"",
+					].join("\n"),
+				);
+			}
+		} catch {
+			const message =
+				"Pharaoh: optional Claude Code skill setup could not finish. Other clients continue.";
+			errors.push(message);
+			process.stderr.write(message + "\n");
 		}
 		installed = true;
 	}
@@ -1315,19 +1749,23 @@ export function runInstallSkills(
 	}
 
 	// ── Codex ──
-	if (detectCodex(home)) {
+	if (options?.clients ? options.clients.includes("codex") : detectCodex(home)) {
 		try {
-			const count = installCodexSkills(home);
+			const { installed: count, kept } = installManagedAgentSkills(home, "codex");
 			if (!silent) {
 				process.stderr.write(
-					`Pharaoh: installed ${count} skill to ~/.agents/skills/ for Codex ($pharaoh-review)\n\n`,
+					`Pharaoh: installed ${count} skills to ~/.agents/skills/ for Codex ($pharaoh, $pharaoh-plan, $pharaoh-review, $pharaoh-refactor, $pharaoh-debug, $pharaoh-verify, $pharaoh-brainstorm, $pharaoh-tdd)\n\n`,
 				);
 			}
+			if (kept.length)
+				process.stderr.write(`Pharaoh: kept your own Codex skills: ${kept.join(", ")}.\n`);
 		} catch (err) {
 			// ALLOWED-CATCH: a directory other tools share must not stop setup before the SC-6
 			// permission migration; the reason is printed even when silent.
 			const msg = err instanceof Error ? err.message : String(err);
-			process.stderr.write(`Pharaoh: couldn't install the review skill for Codex — ${msg}\n`);
+			const message = `Pharaoh: couldn't install Codex skills — ${msg}`;
+			errors.push(message);
+			process.stderr.write(message + "\n");
 		}
 		installed = true;
 	}
@@ -1349,5 +1787,5 @@ export function runInstallSkills(
 		);
 	}
 
-	return { keptCommands };
+	return { keptCommands, warnings, errors };
 }

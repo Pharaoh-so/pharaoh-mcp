@@ -18,7 +18,7 @@ const PKG_ROOT = join(__dirname, "..");
 export const PACKAGE_NAME = "@pharaoh-so/mcp";
 
 /** The deliberate upgrade: re-runs setup with the newest release, which re-pins every registration. */
-export const UPGRADE_COMMAND = `npx ${PACKAGE_NAME}@latest`;
+export const UPGRADE_COMMAND = `npx ${PACKAGE_NAME}@latest install`;
 
 /** Where the npm registry reports the newest published version. */
 const REGISTRY_LATEST_URL = `https://registry.npmjs.org/${PACKAGE_NAME.replace("/", "%2F")}/latest`;

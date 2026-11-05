@@ -18,13 +18,16 @@ try {
 	const [client, root, repo] = process.argv.slice(2);
 	const input = await readStdin(1024 * 1024);
 	let result;
-	if (root === "--user" || root === "--graph") {
+	if (root === "--user" || root === "--graph" || root === "--diagnostics") {
 		const reminder = root === "--user";
+		const diagnosticOnly = root === "--diagnostics";
 		const event = input?.hook_event_name;
 		if (
 			reminder
-				? event !== "UserPromptSubmit" || skipMemoryPrompt(input.prompt)
-				: event !== "PreToolUse" && event !== "PostToolUse"
+				? event !== "UserPromptSubmit"
+				: diagnosticOnly
+					? !["PostToolUse", "Stop", "StopFailure", "Interrupt", "SessionEnd"].includes(event)
+					: event !== "PreToolUse" && event !== "PostToolUse"
 		)
 			process.exit(0);
 		let structuralSearch;
@@ -38,7 +41,11 @@ try {
 		if (!activeMemoryRuntime(client, runtime)) process.exit(0);
 		const { readHookPreferences } = await import("./preferences.mjs");
 		const choice = readHookPreferences()[client];
-		if (choice?.memory === false || (!reminder && choice?.graph === false)) process.exit(0);
+		if (
+			choice?.memory === false ||
+			(diagnosticOnly ? choice?.diagnostics !== true : !reminder && choice?.graph === false)
+		)
+			process.exit(0);
 		const credentials = await readMemoryCredentials();
 		const eligible = await resolveMemoryHookTarget(
 			client,
@@ -48,8 +55,18 @@ try {
 			deadline,
 		);
 		if (!eligible || performance.now() >= deadline) process.exit(0);
-		if (reminder) result = memoryReminder(eligible.repo);
-		else {
+		if ((reminder || diagnosticOnly) && choice?.diagnostics === true) {
+			const { requestMemoryPolicy } = await import("./memory-api.mjs");
+			const { collectDiagnosticEvent } = await import("./diagnostics-collector.mjs");
+			const policy = await requestMemoryPolicy(eligible.repo, credentials, deadline, client);
+			if (performance.now() < deadline)
+				collectDiagnosticEvent(input, { client, target: eligible, credentials, policy, runtime });
+		}
+		if (diagnosticOnly) process.exit(0);
+		if (reminder) {
+			if (skipMemoryPrompt(input.prompt)) process.exit(0);
+			result = memoryReminder(eligible.repo);
+		} else {
 			const { worktreeCue } = await import("./graph-cues.mjs");
 			result = worktreeCue(input, {
 				client,

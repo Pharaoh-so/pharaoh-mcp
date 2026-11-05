@@ -13,6 +13,9 @@ const DEFAULT_SERVER = "https://mcp.pharaoh.so";
 /** The npx command users run to set up Pharaoh. Single source of truth for all output. */
 export const NPX_COMMAND = "npx @pharaoh-so/mcp";
 
+/** Explicit setup works in a terminal or a script; tool commands keep the base NPX command. */
+export const INSTALL_COMMAND = "npx @pharaoh-so/mcp@latest install";
+
 /** Write one or more lines to stderr. */
 export function printLines(...lines: string[]): void {
 	process.stderr.write(`${lines.join("\n")}\n`);
@@ -119,6 +122,7 @@ export function parseArgs(argv: string[] = process.argv.slice(2)): {
 export function printUsage(): void {
 	printLines(
 		"Usage: pharaoh-mcp [options]",
+		"       pharaoh-mcp install [--migrate-legacy] [options]",
 		"       pharaoh-mcp <tool> --repo <name> [flags] [--json] (use <tool> --help)",
 		"",
 		"Options:",
@@ -128,11 +132,14 @@ export function printUsage(): void {
 		"  --memory-hooks    Accept project memory hooks during eligible interactive setup",
 		"  --disable-memory-hooks  Remove Pharaoh's memory hooks and remember the choice",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
+		"  --migrate-legacy  Move plain pinned NPX connections to the managed runtime during install",
+		"  --doctor          Report bounded local setup markers offline; changes nothing",
+		"  --client <name>   With --doctor, select claude-code to inspect project markers",
 		"  --version, -v     Print the version",
 		"  --help, -h        Show this help",
 		"",
 		"Get started:",
-		`  ${NPX_COMMAND}`,
+		`  ${INSTALL_COMMAND}`,
 		"",
 	);
 }

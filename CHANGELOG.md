@@ -26,11 +26,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `pharaoh` skill's connection URL is `https://mcp.pharaoh.so/mcp` instead of `/sse`. The skill also carries the guidance that was only in the server instructions: one Pharaoh call answers what grep and file reads take many turns to piece together, load Pharaoh's tools before the first code search when your client defers them, summarize a block marked "Trace view available" instead of reproducing it, and check related repos when a change touches shared interfaces.
 - The server instructions state facts: what Pharaoh maps, which tool answers which question, what the graph leaves to grep, how repos are mapped and what each account tool does. Asking Pharaoh first, not re-checking its answers with grep, surfacing and crediting its ★ blocks and the rest of that guidance now live in the `pharaoh` skill. Claude Code and OpenClaw list the skill in every session and load its body only when they use it. The Grep hook and the optional `~/.claude/CLAUDE.md` line are unchanged and apply from the start of a session.
 
+## [0.3.69] - 2026-11-05
+
+### Fixed
+- Shell commands return exit code 1 for repository and other request refusals even when the MCP result has `isError: false`. A tool blocked by a plan that allows only the codebase map returns 4. Successful searches with no matches return 0.
+
+## [0.3.68] - 2026-11-05
+
+### Added
+- Reports the native client's configured memory reminder state independently of diagnostic content collection. Configured hooks remain separate from host trust and execution.
+
+### Fixed
+- Installer import ordering passes the standalone public package lint gate.
+
+## [0.3.67] - 2026-11-05
+
+### Added
+- `--doctor` reports bounded local Pharaoh plugin and instruction markers offline, without sign-in, uploads or changes. Project markers stay unknown unless the user selects a verified client with `--client claude-code` and runs from a repository root. It does not inventory skills or inspect the configured package pin.
+
+### Changed
+- Local instruction and plugin observations honor an absolute `CLAUDE_CONFIG_DIR`. Unreadable or invalid plugin settings report unknown rather than absent.
+
+## [0.3.66] - 2026-11-05
+
+### Added
+- Optional project-memory diagnostics with bounded task/action/final evidence, record-version links and background delivery. Collection starts disabled and requires a separate client choice when offered.
+- Sampled usefulness feedback from the active agent, including negative outcomes and improvement suggestions, with no separate model invocation or task continuation.
+
+### Fixed
+- Diagnostic delivery preserves uncertain queued evidence, recovers dead sender leases and isolates rejected events. Old revocations affect only their original collection generation.
+
+## [0.3.65] - 2026-11-05
+
+### Added
+- One-command developer setup: `npx @pharaoh-so/mcp@latest install`, with the bare terminal command retained as an alias. Claude Code, Codex and supported Claude Desktop installations are checked independently, including desktop-only machines.
+- An exact-version managed runtime that starts through an absolute Node executable, survives npm cache cleanup and repairs damaged installations. No separate local server command is needed.
+- Eight portable Codex skills and one instruction consent for the effective global Claude Code and Codex instruction files. Desktop-only Claude Code can use personal skills when plugin registration is unavailable; plugin hooks remain inactive in that fallback.
+
+### Fixed
+- Codex setup no longer depends on Claude's absence or project-memory pilot eligibility.
+- Installation preserves custom, disabled and project-specific registrations, reports each client outcome, and asks before migrating legacy pinned NPX connections.
+- Failed authentication keeps usable credentials; failed runtime preparation leaves client settings unchanged. Ordinary logout removes managed registrations without resetting custom Claude connections.
+
 ## [0.3.64] - 2026-11-05
 
 ### Added
 - Shell commands for the six question tools: `npx @pharaoh-so/mcp <tool> --repo <name> [flags]`. Answers go to stdout for pipes and files; `--json` returns the complete MCP result, and `<tool> --help` lists flags from the bundled schema.
-- CLI exit codes distinguish tool or connection errors (1), usage errors (2), sign-in required (3), and tools outside the account's plan (4). Commands use stored credentials without running setup, and mask access and refresh tokens in output.
+- CLI exit codes distinguish tool or connection errors (1), usage errors (2), sign-in required (3), and tools outside the account's plan (4). Other refusals could return 0 when the MCP result had `isError: false`. Commands use stored credentials without running setup, and mask access and refresh tokens in output.
 
 ## [0.3.63] - 2026-11-05
 

@@ -1,31 +1,48 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	appendFileSync,
 	cpSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import {
+	collectDiagnosticEvent,
+	flushDiagnosticQueue,
+} from "../project-memory/diagnostics-collector.mjs";
 import { worktreeCue } from "../project-memory/graph-cues.mjs";
-import { readHookPreferences, resetHookPreferences } from "../project-memory/preferences.mjs";
+import {
+	memoryDiagnosticsForClient,
+	memoryHookStateForClient,
+	readHookPreferences,
+	resetHookPreferences,
+	writeHookPreferences,
+} from "../project-memory/preferences.mjs";
 import {
 	applyMemoryHookChoices,
 	chooseMemoryHooks,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
+import type { Backend, DownstreamClient } from "../src/backend.js";
 import { type Credentials, writeCredentials } from "../src/credentials.js";
 import { tokenToCredentials } from "../src/helpers.js";
+import { ProxyServer } from "../src/proxy-server.js";
 
 const repo = "fixture/project";
 const require = createRequire(import.meta.url);
@@ -52,6 +69,7 @@ function commitFixture() {
 }
 
 beforeEach(() => {
+	vi.stubGlobal("fetch", async () => new Response(null, { status: 404 }));
 	home = realpathSync(mkdtempSync(join(tmpdir(), "pharaoh-memory-install-")));
 	checkout = join(home, "checkout");
 	mkdirSync(checkout);
@@ -92,7 +110,11 @@ beforeEach(() => {
 	writeCredentials(credentials, join(home, ".pharaoh/credentials.json"));
 });
 
-afterEach(() => rmSync(home, { recursive: true, force: true }));
+afterEach(() => {
+	vi.unstubAllGlobals();
+	vi.unstubAllEnvs();
+	rmSync(home, { recursive: true, force: true });
+});
 
 function configure(options: Partial<Parameters<typeof syncMemoryHooks>[0]> = {}) {
 	return syncMemoryHooks({
@@ -112,6 +134,149 @@ function hookCommand(settings: string, event: string): string {
 		group.hooks[0]?.command?.endsWith("# pharaoh-project-memory:user-v1"),
 	).hooks[0].command;
 }
+
+it("keeps native adoption states content-free and preserves saved declines and custom settings", () => {
+	const options = { home, env: {}, platform: "linux" as const };
+	expect(memoryHookStateForClient(undefined, options)).toBe("unknown");
+	expect(memoryHookStateForClient({ name: "other-editor" }, options)).toBe("unsupported");
+	expect(memoryHookStateForClient({ name: "codex" }, { ...options, platform: "win32" })).toBe(
+		"unsupported",
+	);
+	expect(memoryHookStateForClient({ name: "codex" }, options)).toBe("absent");
+	const custom = join(home, "custom-codex");
+	mkdirSync(custom);
+	const settings = join(custom, "hooks.json");
+	const config =
+		'{"hooks":{"Notification":[{"hooks":[{"type":"command","command":"user-tool"}]}]}}';
+	writeFileSync(settings, config);
+	const customOptions = { ...options, env: { CODEX_HOME: custom } };
+	expect(memoryHookStateForClient({ name: "codex" }, customOptions)).toBe("absent");
+	expect(readFileSync(settings, "utf8")).toBe(config);
+	writeFileSync(settings, '{"hooks":');
+	expect(memoryHookStateForClient({ name: "codex" }, customOptions)).toBe("unknown");
+	writeHookPreferences({ codex: { memory: false, diagnostics: false } }, home);
+	const preferences = readFileSync(
+		join(home, ".pharaoh/project-memory-client/hook-preferences-v1.json"),
+	);
+	expect(memoryHookStateForClient({ name: "codex" }, customOptions)).toBe("declined");
+	expect(
+		readFileSync(join(home, ".pharaoh/project-memory-client/hook-preferences-v1.json")),
+	).toEqual(preferences);
+	expect(readFileSync(settings, "utf8")).toBe('{"hooks":');
+});
+
+it("recognizes configured active reminders without asserting native trust, execution or diagnostic consent", async () => {
+	configure({ enable: true, clients: ["codex", "claude-code"] });
+	const options = { home, env: {} };
+	const info = { name: "codex", version: "1.2.3" };
+	const settings = join(home, ".codex/hooks.json");
+	const configured = readFileSync(settings, "utf8");
+	expect(memoryHookStateForClient(info, options)).toBe("installed");
+	expect(memoryDiagnosticsForClient(info, home)).toBeUndefined();
+	const active = JSON.parse(
+		readFileSync(join(home, ".pharaoh/project-memory-client/active.json"), "utf8"),
+	);
+	const runtime = join(home, ".pharaoh/project-memory-client", active.codex);
+	const installed = await import(pathToFileURL(join(runtime, "preferences.mjs")).href);
+	expect(installed.memoryHookStateForClient(info, options)).toBe("installed");
+	expect(readFileSync(settings, "utf8")).toBe(configured);
+	const claudeSettings = join(home, ".claude/settings.json");
+	const disabled = {
+		...JSON.parse(readFileSync(claudeSettings, "utf8")),
+		disableAllHooks: true,
+	};
+	writeFileSync(claudeSettings, JSON.stringify(disabled));
+	expect(memoryHookStateForClient({ name: "claude-code" }, options)).toBe("absent");
+	const stale = configured.replace(active.codex, "f".repeat(64));
+	writeFileSync(settings, stale);
+	expect(memoryHookStateForClient(info, options)).toBe("unknown");
+	writeFileSync(settings, configured);
+	rmSync(join(runtime, "pharaoh-memory-hook.mjs"));
+	expect(memoryHookStateForClient(info, options)).toBe("unknown");
+});
+
+it("preserves daily feedback invitation metadata and exact record versions in the installed client", async () => {
+	configure({ enable: true, clients: ["codex"] });
+	vi.stubEnv("HOME", home);
+	const active = JSON.parse(
+		readFileSync(join(home, ".pharaoh/project-memory-client/active.json"), "utf8"),
+	);
+	const runtime = join(home, ".pharaoh/project-memory-client", active.codex);
+	const installed = await import(pathToFileURL(join(runtime, "memory-api.mjs")).href);
+	const recallId = randomUUID();
+	const feedbackRequest = {
+		requestId: randomUUID(),
+		recallId,
+		eventId: randomUUID(),
+		probability: 0.1,
+		stratum: "random",
+		unit: "actor_repo_day",
+		window: "2026-11-05",
+		selectionVersion: "daily-stratum-v1",
+		fields: ["helpfulness", "suggestion"],
+	};
+	const records = [{ id: randomUUID(), version: 3, status: "candidate" }];
+	const fetcher = vi.fn(async () =>
+		Response.json({ records, recallId, collection: "unrecorded", feedbackRequest }),
+	);
+	const response = await installed.requestMemory(
+		"recall",
+		{ repo, terms: ["upgrade"] },
+		{ credentials, client: "codex", fetcher },
+	);
+	expect(response.records).toEqual(records);
+	expect(response.feedbackRequest).toEqual(feedbackRequest);
+	expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it("reports actual native identity and configured adoption without granting diagnostic consent", async () => {
+	configure({ enable: true, clients: ["codex"] });
+	vi.stubEnv("HOME", home);
+	vi.stubEnv("CODEX_HOME", join(home, ".codex"));
+	const identified: DownstreamClient[] = [];
+	const calls: Array<Record<string, unknown>> = [];
+	const backend: Backend = {
+		name: "sse",
+		identifyClient: (client) => identified.push(client),
+		listTools: async () => [],
+		callTool: async (_name, args) => {
+			calls.push(args);
+			return { content: [] };
+		},
+	};
+	const proxy = new ProxyServer(backend);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	await proxy.startWithTransport(serverTransport);
+	const client = new Client({ name: "codex", version: "1.2.3" });
+	await client.connect(clientTransport);
+	try {
+		await client.callTool({
+			name: "pharaoh_memory_recall",
+			arguments: {
+				repo,
+				terms: ["upgrade"],
+				diagnostics: {
+					clientName: "claude-code",
+					generation: randomUUID(),
+					taskSummary: "Check an upgrade",
+				},
+			},
+		});
+		expect(identified).toEqual([
+			{
+				client: { name: "codex", version: "1.2.3" },
+				plugin: "absent",
+				memoryHooks: "installed",
+				instructions: { user: "missing", managed: "absent", project: expect.any(String) },
+			},
+		]);
+		expect(JSON.stringify(identified)).not.toContain(home);
+		expect(calls[0].diagnostics).toEqual({ taskSummary: "Check an upgrade" });
+	} finally {
+		await client.close();
+		await proxy.stop();
+	}
+});
 
 function prompt(
 	settings: string,
@@ -370,7 +535,9 @@ it("preserves declines through cleanup", async () => {
 	const answers = [false, true, true];
 	await choose({ clients: ["claude-code", "codex"], ask: async () => answers.shift() ?? null });
 	resetHookPreferences(false, home);
-	expect(readHookPreferences(home)).toEqual({ "claude-code": { memory: false } });
+	expect(readHookPreferences(home)).toEqual({
+		"claude-code": { memory: false, diagnostics: false },
+	});
 });
 
 it("requires consent for legacy or missing hooks and respects native disable", async () => {
@@ -555,8 +722,8 @@ it("disables quietly with unrelated linked settings and fails for known linked h
 	expect(clean).toMatchObject({ status: 0, stdout: "", stderr: "" });
 	expect(readFileSync(external, "utf8")).toBe(unrelated);
 	expect(readHookPreferences(home)).toEqual({
-		"claude-code": { memory: false, graph: false },
-		codex: { memory: false, graph: false },
+		"claude-code": { memory: false, graph: false, diagnostics: false },
+		codex: { memory: false, graph: false, diagnostics: false },
 	});
 
 	const managed = JSON.stringify({
@@ -680,4 +847,561 @@ it("uses only readiness metadata to enable the reminder after first map", () => 
 	expect(readFileSync(requests, "utf8").trim().split("\n")).toEqual(
 		Array(4).fill("https://mcp.pharaoh.so/api/project-memory/readiness"),
 	);
+});
+
+const diagnosticPolicy = {
+	enabled: true,
+	contentEnabled: true,
+	policyVersion: "memory-diagnostics-v1",
+	retentionDays: 90,
+	noticeSatisfied: true,
+};
+
+it("offers diagnostics separately after policy eligibility and retains explicit choice through reset", async () => {
+	const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+	vi.stubGlobal("fetch", async (url: string, options: RequestInit) => {
+		const body = JSON.parse(String(options.body));
+		requests.push({ url: String(url), body });
+		return new Response(
+			JSON.stringify(
+				String(url).endsWith("/control")
+					? {
+							enabled: body.enabled,
+							generation: body.generation,
+							policyVersion: body.policyVersion,
+						}
+					: { revision: git("rev-parse", "HEAD"), diagnosticsPolicy: diagnosticPolicy },
+			),
+		);
+	});
+	const prompts: Array<{ question: string; defaultAnswer: boolean }> = [];
+	const decision = await choose({
+		ask: async (question, defaultAnswer) => {
+			prompts.push({ question, defaultAnswer });
+			return true;
+		},
+	});
+	expect(prompts.map((entry) => entry.defaultAnswer)).toEqual([true, false, false]);
+	expect(prompts[2].question).toContain("1 MB/24 h");
+	expect(prompts[2].question).toContain("90 days");
+	expect(requests.find((entry) => entry.url.endsWith("/control"))?.body).toMatchObject({
+		repo,
+		clientName: "codex",
+		enabled: true,
+	});
+	const accepted = readHookPreferences(home).codex;
+	expect(accepted).toMatchObject({
+		diagnostics: true,
+		diagnosticsPolicyVersion: diagnosticPolicy.policyVersion,
+		diagnosticsGeneration: expect.any(String),
+	});
+	applyChoice(decision);
+	const settings = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
+	expect(settings.hooks.Stop[0].hooks[0].command).toContain("--diagnostics");
+	expect(
+		settings.hooks.PostToolUse.some((group: { matcher: string }) =>
+			group.matcher.includes("pharaoh_memory"),
+		),
+	).toBe(true);
+	resetHookPreferences(false, home);
+	expect(readHookPreferences(home).codex).toMatchObject({
+		diagnostics: true,
+		diagnosticsGeneration: accepted?.diagnosticsGeneration,
+	});
+});
+
+function diagnosticFixture() {
+	credentials.project_memory_session = randomUUID();
+	writeCredentials(credentials, join(home, ".pharaoh/credentials.json"));
+	const generation = randomUUID();
+	writeHookPreferences(
+		{
+			codex: {
+				memory: true,
+				diagnostics: true,
+				diagnosticsGeneration: generation,
+				diagnosticsPolicyVersion: diagnosticPolicy.policyVersion,
+			},
+		},
+		home,
+	);
+	configure({ clients: ["codex"], enable: true });
+	const digest = JSON.parse(
+		readFileSync(join(home, ".pharaoh/project-memory-client/active.json"), "utf8"),
+	).codex;
+	const runtime = join(home, ".pharaoh/project-memory-client", digest);
+	const directory = join(home, ".pharaoh/project-memory-client/diagnostics/codex");
+	const options = {
+		client: "codex",
+		target: { root: checkout, repo },
+		credentials,
+		policy: { ...diagnosticPolicy, generation },
+		runtime,
+		home,
+		spawnSender: false,
+	};
+	const input = { session_id: "native-session", turn_id: "native-turn", cwd: checkout };
+	return { options, input, runtime, directory };
+}
+
+it("links actual native recall results, bounds excerpts and excludes file/patch/shell bodies", async () => {
+	const fixture = diagnosticFixture();
+	const collect = (event: object) =>
+		collectDiagnosticEvent({ ...fixture.input, ...event }, fixture.options);
+	const prompt = collect({
+		hook_event_name: "UserPromptSubmit",
+		prompt: `Investigate the failing memory delivery. ${"x".repeat(1500)}`,
+	});
+	const recallId = randomUUID();
+	const record = { id: randomUUID(), version: 3 };
+	const recall = collect({
+		hook_event_name: "PostToolUse",
+		tool_name: "mcp__pharaoh__pharaoh_memory_recall",
+		tool_input: { repo, turnRef: "agent-forged-turn" },
+		tool_response: {
+			content: [{ type: "text", text: JSON.stringify({ recallId, records: [record] }) }],
+		},
+	});
+	collect({
+		hook_event_name: "PostToolUse",
+		tool_name: "apply_patch",
+		tool_input: {
+			command: "*** Begin Patch\n*** Update File: src/a.ts\n@@\n+RAW_PATCH_SECRET\n*** End Patch",
+		},
+		tool_response: "Success. Updated the following files:",
+	});
+	collect({
+		hook_event_name: "PostToolUse",
+		tool_name: "Read",
+		tool_input: { file_path: "src/private.ts" },
+		tool_response: "RAW_FILE_SECRET",
+	});
+	collect({
+		hook_event_name: "PostToolUse",
+		tool_name: "Bash",
+		tool_input: { command: "printf RAW_COMMAND_SECRET", description: "Check the revised artifact" },
+		tool_response: { exit_code: 0, output: "RAW_OUTPUT_SECRET" },
+	});
+	collect({
+		hook_event_name: "Stop",
+		last_assistant_message: `Repaired the delivery path. ${"z".repeat(2200)}`,
+	});
+	expect(recall?.turnRef).toBe(prompt?.turnRef);
+	expect(recall?.payload).toMatchObject({ recallId, records: [record] });
+	expect(prompt?.payload.taskClipped).toBe(true);
+	const files = readdirSync(fixture.directory).filter((name) => name.startsWith("event-"));
+	const spool = files.map((name) => readFileSync(join(fixture.directory, name), "utf8")).join("\n");
+	expect(spool).not.toMatch(/RAW_(?:PATCH|FILE|COMMAND|OUTPUT)_SECRET|agent-forged-turn/);
+	expect(spool).toContain("src/a.ts");
+	expect(lstatSync(fixture.directory).mode & 0o777).toBe(0o700);
+	for (const name of files)
+		expect(lstatSync(join(fixture.directory, name)).mode & 0o777).toBe(0o600);
+	const sent: Array<{ events: Array<{ eventId: string }> }> = [];
+	await flushDiagnosticQueue("codex", {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async () => fixture.options.policy,
+		request: async (_operation: string, payload: { events: Array<{ eventId: string }> }) => {
+			sent.push(payload);
+			return { acceptedEventIds: payload.events.map((event) => event.eventId) };
+		},
+	});
+	expect(sent).toHaveLength(1);
+	expect(Buffer.byteLength(JSON.stringify(sent[0]))).toBeLessThan(12_000);
+	expect(readdirSync(fixture.directory).filter((name) => name.startsWith("event-"))).toEqual([]);
+});
+
+it("records observed heuristic skips, suppresses opted-out turns and rechecks consent before sending", async () => {
+	const fixture = diagnosticFixture();
+	const collect = (event: object) =>
+		collectDiagnosticEvent({ ...fixture.input, ...event }, fixture.options);
+	const skipped = collect({ hook_event_name: "UserPromptSubmit", prompt: "/help" });
+	expect(skipped?.payload.coverage.eligibility).toBe("heuristic_skip");
+	collect({ hook_event_name: "UserPromptSubmit", prompt: "skip project memory" });
+	expect(
+		collect({ hook_event_name: "Stop", last_assistant_message: "OPTED_OUT_FINAL" }),
+	).toBeUndefined();
+	expect(readdirSync(fixture.directory).filter((name) => name.startsWith("event-"))).toEqual([]);
+	collect({
+		hook_event_name: "UserPromptSubmit",
+		turn_id: "another-turn",
+		prompt: "Inspect the new failure",
+	});
+	const request = vi.fn();
+	await flushDiagnosticQueue("codex", {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async () => {
+			writeHookPreferences({ codex: { memory: true, diagnostics: false } }, home);
+			return fixture.options.policy;
+		},
+		request,
+	});
+	expect(request).not.toHaveBeenCalled();
+	resetHookPreferences(true, home);
+	expect(existsSync(fixture.directory)).toBe(false);
+});
+
+it("recovers dead sender leases and flushes final native events after the silent installed hook exits", async () => {
+	const fixture = diagnosticFixture();
+	const shim = join(home, "diagnostic-fetch.mjs");
+	const received = join(home, "received-diagnostics.jsonl");
+	writeFileSync(
+		shim,
+		`
+		import { appendFileSync } from "node:fs";
+		globalThis.fetch = async (url, options) => {
+			const body = JSON.parse(options.body);
+			if (String(url).endsWith("/readiness")) return new Response(JSON.stringify({
+				revision: process.env.FIXTURE_REVISION,
+				diagnosticsPolicy: JSON.parse(process.env.FIXTURE_POLICY),
+				diagnosticsControl: { enabled: true, generation: process.env.FIXTURE_GENERATION, policyVersion: "memory-diagnostics-v1" }
+			}));
+			if (!String(url).endsWith("/diagnostics")) throw new Error("Unexpected diagnostic request");
+			appendFileSync(process.env.FIXTURE_RECEIVED, JSON.stringify(body) + "\\n");
+			return new Response(JSON.stringify({ acceptedEventIds: body.events.map((event) => event.eventId) }));
+		};
+	`,
+	);
+	// Both leases belong to a process that really exited, including a recent start lease.
+	const deadSender = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
+	expect(deadSender.status).toBe(0);
+	mkdirSync(fixture.directory, { recursive: true, mode: 0o700 });
+	for (const name of ["sender.lock", "sender-start.lock"])
+		writeFileSync(
+			join(fixture.directory, name),
+			JSON.stringify({ owner: randomUUID(), pid: deadSender.pid, createdAt: Date.now() }),
+			{ mode: 0o600 },
+		);
+	const settings = join(home, ".codex/hooks.json");
+	const execute = (event: object) =>
+		execFileSync("/bin/sh", ["-c", hookCommand(settings, "Stop")], {
+			cwd: checkout,
+			env: {
+				...process.env,
+				HOME: home,
+				NODE_OPTIONS: `--import=${shim}`,
+				FIXTURE_REVISION: git("rev-parse", "HEAD"),
+				FIXTURE_POLICY: JSON.stringify(diagnosticPolicy),
+				FIXTURE_GENERATION: fixture.options.policy.generation,
+				FIXTURE_RECEIVED: received,
+			},
+			input: JSON.stringify({ ...fixture.input, ...event }),
+			encoding: "utf8",
+			timeout: 4_000,
+		});
+	expect(
+		execute({
+			hook_event_name: "Stop",
+			last_assistant_message: "Verified the final native artifact.",
+		}),
+	).toBe("");
+	const until = Date.now() + 3_000;
+	while (!existsSync(received) && Date.now() < until)
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	const batches = readFileSync(received, "utf8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	expect(batches.flatMap((batch) => batch.events)).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				kind: "final_observed",
+				payload: expect.objectContaining({
+					finalExcerpt: "Verified the final native artifact.",
+					completion: "stop_observed",
+				}),
+			}),
+		]),
+	);
+	expect(readFileSync(received, "utf8")).not.toContain("access_token");
+}, 10_000);
+
+it("bounds the spool and turn, reports expiry gaps, and retries stable event IDs until acknowledgement", async () => {
+	const fixture = diagnosticFixture();
+	for (let index = 0; index < 130; index++)
+		collectDiagnosticEvent(
+			{
+				...fixture.input,
+				hook_event_name: "PostToolUse",
+				tool_name: "Bash",
+				tool_input: { description: `Check expected behavior ${"x".repeat(1800)}` },
+				tool_response: { exit_code: 0 },
+			},
+			fixture.options,
+		);
+	const files = readdirSync(fixture.directory).filter((name) => name.startsWith("event-"));
+	expect(files.length).toBeLessThanOrEqual(100);
+	expect(
+		files.reduce((sum, name) => sum + lstatSync(join(fixture.directory, name)).size, 0),
+	).toBeLessThanOrEqual(64 * 1024);
+	expect(
+		readdirSync(fixture.directory).reduce(
+			(sum, name) => sum + lstatSync(join(fixture.directory, name)).size,
+			0,
+		),
+	).toBeLessThanOrEqual(1024 * 1024);
+	const expired = new Date(Date.now() - 25 * 60 * 60 * 1000);
+	for (const name of files) utimesSync(join(fixture.directory, name), expired, expired);
+	collectDiagnosticEvent(
+		{
+			...fixture.input,
+			turn_id: "next-native-turn",
+			hook_event_name: "UserPromptSubmit",
+			prompt: "Verify delivery after the connection returns",
+		},
+		fixture.options,
+	);
+	const queued = () =>
+		readdirSync(fixture.directory)
+			.filter((name) => name.startsWith("event-"))
+			.map((name) => JSON.parse(readFileSync(join(fixture.directory, name), "utf8")));
+	expect(
+		queued().find((item) => item.event.kind === "collector_gap")?.event.payload.count,
+	).toBeGreaterThan(0);
+	const before = queued()
+		.map((item) => item.event.eventId)
+		.sort();
+	const options = {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async () => fixture.options.policy,
+	};
+	await flushDiagnosticQueue("codex", {
+		...options,
+		request: async () => {
+			throw new Error("Unconfirmed delivery");
+		},
+	});
+	expect(
+		queued()
+			.map((item) => item.event.eventId)
+			.sort(),
+	).toEqual(before);
+	const seen: string[][] = [];
+	await flushDiagnosticQueue("codex", {
+		...options,
+		request: async (_operation: string, payload: { events: Array<{ eventId: string }> }) => {
+			seen.push(payload.events.map((event) => event.eventId));
+			return { acceptedEventIds: payload.events.map((event) => event.eventId) };
+		},
+	});
+	expect(seen.flat().sort()).toEqual(before);
+	expect(queued()).toEqual([]);
+});
+
+it("injects only actual native consent into MCP dispatch and strips claimed consent after opt-out", async () => {
+	const fixture = diagnosticFixture();
+	vi.stubEnv("HOME", home);
+	const calls: Array<Record<string, unknown>> = [];
+	const backend: Backend = {
+		name: "sse",
+		listTools: async () => [],
+		callTool: async (_name, args) => {
+			calls.push(args);
+			return { content: [] };
+		},
+	};
+	const proxy = new ProxyServer(backend);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	await proxy.startWithTransport(serverTransport);
+	const client = new Client({ name: "codex", version: "1.2.3" });
+	await client.connect(clientTransport);
+	try {
+		const claimed = {
+			clientName: "claude-code",
+			generation: randomUUID(),
+			taskSummary: "Investigate delivery",
+			versions: { serverCommit: "forged" },
+		};
+		await client.callTool({
+			name: "pharaoh_memory_recall",
+			arguments: { repo, terms: ["delivery"], diagnostics: claimed },
+		});
+		expect(calls[0].diagnostics).toMatchObject({
+			clientName: "codex",
+			generation: fixture.options.policy.generation,
+			taskSummary: claimed.taskSummary,
+			versions: { clientVersion: "1.2.3", collectorVersion: "native-v1" },
+		});
+		expect(JSON.stringify(calls[0])).not.toContain("forged");
+		writeHookPreferences({ codex: { memory: false, diagnostics: false } }, home);
+		await client.callTool({
+			name: "pharaoh_memory_recall",
+			arguments: { repo, terms: ["delivery"], diagnostics: claimed },
+		});
+		expect(calls[1].diagnostics).toEqual({ taskSummary: claimed.taskSummary });
+	} finally {
+		await client.close();
+		await proxy.stop();
+	}
+});
+
+it.each([
+	"missing_credentials",
+	"different_sign_in",
+	"unknown_policy",
+	"policy_error",
+	"global_pause",
+	"superseded_runtime",
+])("preserves bounded evidence during %s", async (failure) => {
+	const fixture = diagnosticFixture();
+	collectDiagnosticEvent(
+		{
+			...fixture.input,
+			hook_event_name: "UserPromptSubmit",
+			prompt: "Inspect the retryable delivery failure",
+		},
+		fixture.options,
+	);
+	const queued = () =>
+		readdirSync(fixture.directory)
+			.filter((name) => name.startsWith("event-"))
+			.map((name) => readFileSync(join(fixture.directory, name), "utf8"));
+	const before = queued();
+	const request = vi.fn();
+	await flushDiagnosticQueue("codex", {
+		home,
+		runtime: failure === "superseded_runtime" ? join(fixture.runtime, "old") : fixture.runtime,
+		readCredentials: async () =>
+			failure === "missing_credentials"
+				? undefined
+				: failure === "different_sign_in"
+					? { ...credentials, project_memory_session: randomUUID() }
+					: credentials,
+		policyRequest: async () => {
+			if (failure === "policy_error") throw new Error("Temporary readiness outage");
+			return failure === "unknown_policy"
+				? undefined
+				: failure === "global_pause"
+					? { ...fixture.options.policy, enabled: false, contentEnabled: false }
+					: fixture.options.policy;
+		},
+		request,
+	});
+	expect(queued()).toEqual(before);
+	expect(request).not.toHaveBeenCalled();
+});
+
+it("removes only a confirmed revoked repo/auth/generation scope and still delivers its valid peer", async () => {
+	const fixture = diagnosticFixture();
+	const first = collectDiagnosticEvent(
+		{
+			...fixture.input,
+			hook_event_name: "UserPromptSubmit",
+			prompt: "Inspect the first repository",
+		},
+		fixture.options,
+	);
+	const source = JSON.parse(
+		readFileSync(join(fixture.directory, `event-${first?.eventId}.json`), "utf8"),
+	);
+	const retained = [
+		{ ...source, binding: randomUUID(), event: { ...source.event, eventId: randomUUID() } },
+		{
+			...source,
+			collectionGeneration: randomUUID(),
+			event: { ...source.event, eventId: randomUUID() },
+		},
+	];
+	for (const item of retained)
+		writeFileSync(
+			join(fixture.directory, `event-${item.event.eventId}.json`),
+			JSON.stringify(item),
+			{ mode: 0o600 },
+		);
+	const otherRoot = join(home, "second-checkout");
+	const otherRepo = "fixture/second-project";
+	execFileSync("git", ["clone", "--quiet", checkout, otherRoot]);
+	execFileSync("git", [
+		"-C",
+		otherRoot,
+		"remote",
+		"set-url",
+		"origin",
+		`https://github.com/${otherRepo}.git`,
+	]);
+	credentials.project_memory?.push({ repo: otherRepo, revision: git("rev-parse", "HEAD") });
+	collectDiagnosticEvent(
+		{
+			...fixture.input,
+			cwd: otherRoot,
+			session_id: "second-session",
+			hook_event_name: "UserPromptSubmit",
+			prompt: "Inspect the other enrolled repository",
+		},
+		{ ...fixture.options, target: { root: otherRoot, repo: otherRepo } },
+	);
+	const sent: Array<{ repo: string }> = [];
+	await flushDiagnosticQueue("codex", {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async (requestedRepo: string) =>
+			requestedRepo === repo
+				? {
+						...diagnosticPolicy,
+						control: {
+							enabled: false,
+							generation: fixture.options.policy.generation,
+							policyVersion: diagnosticPolicy.policyVersion,
+						},
+					}
+				: fixture.options.policy,
+		request: async (
+			_operation: string,
+			payload: { repo: string; events: Array<{ eventId: string }> },
+		) => {
+			sent.push(payload);
+			return { acceptedEventIds: payload.events.map((event) => event.eventId) };
+		},
+	});
+	expect(sent).toEqual([expect.objectContaining({ repo: otherRepo })]);
+	const remaining = readdirSync(fixture.directory)
+		.filter((name) => name.startsWith("event-"))
+		.map((name) => JSON.parse(readFileSync(join(fixture.directory, name), "utf8")).event.eventId)
+		.sort();
+	expect(remaining).toEqual(retained.map((item) => item.event.eventId).sort());
+});
+
+it("retains a live sender lease and acknowledges permanent rejections without poisoning valid peers", async () => {
+	const fixture = diagnosticFixture();
+	const collect = (event: object) =>
+		collectDiagnosticEvent({ ...fixture.input, ...event }, fixture.options);
+	const prompt = collect({
+		hook_event_name: "UserPromptSubmit",
+		prompt: "Inspect the rejected event",
+	});
+	const final = collect({
+		hook_event_name: "Stop",
+		last_assistant_message: "The valid peer is ready",
+	});
+	const live = join(fixture.directory, "sender.lock");
+	writeFileSync(
+		live,
+		JSON.stringify({ owner: randomUUID(), pid: process.pid, createdAt: Date.now() - 60_000 }),
+		{ mode: 0o600 },
+	);
+	const request = vi.fn(async (_operation: string, _payload: unknown) => ({
+		acceptedEventIds: [final?.eventId],
+		rejectedEventIds: [prompt?.eventId],
+		gaps: [{ eventId: prompt?.eventId, reason: "event_conflict" }],
+	}));
+	const options = {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async () => fixture.options.policy,
+		request,
+	};
+	await flushDiagnosticQueue("codex", options);
+	expect(request).not.toHaveBeenCalled();
+	rmSync(live);
+	await flushDiagnosticQueue("codex", options);
+	expect(request).toHaveBeenCalledTimes(1);
+	expect(readdirSync(fixture.directory).filter((name) => name.startsWith("event-"))).toEqual([]);
+	expect(JSON.parse(readFileSync(join(fixture.directory, "gaps.json"), "utf8")).count).toBe(1);
 });

@@ -325,6 +325,7 @@ describe("ProxyServer.setBackend swap", () => {
 			{
 				client: { name: "claude-code", version: "2.1.3" },
 				plugin: "absent",
+				memoryHooks: process.platform === "win32" ? "unsupported" : "absent",
 				instructions: { user: "missing", managed: "absent", project: expect.any(String) },
 			},
 		]);

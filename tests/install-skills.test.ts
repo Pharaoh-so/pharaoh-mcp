@@ -19,21 +19,26 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { configureClients, verifiedCodingClients } from "../src/client-install.js";
 import { askYesNo, parseArgs } from "../src/helpers.js";
 import {
 	allowReadTools,
+	CODEX_SKILLS,
 	claudePluginState,
+	describeAgentInstructionOutcome,
 	describeClaudeMdOutcome,
 	installSkills,
 	instructionStates,
 	mergeOpenClawConfig,
+	offerAgentInstructionLines,
 	offerClaudeMdLine,
 	PHARAOH_ALLOW_RULES,
 	PHARAOH_COMMAND_MARKER,
 	runInstallSkills,
 	uninstallClaudePlugin,
 } from "../src/install-skills.js";
+import type { ClientInstallOptions, ClientTarget, LaunchConfig } from "../src/install-types.js";
 
 /** Read the package version from package.json (mirrors internal getPackageVersion). */
 function readPackageVersion(): string {
@@ -355,8 +360,8 @@ describe("runInstallSkills — both platforms", () => {
 	});
 });
 
-// Breaks when the Codex install writes more than review, keeps the bare `name:`, or runs
-// the OpenClaw path's bare-name cleanup in ~/.agents/skills/, which other tools share.
+// Breaks when Codex receives Claude-only activation rules or an install overwrites
+// user skills in the shared ~/.agents/skills directory.
 describe("runInstallSkills — Codex", () => {
 	let home: string;
 
@@ -373,17 +378,103 @@ describe("runInstallSkills — Codex", () => {
 		rmSync(home, { recursive: true, force: true });
 	});
 
-	it("installs only review, as pharaoh-review, and leaves the user's skills alone", () => {
+	it("installs the portable skills with Codex names and preserves the user's skills", () => {
 		runInstallSkills(home, NO_CLI);
 
 		const skills = join(home, ".agents", "skills");
 		expect(readFileSync(join(skills, "pharaoh-review", "SKILL.md"), "utf-8")).toMatch(
 			/^---\nname: pharaoh-review\n/,
 		);
-		expect(existsSync(join(skills, "pharaoh-plan"))).toBe(false);
-		expect(existsSync(join(skills, "pharaoh"))).toBe(false);
+		for (const name of CODEX_SKILLS) {
+			const installed = name === "pharaoh" ? name : `pharaoh-${name}`;
+			expect(readFileSync(join(skills, installed, "SKILL.md"), "utf-8")).toMatch(
+				new RegExp(`^---\\nname: ${installed}\\n`),
+			);
+		}
+		const guide = readFileSync(join(skills, "pharaoh", "SKILL.md"), "utf-8");
+		expect(guide).toContain("invoke it as `$pharaoh`");
+		expect(guide).not.toContain("This skill loads automatically");
+		expect(readFileSync(join(skills, "pharaoh-plan", "SKILL.md"), "utf-8")).not.toContain(
+			"AskUserQuestion",
+		);
 		expect(readFileSync(join(skills, "review", "SKILL.md"), "utf-8")).toBe("the user's own skill");
 		expect(readFileSync(join(skills, "plan", "SKILL.md"), "utf-8")).toBe("the user's own skill");
+	});
+
+	it("keeps custom prefixed skills and modifications to an installed skill", () => {
+		const skills = join(home, ".agents", "skills");
+		mkdirSync(join(skills, "pharaoh-plan"));
+		writeFileSync(join(skills, "pharaoh-plan", "SKILL.md"), "My own planning skill.");
+		runInstallSkills(home, NO_CLI);
+		expect(readFileSync(join(skills, "pharaoh-plan", "SKILL.md"), "utf-8")).toBe(
+			"My own planning skill.",
+		);
+		const review = join(skills, "pharaoh-review", "SKILL.md");
+		appendFileSync(review, "\nMy own addition.\n");
+		const changed = readFileSync(review, "utf-8");
+		runInstallSkills(home, NO_CLI);
+		expect(readFileSync(review, "utf-8")).toBe(changed);
+	});
+
+	it("cleanup removes unmodified owned skills and preserves custom or edited skills", () => {
+		runInstallSkills(home, NO_CLI);
+		const skills = join(home, ".agents", "skills");
+		const edited = join(skills, "pharaoh-plan", "SKILL.md");
+		appendFileSync(edited, "\nMy addition.\n");
+		const before = readFileSync(edited, "utf-8");
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(existsSync(join(skills, "pharaoh-review"))).toBe(false);
+		expect(readFileSync(edited, "utf-8")).toBe(before);
+		expect(readFileSync(join(skills, "plan", "SKILL.md"), "utf-8")).toBe("the user's own skill");
+	});
+
+	it("recognizes the exact legacy review and records ownership without replacing custom files", () => {
+		const review = join(home, ".agents", "skills", "pharaoh-review");
+		mkdirSync(review);
+		const source = readFileSync(join(__dirname, "..", "npx-skills", "review", "SKILL.md"), "utf-8");
+		writeFileSync(
+			join(review, "SKILL.md"),
+			source.replace(/^name: review$/m, "name: pharaoh-review"),
+		);
+		runInstallSkills(home, NO_CLI);
+		expect(existsSync(join(review, ".pharaoh-managed-skill.json"))).toBe(true);
+		const once = readFileSync(join(review, "SKILL.md"), "utf-8");
+		runInstallSkills(home, NO_CLI);
+		expect(readFileSync(join(review, "SKILL.md"), "utf-8")).toBe(once);
+	});
+
+	it("detects CODEX_HOME while keeping personal skills in ~/.agents/skills", () => {
+		const configured = join(home, "codex-profile");
+		mkdirSync(configured);
+		rmSync(join(home, ".codex"), { recursive: true });
+		vi.stubEnv("CODEX_HOME", configured);
+		try {
+			runInstallSkills(home, NO_CLI);
+			expect(existsSync(join(home, ".agents", "skills", "pharaoh", "SKILL.md"))).toBe(true);
+			expect(existsSync(join(configured, "skills"))).toBe(false);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
+	it("continues Codex skill setup when optional Claude Code setup fails", () => {
+		mkdirSync(join(home, ".claude"));
+		writeFileSync(join(home, ".claude", "commands"), "not a directory");
+		const result = runInstallSkills(home, {
+			...NO_CLI,
+			silent: true,
+			clients: ["claude-code", "codex"],
+		});
+		expect(result.errors).toHaveLength(1);
+		expect(existsSync(join(home, ".agents", "skills", "pharaoh-plan", "SKILL.md"))).toBe(true);
+	});
+
+	it("limits interactive skill setup to the verified enabled clients", () => {
+		mkdirSync(join(home, ".claude"));
+		runInstallSkills(home, { ...NO_CLI, clients: ["codex"] });
+		expect(existsSync(join(home, ".agents", "skills", "pharaoh-plan", "SKILL.md"))).toBe(true);
+		expect(existsSync(marketplaceDir(home))).toBe(false);
+		expect(existsSync(join(home, ".claude", "commands"))).toBe(false);
 	});
 
 	// Breaks when a Codex install error escapes: interactive setup would stop before
@@ -393,6 +484,122 @@ describe("runInstallSkills — Codex", () => {
 		writeFileSync(join(home, ".agents"), "not a directory");
 
 		expect(() => runInstallSkills(home, { ...NO_CLI, silent: true })).not.toThrow();
+	});
+});
+
+describe("automatic skill setup for verified coding clients", () => {
+	let home: string;
+	let launch: LaunchConfig;
+	let options: ClientInstallOptions;
+	let targets: ClientTarget[];
+	beforeEach(() => {
+		home = makeTempHome();
+		vi.stubEnv("CODEX_HOME", undefined);
+		vi.stubEnv("CLAUDE_CONFIG_DIR", undefined);
+		mkdirSync(join(home, ".claude"));
+		mkdirSync(join(home, ".codex"));
+		mkdirSync(join(home, "runtime", "dist"), { recursive: true });
+		const entry = join(home, "runtime", "dist", "index.js");
+		writeFileSync(entry, "// installed runtime fixture\n");
+		launch = { command: process.execPath, args: [entry] };
+		options = {
+			home,
+			env: { PATH: "" },
+			platform: "linux",
+			execute: () => {
+				throw new Error("CLI unavailable");
+			},
+		};
+		targets = [
+			{ client: "claude-code", path: join(home, ".claude.json") },
+			{ client: "codex", path: join(home, ".codex", "config.toml") },
+		];
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(home, { recursive: true, force: true });
+	});
+
+	it("directory presence and custom or disabled registrations never authorize startup writes", () => {
+		writeFileSync(
+			targets[0].path,
+			JSON.stringify({ mcpServers: { pharaoh: { url: "https://custom.example/mcp" } } }),
+		);
+		writeFileSync(targets[1].path, '[mcp_servers.pharaoh]\ncommand = "custom"\nenabled = false\n');
+		const clients = verifiedCodingClients({ ...options, runningLaunch: launch });
+		expect(clients).toEqual([]);
+		runInstallSkills(home, { ...NO_CLI, silent: true, clients });
+		expect(existsSync(join(home, ".claude", "commands"))).toBe(false);
+		expect(existsSync(join(home, ".claude", "skills"))).toBe(false);
+		expect(existsSync(marketplaceDir(home))).toBe(false);
+		expect(existsSync(join(home, ".agents"))).toBe(false);
+	});
+
+	it("updates owned Codex skills while preserving an excluded Claude configuration", () => {
+		expect(configureClients(targets, launch, options).map(({ status }) => status)).toEqual([
+			"configured",
+			"configured",
+		]);
+		const claude = JSON.stringify({
+			mcpServers: { pharaoh: { url: "https://custom.example/mcp" } },
+			disabledMcpServers: ["pharaoh"],
+		});
+		writeFileSync(targets[0].path, claude);
+		const clients = verifiedCodingClients({ ...options, runningLaunch: launch });
+		expect(clients).toEqual(["codex"]);
+		runInstallSkills(home, { ...NO_CLI, silent: true, clients });
+		expect(existsSync(join(home, ".agents", "skills", "pharaoh-review", "SKILL.md"))).toBe(true);
+		expect(readFileSync(targets[0].path, "utf-8")).toBe(claude);
+		expect(existsSync(join(home, ".claude", "commands"))).toBe(false);
+		expect(existsSync(join(home, ".claude", "skills"))).toBe(false);
+		expect(existsSync(marketplaceDir(home))).toBe(false);
+	});
+
+	it("skips even owned registrations when the running runtime does not match", () => {
+		configureClients(targets, launch, options);
+		const other = { ...launch, args: [join(home, "other-runtime", "index.js")] };
+		const clients = verifiedCodingClients({ ...options, runningLaunch: other });
+		expect(clients).toEqual([]);
+		runInstallSkills(home, { ...NO_CLI, silent: true, clients });
+		expect(existsSync(join(home, ".agents"))).toBe(false);
+		expect(existsSync(join(home, ".claude", "skills"))).toBe(false);
+		expect(existsSync(marketplaceDir(home))).toBe(false);
+	});
+});
+
+describe("personal Claude Code skills without its CLI", () => {
+	let home: string;
+	beforeEach(() => {
+		home = makeTempHome();
+	});
+	afterEach(() => {
+		rmSync(home, { recursive: true, force: true });
+	});
+
+	it("installs supported personal skills for a verified desktop-only coding client", () => {
+		const result = runInstallSkills(home, { ...NO_CLI, silent: true, clients: ["claude-code"] });
+		expect(result.errors).toEqual([]);
+		expect(result.warnings.join(" ")).toContain("plugin hooks are inactive");
+		for (const name of CODEX_SKILLS) {
+			const installed = name === "pharaoh" ? name : `pharaoh-${name}`;
+			expect(existsSync(join(home, ".claude", "skills", installed, "SKILL.md"))).toBe(true);
+		}
+		expect(readFileSync(join(home, ".claude", "skills", "pharaoh", "SKILL.md"), "utf-8")).toContain(
+			"invoke it as `/pharaoh`",
+		);
+		expect(existsSync(join(home, ".agents"))).toBe(false);
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(existsSync(join(home, ".claude", "skills", "pharaoh-plan"))).toBe(false);
+	});
+
+	it("keeps a user's personal workflow skill when fallback installation runs", () => {
+		const own = join(home, ".claude", "skills", "pharaoh-plan");
+		mkdirSync(own, { recursive: true });
+		writeFileSync(join(own, "SKILL.md"), "My planning workflow.");
+		runInstallSkills(home, { ...NO_CLI, silent: true, clients: ["claude-code"] });
+		expect(readFileSync(join(own, "SKILL.md"), "utf-8")).toBe("My planning workflow.");
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readFileSync(join(own, "SKILL.md"), "utf-8")).toBe("My planning workflow.");
 	});
 });
 
@@ -742,6 +949,238 @@ describe("SC-6: allowReadTools (interactive setup only)", () => {
 
 		expect(allowReadTools(home)).toBe("error");
 		expect(readFileSync(settingsPath, "utf-8")).toBe("not valid json {{{");
+	});
+});
+
+describe("the shared coding-agent instruction consent", () => {
+	const line =
+		"In repos Pharaoh has mapped, before searching or reading files, ask Pharaoh where the relevant code is, what calls it, and whether what you need already exists.";
+	let home: string;
+	beforeEach(() => {
+		home = makeTempHome();
+		vi.stubEnv("CODEX_HOME", undefined);
+		vi.stubEnv("CLAUDE_CONFIG_DIR", undefined);
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(home, { recursive: true, force: true });
+	});
+
+	it("asks once for both verified clients and preserves their existing instructions", async () => {
+		mkdirSync(join(home, ".claude"));
+		mkdirSync(join(home, ".codex"));
+		const claude = join(home, ".claude", "CLAUDE.md");
+		const codex = join(home, ".codex", "AGENTS.md");
+		writeFileSync(claude, "My Claude rules.\n");
+		writeFileSync(codex, "My Codex rules.");
+		const ask = vi.fn(async () => true);
+		const results = await offerAgentInstructionLines(["claude-code", "codex"], ask, true, home);
+		expect(ask).toHaveBeenCalledTimes(1);
+		expect(results.map((result) => result.outcome)).toEqual(["added", "added"]);
+		expect(readFileSync(claude, "utf-8")).toContain(`My Claude rules.\n<!-- pharaoh-mcp:start`);
+		expect(readFileSync(codex, "utf-8")).toContain(`My Codex rules.\n<!-- pharaoh-mcp:start+nl`);
+		expect(readFileSync(codex, "utf-8")).toContain(line);
+		ask.mockClear();
+		expect(
+			(await offerAgentInstructionLines(["claude-code", "codex"], ask, true, home)).map(
+				(result) => result.outcome,
+			),
+		).toEqual(["current", "current"]);
+		expect(ask).not.toHaveBeenCalled();
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readFileSync(claude, "utf-8")).toBe("My Claude rules.\n");
+		expect(readFileSync(codex, "utf-8")).toBe("My Codex rules.");
+	});
+
+	it("honors CODEX_HOME and only touches requested clients", async () => {
+		const configured = join(home, "codex-config");
+		vi.stubEnv("CODEX_HOME", configured);
+		const result = await offerAgentInstructionLines(["codex"], async () => true, true, home);
+		expect(result[0]).toMatchObject({
+			client: "codex",
+			path: join(configured, "AGENTS.md"),
+			outcome: "added",
+		});
+		expect(readFileSync(join(configured, "AGENTS.md"), "utf-8")).toContain(line);
+		expect(existsSync(join(home, ".codex"))).toBe(false);
+		expect(existsSync(join(home, ".claude"))).toBe(false);
+	});
+
+	it("writes to a nonempty Codex global override without changing AGENTS.md", async () => {
+		mkdirSync(join(home, ".codex"));
+		const agents = join(home, ".codex", "AGENTS.md");
+		const override = join(home, ".codex", "AGENTS.override.md");
+		writeFileSync(agents, "Regular rules.\n");
+		writeFileSync(override, "Override rules.\n");
+		const ask = vi.fn(async (_question: string) => true);
+		const result = await offerAgentInstructionLines(["codex"], ask, true, home);
+		expect(result[0]).toMatchObject({ path: override, outcome: "added" });
+		expect(ask.mock.calls[0][0]).toContain(override);
+		expect(readFileSync(override, "utf-8")).toContain(line);
+		expect(readFileSync(agents, "utf-8")).toBe("Regular rules.\n");
+	});
+
+	it.each(["", " \n\t"])("falls back to AGENTS.md for an empty override %j", async (contents) => {
+		mkdirSync(join(home, ".codex"));
+		const override = join(home, ".codex", "AGENTS.override.md");
+		writeFileSync(override, contents);
+		const result = await offerAgentInstructionLines(["codex"], async () => true, true, home);
+		expect(result[0]).toMatchObject({ path: join(home, ".codex", "AGENTS.md"), outcome: "added" });
+		expect(readFileSync(override, "utf-8")).toBe(contents);
+	});
+
+	it("preserves an unsafe override and reports attention instead of trusting AGENTS.md", async () => {
+		mkdirSync(join(home, ".codex"));
+		const agents = join(home, ".codex", "AGENTS.md");
+		const override = join(home, ".codex", "AGENTS.override.md");
+		const target = join(home, "override.md");
+		writeFileSync(agents, line + "\n");
+		writeFileSync(target, "Private override rules.\n");
+		symlinkSync(target, override);
+		const ask = vi.fn(async () => true);
+		const result = await offerAgentInstructionLines(["codex"], ask, true, home);
+		expect(result[0]).toMatchObject({ path: override, outcome: "kept" });
+		expect(describeAgentInstructionOutcome(result[0])).toContain("need attention");
+		expect(ask).not.toHaveBeenCalled();
+		expect(readFileSync(agents, "utf-8")).toBe(line + "\n");
+		expect(readFileSync(target, "utf-8")).toBe("Private override rules.\n");
+	});
+
+	it.skipIf(process.getuid?.() === 0)(
+		"preserves an unreadable higher-priority override",
+		async () => {
+			mkdirSync(join(home, ".codex"));
+			const override = join(home, ".codex", "AGENTS.override.md");
+			writeFileSync(override, "Private override rules.\n");
+			chmodSync(override, 0o000);
+			try {
+				const ask = vi.fn(async () => true);
+				expect((await offerAgentInstructionLines(["codex"], ask, true, home))[0]).toMatchObject({
+					path: override,
+					outcome: "kept",
+				});
+				expect(ask).not.toHaveBeenCalled();
+				expect(existsSync(join(home, ".codex", "AGENTS.md"))).toBe(false);
+			} finally {
+				chmodSync(override, 0o600);
+			}
+			expect(readFileSync(override, "utf-8")).toBe("Private override rules.\n");
+		},
+	);
+
+	it("cleans unchanged managed blocks from both global filenames when selection changes", async () => {
+		mkdirSync(join(home, ".codex"));
+		const agents = join(home, ".codex", "AGENTS.md");
+		const override = join(home, ".codex", "AGENTS.override.md");
+		writeFileSync(agents, "Regular rules.\n");
+		await offerAgentInstructionLines(["codex"], async () => true, true, home);
+		writeFileSync(override, "Override rules.\n");
+		const ask = vi.fn(async () => true);
+		expect((await offerAgentInstructionLines(["codex"], ask, true, home))[0]).toMatchObject({
+			path: override,
+			outcome: "added",
+		});
+		expect(ask).toHaveBeenCalledTimes(1);
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readFileSync(agents, "utf-8")).toBe("Regular rules.\n");
+		expect(readFileSync(override, "utf-8")).toBe("Override rules.\n");
+	});
+
+	it("does not add an inert cue if override precedence changes during consent", async () => {
+		mkdirSync(join(home, ".codex"));
+		const agents = join(home, ".codex", "AGENTS.md");
+		const override = join(home, ".codex", "AGENTS.override.md");
+		writeFileSync(agents, "Regular rules.\n");
+		const result = await offerAgentInstructionLines(
+			["codex"],
+			async () => {
+				writeFileSync(override, "New effective override.\n");
+				return true;
+			},
+			true,
+			home,
+		);
+		expect(result[0].outcome).toBe("kept");
+		expect(readFileSync(agents, "utf-8")).toBe("Regular rules.\n");
+		expect(readFileSync(override, "utf-8")).toBe("New effective override.\n");
+	});
+
+	it("records separate declines and never writes without interactive consent", async () => {
+		const ask = vi.fn(async () => false);
+		expect(
+			(await offerAgentInstructionLines(["claude-code", "codex"], ask, false, home)).map(
+				(result) => result.outcome,
+			),
+		).toEqual(["no-terminal", "no-terminal"]);
+		expect(ask).not.toHaveBeenCalled();
+		expect(existsSync(join(home, ".pharaoh"))).toBe(false);
+		expect(
+			(await offerAgentInstructionLines(["claude-code", "codex"], ask, true, home)).map(
+				(result) => result.outcome,
+			),
+		).toEqual(["declined", "declined"]);
+		expect(ask).toHaveBeenCalledTimes(1);
+		ask.mockClear();
+		expect(
+			(await offerAgentInstructionLines(["codex", "claude-code"], ask, true, home)).map(
+				(result) => result.outcome,
+			),
+		).toEqual(["answered", "answered"]);
+		expect(ask).not.toHaveBeenCalled();
+		expect(existsSync(join(home, ".codex"))).toBe(false);
+	});
+
+	it("preserves symlinks, invalid UTF-8 and broken managed blocks", async () => {
+		mkdirSync(join(home, ".codex"));
+		const agents = join(home, ".codex", "AGENTS.md");
+		const target = join(home, "mine.md");
+		writeFileSync(target, "mine\n");
+		symlinkSync(target, agents);
+		const ask = vi.fn(async () => true);
+		expect((await offerAgentInstructionLines(["codex"], ask, true, home))[0].outcome).toBe("kept");
+		expect(readFileSync(target, "utf-8")).toBe("mine\n");
+		rmSync(agents);
+		for (const content of [
+			Buffer.from([0xff, 0xfe]),
+			Buffer.from("<!-- pharaoh-mcp:start -->\nMissing end.\n"),
+		]) {
+			writeFileSync(agents, content);
+			expect((await offerAgentInstructionLines(["codex"], ask, true, home))[0].outcome).toBe(
+				"kept",
+			);
+			expect(readFileSync(agents)).toEqual(content);
+		}
+		expect(ask).not.toHaveBeenCalled();
+	});
+
+	it("cleanup preserves a changed Codex managed block and the user's lines around it", async () => {
+		await offerAgentInstructionLines(["codex"], async () => true, true, home);
+		const agents = join(home, ".codex", "AGENTS.md");
+		const changed = `My rules.\n${readFileSync(agents, "utf-8").replace(line, "My own Pharaoh instruction.")}Below.\n`;
+		writeFileSync(agents, changed);
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readFileSync(agents, "utf-8")).toBe(changed);
+	});
+
+	it("rereads after the shared question and reports a swapped symlink without changing it", async () => {
+		mkdirSync(join(home, ".codex"));
+		const agents = join(home, ".codex", "AGENTS.md");
+		const target = join(home, "mine.md");
+		writeFileSync(agents, "before\n");
+		writeFileSync(target, "mine\n");
+		const result = await offerAgentInstructionLines(
+			["codex"],
+			async () => {
+				rmSync(agents);
+				symlinkSync(target, agents);
+				return true;
+			},
+			true,
+			home,
+		);
+		expect(result[0].outcome).toBe("kept");
+		expect(describeAgentInstructionOutcome(result[0])).toContain("preserved");
+		expect(readFileSync(target, "utf-8")).toBe("mine\n");
 	});
 });
 
@@ -1230,5 +1669,33 @@ describe("instruction state", () => {
 		rmSync(join(project, "AGENTS.md"), { recursive: true });
 		rmSync(join(project, "CLAUDE.md"));
 		expect(state()).toBe("missing");
+	});
+
+	it("observes the configured Claude directory and keeps unreadable settings distinct from absence", () => {
+		const configured = join(home, "configured-claude");
+		mkdirSync(configured);
+		writeFileSync(claudeMd(), `${SUGGESTED_LINE}\n`);
+		writeFileSync(join(configured, "CLAUDE.md"), "PRIVATE-SENTINEL: Use pnpm.\n");
+		const env = { CLAUDE_CONFIG_DIR: configured };
+		expect(instructionStates(undefined, home, home, env)).toEqual({
+			user: "none",
+			managed: "absent",
+			project: "unknown",
+		});
+		expect(claudePluginState(home, env)).toBe("absent");
+		for (const settings of [
+			"PRIVATE-SENTINEL",
+			'{"enabledPlugins":{"pharaoh@pharaoh":"yes"}}',
+			"x".repeat(65_537),
+		]) {
+			writeFileSync(join(configured, "settings.json"), settings);
+			expect(claudePluginState(home, env)).toBe("unknown");
+		}
+		writeFileSync(join(configured, "settings.json"), '{"enabledPlugins":{"pharaoh@pharaoh":true}}');
+		expect(claudePluginState(home, env)).toBe("enabled");
+		expect(instructionStates(undefined, home, home, { CLAUDE_CONFIG_DIR: "relative" }).user).toBe(
+			"unknown",
+		);
+		expect(claudePluginState(home, { CLAUDE_CONFIG_DIR: "relative" })).toBe("unknown");
 	});
 });
