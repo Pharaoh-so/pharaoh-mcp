@@ -16,13 +16,30 @@
  * auth-flow-e2e suite.
  */
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { type JSONRPCRequest, LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKOFF_MS, SseProxyBackend } from "../src/backend.js";
 import { TenantSuspendedError, TokenExpiredError } from "../src/proxy.js";
 
+function disconnectedBackend() {
+	const backend = new SseProxyBackend("http://fake.local/sse", "fake-token");
+	const client = {
+		listTools: vi.fn().mockResolvedValue({ tools: [] }),
+		callTool: vi.fn().mockResolvedValue({ content: [] }),
+		close: vi.fn().mockResolvedValue(undefined),
+	};
+	const attach = () => {
+		Object.assign(backend, { client });
+	};
+	return { backend, client, attach };
+}
+
 describe("SseProxyBackend reconnect retry budget", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.useRealTimers();
 	});
 
 	// A transport that dies on an auth error leaves the loop through its catch,
@@ -31,10 +48,15 @@ describe("SseProxyBackend reconnect retry budget", () => {
 	it("reports nothing on a client whose transport failed with an auth error", async () => {
 		const backend = new SseProxyBackend("http://fake.local/sse", "fake-token");
 		const notification = vi.fn().mockResolvedValue(undefined);
-		const transport: { onclose?: () => void; onerror?: (e: Error) => void } = {};
+		const client = { notification };
+		const transport = {
+			onclose: undefined as (() => void) | undefined,
+			onerror: undefined as ((e: Error) => void) | undefined,
+			close: vi.fn(async () => transport.onclose?.()),
+		};
 		Object.assign(backend, {
-			client: { notification },
-			connectedClient: { notification },
+			client,
+			connectedClient: client,
 			transport,
 		});
 		const closed = (backend as unknown as { waitForClose(): Promise<void> }).waitForClose();
@@ -44,31 +66,115 @@ describe("SseProxyBackend reconnect retry budget", () => {
 		expect(notification).not.toHaveBeenCalled();
 	});
 
-	it("calls reconnectAfter exactly BACKOFF_MS.length times before giving up", async () => {
+	// A late reply to a canceled upstream request is a protocol diagnostic, not a dropped SSE stream.
+	it("keeps a concurrent request connected after a canceled request receives a late reply", async () => {
+		const [transport, peer] = InMemoryTransport.createLinkedPair();
+		const calls: JSONRPCRequest[] = [];
+		peer.onmessage = async (message) => {
+			if (!("method" in message) || !("id" in message)) return;
+			if (message.method === "initialize") {
+				await peer.send({
+					jsonrpc: "2.0",
+					id: message.id,
+					result: {
+						protocolVersion: LATEST_PROTOCOL_VERSION,
+						capabilities: { tools: {} },
+						serverInfo: { name: "fixture", version: "1" },
+					},
+				});
+			} else if (message.method === "tools/call") calls.push(message);
+		};
+		const client = new Client({ name: "fixture", version: "1" });
 		const backend = new SseProxyBackend("http://fake.local/sse", "fake-token");
-
-		// waitForClose resolves immediately — simulates "connection dropped"
-		// on every iteration. Without this the loop would block on a real
-		// EventSource close event.
 		vi.spyOn(
-			backend as unknown as { waitForClose(): Promise<void> },
-			"waitForClose",
-		).mockResolvedValue(undefined);
+			backend as unknown as { connectOnce(): Promise<void> },
+			"connectOnce",
+		).mockImplementation(async () => {
+			Object.assign(backend, { client, connectedClient: client, transport });
+		});
+		const reconnect = vi
+			.spyOn(backend as unknown as { reconnectAfter(n: number): Promise<void> }, "reconnectAfter")
+			.mockRejectedValue(new Error("Unexpected reconnect"));
+		try {
+			await client.connect(transport);
+			await backend.start();
+			const controller = new AbortController();
+			const canceled = expect(
+				backend.callTool("pharaoh_memory_expand", {}, { signal: controller.signal }),
+			).rejects.toThrow("user canceled");
+			const concurrent = backend
+				.callTool("get_codebase_map", {})
+				.catch((error: unknown) => ({ error }));
+			await expect.poll(() => calls.length).toBe(2);
+			controller.abort(new Error("user canceled"));
+			await canceled;
+			await peer.send({ jsonrpc: "2.0", id: calls[0].id, result: { content: [] } });
+			const result = { content: [{ type: "text", text: "still connected" }] };
+			await peer.send({ jsonrpc: "2.0", id: calls[1].id, result });
+			expect(await concurrent).toEqual(result);
+			expect(reconnect).not.toHaveBeenCalled();
+		} finally {
+			await backend.stop();
+			await peer.close();
+		}
+	});
 
-		// Every reconnect attempt fails — the loop's exit condition becomes
-		// "ran out of retry budget." Before the fix this bailed after ~3
-		// calls; after the fix it bails after BACKOFF_MS.length.
+	it("bounds a disconnected read to 15 seconds without dispatching it later", async () => {
+		vi.useFakeTimers();
+		const { backend, client, attach } = disconnectedBackend();
+		attach();
+		let settled = false;
+		const failure = expect(
+			backend.listTools().finally(() => {
+				settled = true;
+			}),
+		).rejects.toThrow("still recovering");
+		await vi.advanceTimersByTimeAsync(14_999);
+		expect(settled).toBe(false);
+		expect(client.listTools).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		await failure;
+		Object.assign(backend, { connectedClient: client });
+		expect(await backend.listTools()).toEqual([]);
+		expect(client.listTools).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		"cancel",
+		"stop",
+	])("settles a waiting capture on %s without dispatch", async (action) => {
+		const { backend, client, attach } = disconnectedBackend();
+		attach();
+		const controller = new AbortController();
+		const failure = expect(
+			backend.callTool("pharaoh_memory_capture", {}, { signal: controller.signal }),
+		).rejects.toThrow(action === "cancel" ? "user canceled" : "connection stopped");
+		if (action === "cancel") controller.abort(new Error("user canceled"));
+		else await backend.stop();
+		await failure;
+		Object.assign(backend, { connectedClient: client });
+		if (action === "cancel") expect(await backend.listTools()).toEqual([]);
+		else await expect(backend.listTools()).rejects.toThrow("connection stopped");
+		expect(client.callTool).not.toHaveBeenCalled();
+	});
+
+	it("calls reconnectAfter exactly BACKOFF_MS.length times before giving up", async () => {
+		const { backend, client, attach } = disconnectedBackend();
+		vi.spyOn(
+			backend as unknown as { connectOnce(): Promise<void> },
+			"connectOnce",
+		).mockImplementation(async () => attach());
+
 		const reconnectSpy = vi
 			.spyOn(backend as unknown as { reconnectAfter(n: number): Promise<void> }, "reconnectAfter")
 			.mockRejectedValue(new Error("simulated reconnect failure"));
-
-		// Silence stderr output the loop writes ("Pharaoh: connected", etc).
 		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-		await expect(
-			(backend as unknown as { runReconnectLoop(): Promise<void> }).runReconnectLoop(),
-		).rejects.toThrow(/simulated reconnect failure|maximum retries/);
-
+		await backend.start();
+		await Promise.all([
+			expect(backend.waitForExit()).rejects.toThrow(/simulated reconnect failure|maximum retries/),
+			expect(backend.listTools()).rejects.toThrow(/simulated reconnect failure|maximum retries/),
+		]);
+		expect(client.listTools).not.toHaveBeenCalled();
 		expect(reconnectSpy).toHaveBeenCalledTimes(BACKOFF_MS.length);
 		// And the delays passed in are the full sequence — not skipping any.
 		const attempts = reconnectSpy.mock.calls.map((c) => c[0]);
@@ -149,56 +255,25 @@ describe("SseProxyBackend reconnect retry budget", () => {
 		}
 	});
 
-	// Session C regression: the merge resolution in runReconnectLoop combined
-	// the no-double-increment fix (from #884 post-review) with a new call to
-	// classifySSEError on the caught error. When connectOnce() inside
-	// reconnectAfter rejects with a 401-coded error, the typed error must
-	// propagate out of the loop so the session supervisor can swap backends —
-	// NOT be treated as a transient reconnect failure that burns retry slots.
-	it("propagates TokenExpiredError when reconnectAfter rejects with a 401-coded error", async () => {
-		const backend = new SseProxyBackend("http://fake.local/sse", "fake-token");
+	// Typed auth failures must settle waiting requests and reach the supervisor
+	// on the first attempt, leaving auth recovery to the existing backend swap.
+	it.each([401, 403])("settles waiting calls with the typed %s recovery failure", async (code) => {
+		const { backend, client, attach } = disconnectedBackend();
 		vi.spyOn(
-			backend as unknown as { waitForClose(): Promise<void> },
-			"waitForClose",
-		).mockResolvedValue(undefined);
+			backend as unknown as { connectOnce(): Promise<void> },
+			"connectOnce",
+		).mockImplementation(async () => attach());
 		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-		// SseError-shaped rejection: the classifier keys off the `.code` property
-		// first, so we mirror the SDK's actual error shape.
-		const sseError = Object.assign(new Error("SSE error: 401 Unauthorized"), { code: 401 });
 		const reconnectSpy = vi
 			.spyOn(backend as unknown as { reconnectAfter(n: number): Promise<void> }, "reconnectAfter")
-			.mockRejectedValue(sseError);
-
-		await expect(
-			(backend as unknown as { runReconnectLoop(): Promise<void> }).runReconnectLoop(),
-		).rejects.toThrow(TokenExpiredError);
-
-		// The key assertion: we bailed out on the FIRST reconnect attempt, not
-		// after burning the whole retry budget. If classifySSEError were removed
-		// from the catch block, this would instead run BACKOFF_MS.length times
-		// and reject with the generic "maximum retries" error.
-		expect(reconnectSpy).toHaveBeenCalledTimes(1);
-	});
-
-	// Same path, 403 shape — asserts tenant suspension escapes the retry loop
-	// immediately rather than looping through all 5 slots.
-	it("propagates TenantSuspendedError when reconnectAfter rejects with a 403-coded error", async () => {
-		const backend = new SseProxyBackend("http://fake.local/sse", "fake-token");
-		vi.spyOn(
-			backend as unknown as { waitForClose(): Promise<void> },
-			"waitForClose",
-		).mockResolvedValue(undefined);
-		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-		const sseError = Object.assign(new Error("tenant suspended"), { code: 403 });
-		const reconnectSpy = vi
-			.spyOn(backend as unknown as { reconnectAfter(n: number): Promise<void> }, "reconnectAfter")
-			.mockRejectedValue(sseError);
-
-		await expect(
-			(backend as unknown as { runReconnectLoop(): Promise<void> }).runReconnectLoop(),
-		).rejects.toThrow(TenantSuspendedError);
+			.mockRejectedValue(Object.assign(new Error("SSE authorization failed"), { code }));
+		const typed = code === 401 ? TokenExpiredError : TenantSuspendedError;
+		await backend.start();
+		await Promise.all([
+			expect(backend.waitForExit()).rejects.toBeInstanceOf(typed),
+			expect(backend.callTool("pharaoh_memory_expand", {})).rejects.toBeInstanceOf(typed),
+		]);
+		expect(client.callTool).not.toHaveBeenCalled();
 		expect(reconnectSpy).toHaveBeenCalledTimes(1);
 	});
 });

@@ -186,7 +186,7 @@ it("runs the worktree cue from the installed, activated bundle", () => {
 	expect(run("rg 'function anotherWidget'")).toBe("");
 });
 
-it("advises once on a changed indexed file without invoking a configured Git filter", () => {
+it.each([false, true])("advises safely after a map with short request=%s", (short) => {
 	const file = "secret-path.ts";
 	writeFileSync(join(checkout, file), "export function temporary() {}\n");
 	git("add", file);
@@ -210,9 +210,14 @@ it("advises once on a changed indexed file without invoking a configured Git fil
 		);
 	const map = {
 		tool_name: "mcp__pharaoh__get_codebase_map",
-		tool_input: { repo },
+		tool_input: { repo: short ? "project" : repo },
 		tool_response: {
-			content: [{ type: "text", text: `# project Codebase Map\nIndexed commit: ${revision}` }],
+			content: [
+				{
+					type: "text",
+					text: `# ${short ? repo : "project"} Codebase Map\nIndexed commit: ${revision}`,
+				},
+			],
 		},
 	};
 	const patch = (path: string) => ({
@@ -222,10 +227,26 @@ it("advises once on a changed indexed file without invoking a configured Git fil
 	});
 	writeFileSync(join(checkout, file), "export function temporary() { return 1; }\n");
 	cue({ ...map, tool_input: { repo: "other/project" } });
-	cue({ ...map, tool_input: { repo: "project" } }, { repos: [repo, "other/project"] });
+	for (const text of [
+		`# project Codebase Map\nIndexed commit: ${revision}`,
+		`# other/project Codebase Map\nIndexed commit: ${revision}`,
+		`# ${repo} Codebase Map\n# other/project Codebase Map\nIndexed commit: ${revision}`,
+		`# ${repo} Codebase Map\nIndexed commit: ${revision}\nIndexed commit: ${revision}`,
+		`# ${repo} Codebase Map\nIndexed commit: unknown`,
+	])
+		cue({
+			...map,
+			tool_input: { repo: "project" },
+			tool_response: { content: [{ type: "text", text }] },
+		});
+	cue({
+		...map,
+		tool_response: { content: [...map.tool_response.content, ...map.tool_response.content] },
+	});
 	cue({ ...map, tool_response: { ...map.tool_response, isError: true } });
 	expect(cue(patch(file))).toBeUndefined();
-	cue(map);
+	// Canonical output is sufficient with absent or misleading personal repo hints.
+	cue(map, { repos: short ? ["other/project"] : [] });
 	expect(cue({ ...patch(file), tool_response: "Failed to apply patch" })).toBeUndefined();
 	expect(cue(patch("unchanged.ts"))).toBeUndefined();
 	expect(

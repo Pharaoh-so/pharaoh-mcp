@@ -55,7 +55,6 @@ try {
 				client,
 				target: eligible,
 				binding: projectMemorySession(credentials),
-				repos: credentials?.repos,
 				stateDirectory: memoryClientRoot(),
 				structuralSearch,
 				deadline,

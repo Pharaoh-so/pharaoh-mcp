@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "01fbf4e6376ebee526b674e4257c403b7900246e",
-  "payloadSha256": "9a4f3fb32aa3876d938b79fd3b737e8951f8a4e0097a3fe4a50fb917227a2864",
+  "commit": "73588619d0c30a0c0856338c5960386c2fcb3b13",
+  "payloadSha256": "22601cf07cd1d2db012856ea58bd9214a824d9ca0a519fa96c8669fc6a4fbd92",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "d7cf686ab57a05eacb6736b9783c65fa0cc4f3da5087ea64e97feaabb050ca74",
+      "sha256": "9b7020a8b54be3f098652d635cb7ec1b6f91ce7083c3a6240520236706b54882",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "ebdc799f79b003ee16972bd433583a4b9b2d22fa7e7c5dea805462b2b1b1fb68",
+      "sha256": "52f18bcb27746822755b65e4f88d154501edc74947c758810295e58fc3b3c23a",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "5b9c46cea0638f630daf9be634297c94c79d989b3c1c26a4532c90949331b239",
+      "sha256": "643bf7052840e95a522662205281ef2c2bce57adeba463ecb34cb7dc43559843",
       "mode": "100644"
     },
     {
@@ -106,7 +106,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "f10a9e3e9247867c3fce2a58046936b827097d9ac5ff6146a427b2cba2533b47",
+      "sha256": "e271825839b1f9fe048e2193071c13c566afbc97cb4179de1632c19e497769fc",
       "mode": "100644"
     },
     {
@@ -156,7 +156,7 @@
     },
     {
       "path": "project-memory/graph-cues.mjs",
-      "sha256": "0d84514e718eb3abcd8664545eae77530192ec30bb36a7c513fc93a0269035c9",
+      "sha256": "d2f004ef7145080b69cfac6939e3490d64c81746e91ada17b3300b76bcc6cc4c",
       "mode": "100644"
     },
     {
@@ -181,7 +181,7 @@
     },
     {
       "path": "project-memory/pharaoh-memory-hook.mjs",
-      "sha256": "4ec0a84bbfeef93b814929b28c639d70bc99e2c4d47d05864dae4121559d9944",
+      "sha256": "a538aa48c55ee589fd5bb88c35c1b5295c89265586a8716d64cda7d4d347acc2",
       "mode": "100644"
     },
     {
@@ -271,7 +271,7 @@
     },
     {
       "path": "src/backend.ts",
-      "sha256": "c7c27e5ceeb0f491bbf8e1b9663312cff8c5f7f43afd950ff9cd867ab726851f",
+      "sha256": "be40216aa1f4426c74feed5a14d04594205b80f8c2e720e9b4eb13e7d24f6ebd",
       "mode": "100644"
     },
     {
@@ -316,7 +316,7 @@
     },
     {
       "path": "src/proxy-server.ts",
-      "sha256": "8abda5068e06ca44db058c905e6652865132625962c47a6a4bdfd4b59dc47e86",
+      "sha256": "2077f5017823a0d9968aae4e345bcf6e4667cb0ab53792a3c54f9c9460f12236",
       "mode": "100644"
     },
     {
@@ -346,12 +346,12 @@
     },
     {
       "path": "tests/auth-flow-e2e.integration.test.ts",
-      "sha256": "520c9c660a392e46f3c0103b58bf2e272837c71b171734e60664b5209fb01e3a",
+      "sha256": "5f8450d9cd70fda2fa0e188895ee0bc06e46a50ab9251692b5c4c2c774bdbe89",
       "mode": "100644"
     },
     {
       "path": "tests/backend-reconnect.test.ts",
-      "sha256": "c9e2383411dcfbfc4b960a4a23fb088febbf03a495833685acfe6645247fd92a",
+      "sha256": "f12572ad0aebf1f78f712066367e07bab4628d7c457d40aa88a5a0c1f250b0b5",
       "mode": "100644"
     },
     {
@@ -376,7 +376,7 @@
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "ead4a5ef63ba0c7be3d890db542b096a1d14692ee411f95a9378afc846fa7b04",
+      "sha256": "4de738484f3c69cdd55909c9a51b0669e6f4671cb9d4d9531872bd6ff98de7b0",
       "mode": "100644"
     },
     {

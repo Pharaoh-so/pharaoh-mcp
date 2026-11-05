@@ -125,20 +125,25 @@ export class ProxyServer {
 	 * makes mutable-backend swaps safe.
 	 */
 	private registerHandlers(): void {
-		this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+		this.server.setRequestHandler(ListToolsRequestSchema, async (_req, extra) => {
 			await this.capabilityUpdate;
-			return { tools: await this.backend.listTools() };
+			extra.signal.throwIfAborted();
+			return { tools: await this.backend.listTools({ signal: extra.signal }) };
 		});
-		this.server.setRequestHandler(CallToolRequestSchema, async (req) => {
+		this.server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
 			await this.capabilityUpdate;
+			extra.signal.throwIfAborted();
 			const { name } = req.params;
 			const args = req.params.arguments ?? {};
 			const backend = this.backend;
-			const result = await backend.callTool(name, args);
+			const result = await backend.callTool(name, args, { signal: extra.signal });
 			// The call that completed sign-in swapped in the real backend — answer
 			// it from there instead of asking the agent to call again.
 			if (backend.name === "auth-required" && this.backend !== backend && !result.isError) {
-				return (await this.backend.callTool(name, args)) as CallToolResult;
+				extra.signal.throwIfAborted();
+				return (await this.backend.callTool(name, args, {
+					signal: extra.signal,
+				})) as CallToolResult;
 			}
 			return result as CallToolResult;
 		});
