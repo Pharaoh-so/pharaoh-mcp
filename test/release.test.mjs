@@ -180,6 +180,18 @@ test("the release handoff requires the complete allowlisted project memory packa
 		"setup.mjs",
 		"user-target.mjs",
 	].map((path) => `project-memory/${path}`);
+	const worktreePaths = ["graph-cues.mjs", "preferences.d.mts", "preferences.mjs"].map(
+		(path) => `project-memory/${path}`,
+	);
+	const earlier = [...paths, ...runtimePaths];
+	verifyPackPaths(earlier, packageFiles, "0.3.60");
+	verifyPackPaths([...earlier, ...worktreePaths], packageFiles, "0.3.61");
+	for (const missing of worktreePaths) {
+		const partial = worktreePaths.filter((path) => path !== missing);
+		assert.throws(() => verifyPackPaths([...earlier, ...partial], packageFiles, "0.3.61"), {
+			message: `Missing npm asset: ${missing}`,
+		});
+	}
 	const complete = fixture([...paths, ...runtimePaths], packageFiles);
 	const incomplete = fixture([...paths, ...runtimePaths.slice(1)], packageFiles);
 	try {

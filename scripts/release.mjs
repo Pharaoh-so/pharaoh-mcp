@@ -37,6 +37,11 @@ const PROJECT_MEMORY_PACK_PATHS = [
 	"project-memory/setup.mjs",
 	"project-memory/user-target.mjs",
 ];
+const WORKTREE_CUE_PACK_PATHS = [
+	"project-memory/graph-cues.mjs",
+	"project-memory/preferences.d.mts",
+	"project-memory/preferences.mjs",
+];
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 export const hash = (bytes, algorithm = "sha256") =>
 	createHash(algorithm).update(bytes).digest("hex");
@@ -89,7 +94,7 @@ export function verifySource(root) {
 }
 
 /** Only public runtime assets can enter npm; source, tests and release machinery stay out. */
-export function verifyPackPaths(paths, packageFiles = []) {
+export function verifyPackPaths(paths, packageFiles = [], version) {
 	assert.ok(paths.length > 0 && paths.length < 300);
 	assert.equal(new Set(paths).size, paths.length, "Duplicate archive entries");
 	for (const path of paths) {
@@ -97,12 +102,16 @@ export function verifyPackPaths(paths, packageFiles = []) {
 		// skills/ is the pre-npx-skills layout; drop it once main's package.json no longer ships it.
 		assert.ok(
 			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
+				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
 					path,
 				),
 			`Unexpected npm file: ${path}`,
 		);
 	}
+	// Maintenance builds of older proxies still ship the original memory bundle.
+	const hasMemory = packageFiles.includes("project-memory");
+	const hasWorktreeCues = hasMemory && version && compareVersions(version, "0.3.61") >= 0;
 	for (const required of [
 		"package.json",
 		"dist/index.js",
@@ -110,7 +119,8 @@ export function verifyPackPaths(paths, packageFiles = []) {
 		"inspect-tools.json",
 		"trace-app.html",
 		"LICENSE",
-		...(packageFiles.includes("project-memory") ? PROJECT_MEMORY_PACK_PATHS : []),
+		...(hasMemory ? PROJECT_MEMORY_PACK_PATHS : []),
+		...(hasWorktreeCues ? WORKTREE_CUE_PACK_PATHS : []),
 	])
 		assert.ok(paths.includes(required), `Missing npm asset: ${required}`);
 }
@@ -192,7 +202,7 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 	assert.equal(pkg.version, manifest.version);
 	assert.equal(pkg.repository?.url, PACKAGE_REPOSITORY);
 	assert.equal(pkg.repository?.directory, undefined);
-	verifyPackPaths(names.map((name) => name.slice(8)), pkg.files);
+	verifyPackPaths(names.map((name) => name.slice(8)), pkg.files, pkg.version);
 	return manifest;
 }
 
@@ -456,7 +466,7 @@ async function main() {
 			),
 			pkg.version,
 		);
-		verifyPackPaths(packed.files.map((file) => file.path), pkg.files);
+		verifyPackPaths(packed.files.map((file) => file.path), pkg.files, pkg.version);
 		const bytes = readFileSync(join(directory, packed.filename));
 		const manifest = {
 			schemaVersion: 1,
