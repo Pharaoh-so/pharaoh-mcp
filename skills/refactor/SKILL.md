@@ -4,7 +4,7 @@ prompt-name: safe-refactor
 description: "Safe refactoring workflow using Pharaoh codebase knowledge graph. Six-step process: module context, blast radius of detected downstream callers, reachability verification, dependency mapping, naming conflict detection, and a search for the affected tests. Produces a refactoring plan with detected callers listed, test files identified, unreachable code flagged, and high-risk paths warned. Use when refactoring, renaming, moving or splitting code in a repo Pharaoh maps, with Pharaoh's tools connected."
 version: 0.3.1
 homepage: https://pharaoh.so
-metadata: {"emoji": "☥", "tags": ["refactoring", "blast-radius", "architecture", "pharaoh", "safe-refactor", "test-coverage"]}
+metadata: {"tags": ["refactoring", "blast-radius", "architecture", "pharaoh", "safe-refactor", "test-coverage"]}
 ---
 
 # Safe Refactor

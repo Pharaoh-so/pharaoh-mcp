@@ -7,7 +7,7 @@ license: MIT. Adapted from obra/superpowers, Copyright (c) 2025 Jesse Vincent; s
 version: 0.2.1
 homepage: https://pharaoh.so
 user-invocable: true
-metadata: {"emoji": "☥", "tags": ["debugging", "root-cause", "investigation", "troubleshooting", "methodology"]}
+metadata: {"tags": ["debugging", "root-cause", "investigation", "troubleshooting", "methodology"]}
 ---
 
 # Systematic Debugging

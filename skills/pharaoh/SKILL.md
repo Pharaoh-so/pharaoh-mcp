@@ -5,7 +5,7 @@ description: "Which Pharaoh tool answers which structural question about a mappe
 description-npx: "Codebase knowledge graph — gives AI agents full architectural awareness. Query architecture, dependencies, blast radius, module context, and function search instead of reading files one at a time. Code intelligence via MCP: understand any codebase in seconds."
 version: 0.3.1
 homepage: https://pharaoh.so
-metadata: {"emoji": "☥", "openclaw": {"always": true}, "tags": ["code-intelligence", "architecture", "mcp", "knowledge-graph", "dependencies", "codebase-understanding"]}
+metadata: {"openclaw": {"always": true}, "tags": ["code-intelligence", "architecture", "mcp", "knowledge-graph", "dependencies", "codebase-understanding"]}
 ---
 
 # Pharaoh Tool Guide
