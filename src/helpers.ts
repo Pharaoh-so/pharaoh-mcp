@@ -121,6 +121,8 @@ export function printUsage(): void {
 		"  --server <url>    Pharaoh server URL (default: https://mcp.pharaoh.so)",
 		"  --logout          Clear credentials, MCP config, the Claude Code plugin and the CLAUDE.md line, then exit",
 		"  --clean           Remove Pharaoh setup, including managed local project memory hooks",
+		"  --memory-hooks    Install optional project memory reminders during interactive setup",
+		"  --disable-memory-hooks  Remove Pharaoh's local project memory hooks",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --version, -v     Print the version",
 		"  --help, -h        Show this help",
