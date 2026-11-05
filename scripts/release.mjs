@@ -42,6 +42,10 @@ const WORKTREE_CUE_PACK_PATHS = [
 	"project-memory/preferences.d.mts",
 	"project-memory/preferences.mjs",
 ];
+const MEMORY_DIAGNOSTIC_PACK_PATHS = [
+	"project-memory/diagnostics-collector.mjs",
+	"project-memory/diagnostics-sender.mjs",
+];
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 export const hash = (bytes, algorithm = "sha256") =>
 	createHash(algorithm).update(bytes).digest("hex");
@@ -103,6 +107,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		assert.ok(
 			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
+				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
 					path,
 				),
@@ -110,6 +115,17 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		);
 	}
 	const hasMemory = packageFiles.includes("project-memory");
+	const diagnosticInPack = MEMORY_DIAGNOSTIC_PACK_PATHS.some((path) => paths.includes(path));
+	const diagnosticInSource = sourcePaths?.some((path) => MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path));
+	if (sourcePaths && diagnosticInPack) {
+		assert.ok(diagnosticInSource, "Memory diagnostics are absent from the verified source");
+	}
+	if (diagnosticInSource) {
+		assert.ok(
+			MEMORY_DIAGNOSTIC_PACK_PATHS.every((path) => sourcePaths.includes(path)),
+			"Verified source must declare the complete memory diagnostic runtime",
+		);
+	}
 	const worktreeInPack = WORKTREE_CUE_PACK_PATHS.some((path) => paths.includes(path));
 	const worktreeInSource = sourcePaths?.some((path) => WORKTREE_CUE_PACK_PATHS.includes(path));
 	if (sourcePaths && worktreeInPack) {
@@ -130,6 +146,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		"LICENSE",
 		...(hasMemory ? PROJECT_MEMORY_PACK_PATHS : []),
 		...(worktreeInSource || worktreeInPack ? WORKTREE_CUE_PACK_PATHS : []),
+		...(diagnosticInSource || diagnosticInPack ? MEMORY_DIAGNOSTIC_PACK_PATHS : []),
 	])
 		assert.ok(paths.includes(required), `Missing npm asset: ${required}`);
 }
