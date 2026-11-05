@@ -1,6 +1,7 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	appendFileSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
@@ -8,17 +9,20 @@ import {
 	readFileSync,
 	realpathSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { syncMemoryHooks } from "../project-memory/setup.mjs";
 import { type Credentials, writeCredentials } from "../src/credentials.js";
 import { tokenToCredentials } from "../src/helpers.js";
 
 const repo = "fixture/project";
+const require = createRequire(import.meta.url);
 let home: string;
 let checkout: string;
 let packageRoot: URL;
@@ -97,116 +101,279 @@ function hookCommand(settings: string, event: string): string {
 	).hooks[0].command;
 }
 
-function hookInput(client: string, cwd: string, turn: string, event: string) {
-	return JSON.stringify({
-		hook_event_name: event,
-		cwd,
-		prompt: "Investigate a real project issue",
-		stop_hook_active: false,
-		last_assistant_message: "Verified the mapped repository.",
-		session_id: `fixture-${client}-${turn}`,
-		turn_id: turn,
-	});
-}
-
 function prompt(
-	client: string,
 	settings: string,
 	cwd: string,
-	turn: string,
 	env: NodeJS.ProcessEnv = {},
 	event = "UserPromptSubmit",
 ) {
-	return execFileSync("/bin/sh", ["-c", hookCommand(settings, event)], {
+	return execFileSync("/bin/sh", ["-c", hookCommand(settings, "UserPromptSubmit")], {
 		cwd,
 		env: { ...process.env, HOME: home, ...env },
 		encoding: "utf8",
-		input: hookInput(client, cwd, turn, event),
+		input: JSON.stringify({
+			hook_event_name: event,
+			cwd,
+			prompt: "Investigate a real project issue",
+			session_id: "fixture-session",
+			turn_id: "fixture-turn",
+		}),
 	});
 }
 
-it("installs the same owned hooks on returning setup and resolves ordinary worktrees", () => {
-	const claude = join(home, ".claude/settings.json");
-	const codex = join(home, ".codex/hooks.json");
-	mkdirSync(join(home, ".codex"));
-	writeFileSync(
-		codex,
-		JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "other" }] }] } }),
-	);
-	expect(configure().join(" ")).toContain("review and trust");
-	const first = readFileSync(codex, "utf8");
-	configure();
-	expect(readFileSync(codex, "utf8")).toBe(first);
-	expect(first).toContain('"other"');
-	const activePath = join(home, ".pharaoh/project-memory-client/active.json");
-	const activation = readFileSync(activePath, "utf8");
-	expect(
-		configure({
-			credentials: { ...credentials, project_memory_status: "unavailable" },
-		}).join(" "),
-	).toContain("Rerun normal setup to retry");
-	expect(readFileSync(codex, "utf8")).toBe(first);
-	expect(readFileSync(activePath, "utf8")).toBe(activation);
-	expect(existsSync(join(checkout, ".codex/hooks.json"))).toBe(false);
-	const worktree = join(home, "worktree");
-	git("worktree", "add", "--quiet", "--detach", worktree);
-	for (const [client, file] of [
-		["claude-code", claude],
-		["codex", codex],
-	]) {
-		expect(prompt(client, file, worktree, "eligible")).toContain("recall --turn");
-		expect(prompt(client, file, home, "unrelated")).toBe("");
-	}
-	// A similarly named origin without the mapped object must not enroll.
-	const spoof = join(home, "spoof");
-	execFileSync("git", ["init", "-q", spoof]);
-	execFileSync("git", ["-C", spoof, "remote", "add", "origin", `https://github.com/${repo}.git`]);
-	expect(prompt("codex", codex, spoof, "spoof")).toBe("");
-	const legacy = join(checkout, ".codex/hooks.json");
+function commandHook(command: string) {
+	return { type: "command", command };
+}
+
+function legacySettings() {
+	const path = join(checkout, ".codex/hooks.json");
 	mkdirSync(join(checkout, ".codex"));
 	writeFileSync(join(checkout, ".git/info/exclude"), "/.codex/hooks.json\n");
 	const marker = createHash("sha256").update(`codex\0${checkout}`).digest("hex");
 	writeFileSync(
-		legacy,
+		path,
 		JSON.stringify({
 			hooks: {
 				UserPromptSubmit: [
 					{
 						hooks: [
-							{
-								type: "command",
-								command: `/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:${marker}`,
-							},
+							commandHook(`/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:${marker}`),
+							commandHook("keep-checkout-hook"),
 						],
 					},
 				],
 			},
 		}),
 	);
-	expect(prompt("codex", codex, checkout, "legacy")).toBe("");
-	writeFileSync(codex, "invalid settings");
-	expect(configure().join(" ")).toContain("could not update codex hooks");
-	expect(readFileSync(legacy, "utf8")).toContain("pharaoh-project-memory");
-	writeFileSync(codex, first);
-	configure();
-	expect(readFileSync(legacy, "utf8")).not.toContain("pharaoh-project-memory");
-	expect(prompt("codex", codex, checkout, "migrated")).toContain("recall --turn");
-	const nonpilot = { ...credentials, project_memory: undefined };
-	writeCredentials(nonpilot, join(home, ".pharaoh/credentials.json"));
-	expect(prompt("codex", codex, worktree, "switched")).toBe("");
-	configure({ credentials: nonpilot, clients: [] });
-	expect(readFileSync(codex, "utf8")).not.toContain("pharaoh-project-memory");
-	expect(readFileSync(codex, "utf8")).toContain('"other"');
-});
+	return path;
+}
 
-it("leaves a fresh nonpilot's client settings untouched", () => {
-	expect(configure({ credentials: { ...credentials, project_memory: undefined } })).toEqual([]);
+it("installs no memory hooks by default even for the pilot", () => {
+	expect(configure()).toEqual([]);
 	expect(existsSync(join(home, ".claude"))).toBe(false);
 	expect(existsSync(join(home, ".codex"))).toBe(false);
 	expect(existsSync(join(home, ".pharaoh/project-memory-client"))).toBe(false);
 });
 
-it("installs from an unrelated repository rooted at the user's home", () => {
+it("removes owned pilot hooks during default setup without changing unrelated settings", () => {
+	const codex = join(home, ".codex/hooks.json");
+	configure({ enable: true });
+	const activation = join(home, ".pharaoh/project-memory-client/active.json");
+	expect(existsSync(activation)).toBe(true);
+	const old = commandHook("/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:user-v1");
+	const keep = commandHook("/user/tool.mjs # pharaoh-project-memory:user-v1");
+	const notification = [{ hooks: [commandHook("keep-notification")] }];
+	writeFileSync(
+		codex,
+		JSON.stringify({
+			hooks: {
+				UserPromptSubmit: [{ hooks: [old, keep] }],
+				Stop: [{ hooks: [old] }],
+				Interrupt: [{ hooks: [old] }],
+				SessionEnd: [],
+				Notification: notification,
+				StopFailure: [],
+			},
+			otherSetting: true,
+		}),
+	);
+	const legacy = legacySettings();
+	const elsewhere = join(home, "other-checkout");
+	git("worktree", "add", "--quiet", "--detach", elsewhere);
+	const elsewhereSettings = join(elsewhere, ".codex/hooks.json");
+	mkdirSync(join(elsewhere, ".codex"));
+	const elsewhereMarker = createHash("sha256").update(`codex\0${elsewhere}`).digest("hex");
+	const elsewhereConfig = JSON.stringify({
+		hooks: {
+			UserPromptSubmit: [
+				{
+					hooks: [
+						commandHook(`/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:${elsewhereMarker}`),
+					],
+				},
+			],
+		},
+	});
+	writeFileSync(elsewhereSettings, elsewhereConfig);
+	const credentialsFile = join(home, ".pharaoh/credentials.json");
+	const originalCredentials = readFileSync(credentialsFile, "utf8");
+	expect(configure({ credentials: undefined, clients: [] })).toEqual([]);
+	expect(JSON.parse(readFileSync(codex, "utf8"))).toEqual({
+		hooks: {
+			UserPromptSubmit: [{ hooks: [keep] }],
+			SessionEnd: [],
+			Notification: notification,
+			StopFailure: [],
+		},
+		otherSetting: true,
+	});
+	expect(JSON.parse(readFileSync(legacy, "utf8"))).toEqual({
+		hooks: { UserPromptSubmit: [{ hooks: [commandHook("keep-checkout-hook")] }] },
+	});
+	expect(readFileSync(elsewhereSettings, "utf8")).toBe(elsewhereConfig);
+	expect(readFileSync(credentialsFile, "utf8")).toBe(originalCredentials);
+	expect(existsSync(activation)).toBe(false);
+	expect(configure()).toEqual([]);
+});
+
+it("deactivates loaded user hooks and leaves tracked checkout settings alone", () => {
+	configure({ enable: true });
+	const codex = join(home, ".codex/hooks.json");
+	const activation = join(home, ".pharaoh/project-memory-client/active.json");
+	const legacy = legacySettings();
+	git("add", "--force", ".codex/hooks.json");
+	const original = readFileSync(legacy, "utf8");
+	writeFileSync(codex, "invalid settings");
+	expect(configure().join(" ")).toContain("could not update codex project memory hooks");
+	expect(existsSync(activation)).toBe(false);
+	expect(readFileSync(codex, "utf8")).toBe("invalid settings");
+	expect(readFileSync(legacy, "utf8")).toBe(original);
+	configure({ env: { CODEX_HOME: join(checkout, ".codex") } });
+	expect(readFileSync(legacy, "utf8")).toBe(original);
+});
+
+it("protects tracked checkout hooks when CODEX_HOME points through a linked ancestor", () => {
+	const legacy = legacySettings();
+	git("add", "--force", ".codex/hooks.json");
+	const original = readFileSync(legacy, "utf8");
+	const alias = join(home, "linked-checkout");
+	symlinkSync(checkout, alias, "dir");
+	const env = { CODEX_HOME: join(alias, ".codex") };
+	expect(configure({ env }).join(" ")).toContain("could not update codex project memory hooks");
+	expect(readFileSync(legacy, "utf8")).toBe(original);
+});
+
+it("keeps working settings and checkout hooks until a replacement is active", () => {
+	configure({ enable: true });
+	const codex = join(home, ".codex/hooks.json");
+	const activation = join(home, ".pharaoh/project-memory-client/active.json");
+	const originalSettings = readFileSync(codex, "utf8");
+	const originalActivation = readFileSync(activation, "utf8");
+	const legacy = legacySettings();
+	const originalLegacy = readFileSync(legacy, "utf8");
+
+	expect(
+		configure({
+			enable: true,
+			credentials: { ...credentials, project_memory_status: "unavailable" },
+		}).join(" "),
+	).toContain("eligibility could not be checked");
+	expect(
+		configure({
+			enable: true,
+			packageRoot: new URL("missing/", packageRoot),
+		}).join(" "),
+	).toContain("reminders unavailable");
+	expect(readFileSync(codex, "utf8")).toBe(originalSettings);
+	expect(readFileSync(activation, "utf8")).toBe(originalActivation);
+	expect(readFileSync(legacy, "utf8")).toBe(originalLegacy);
+
+	appendFileSync(
+		new URL("project-memory/pharaoh-memory-hook.mjs", packageRoot),
+		"// replacement\n",
+	);
+	const alias = join(home, "linked-codex");
+	symlinkSync(join(home, ".codex"), alias, "dir");
+	expect(
+		configure({
+			enable: true,
+			clients: ["codex"],
+			env: { CODEX_HOME: alias },
+		}).join(" "),
+	).toContain("could not update codex project memory hooks");
+	expect(readFileSync(codex, "utf8")).toBe(originalSettings);
+	expect(readFileSync(activation, "utf8")).toBe(originalActivation);
+	expect(readFileSync(legacy, "utf8")).toBe(originalLegacy);
+
+	expect(configure({ enable: true, clients: ["codex"] }).join(" ")).toContain("review and trust");
+	expect(readFileSync(activation, "utf8")).not.toBe(originalActivation);
+	expect(prompt(codex, checkout)).toContain("pharaoh_memory_recall");
+	expect(readFileSync(legacy, "utf8")).not.toContain("pharaoh-project-memory");
+});
+
+it("disables quietly with unrelated linked settings and fails for known linked hooks", () => {
+	const external = join(home, "user-settings.json");
+	const unrelated = '{"hooks":{"Notification":[]}}\n';
+	writeFileSync(external, unrelated);
+	const codex = join(home, ".codex");
+	mkdirSync(codex);
+	symlinkSync(external, join(codex, "hooks.json"));
+	mkdirSync(join(checkout, ".claude"));
+	symlinkSync(external, join(checkout, ".claude/settings.local.json"));
+	expect(configure({ credentials: undefined })).toEqual([]);
+
+	function disable() {
+		return spawnSync(
+			process.execPath,
+			[
+				require.resolve("tsx/cli"),
+				fileURLToPath(new URL("../src/index.ts", import.meta.url)),
+				"--disable-memory-hooks",
+			],
+			{
+				cwd: checkout,
+				env: {
+					...process.env,
+					HOME: home,
+					CODEX_HOME: codex,
+					CLAUDE_CONFIG_DIR: join(home, ".claude"),
+				},
+				encoding: "utf8",
+				timeout: 5_000,
+			},
+		);
+	}
+	const clean = disable();
+	expect(clean).toMatchObject({ status: 0, stdout: "", stderr: "" });
+	expect(readFileSync(external, "utf8")).toBe(unrelated);
+
+	const managed = JSON.stringify({
+		hooks: {
+			Stop: [
+				{ hooks: [commandHook("/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:user-v1")] },
+			],
+		},
+	});
+	writeFileSync(external, managed);
+	const blocked = disable();
+	expect(blocked.status).toBe(1);
+	expect(blocked.stderr + blocked.stdout).toContain("could not update codex project memory hooks");
+	expect(readFileSync(external, "utf8")).toBe(managed);
+}, 15_000);
+
+it("opts in to one MCP reminder per client and scopes it to eligible worktrees", () => {
+	const claude = join(home, ".claude/settings.json");
+	const codex = join(home, ".codex/hooks.json");
+	expect(configure({ enable: true }).join(" ")).toContain("review and trust");
+	const first = readFileSync(codex, "utf8");
+	configure({ enable: true });
+	expect(readFileSync(codex, "utf8")).toBe(first);
+	const worktree = join(home, "worktree");
+	git("worktree", "add", "--quiet", "--detach", worktree);
+	for (const file of [claude, codex]) {
+		expect(Object.keys(JSON.parse(readFileSync(file, "utf8")).hooks)).toEqual(["UserPromptSubmit"]);
+		const reminder = prompt(file, worktree);
+		expect(reminder).toContain("pharaoh_memory_recall");
+		expect(reminder).toContain("pharaoh_memory_expand");
+		expect(reminder).toContain("pharaoh_memory_capture");
+		expect(reminder).not.toContain("--turn");
+		expect(prompt(file, worktree, {}, "Stop")).toBe("");
+		expect(prompt(file, home)).toBe("");
+	}
+	// A similarly named origin without the mapped object must not enroll.
+	const spoof = join(home, "spoof");
+	execFileSync("git", ["init", "-q", spoof]);
+	execFileSync("git", ["-C", spoof, "remote", "add", "origin", `https://github.com/${repo}.git`]);
+	expect(prompt(codex, spoof)).toBe("");
+	writeCredentials(
+		{ ...credentials, project_memory: undefined },
+		join(home, ".pharaoh/credentials.json"),
+	);
+	expect(prompt(codex, worktree)).toBe("");
+	expect(existsSync(join(home, ".pharaoh/project-memory-turns-v2"))).toBe(false);
+});
+
+it("can opt in from an unrelated repository rooted at the user's home", () => {
 	execFileSync("git", ["-C", home, "init", "-q"]);
 	execFileSync("git", [
 		"-C",
@@ -216,11 +383,13 @@ it("installs from an unrelated repository rooted at the user's home", () => {
 		"origin",
 		"https://github.com/fixture/dotfiles.git",
 	]);
-	expect(configure({ cwd: home, clients: ["codex"] }).join(" ")).toContain("memory is set up");
+	expect(configure({ cwd: home, clients: ["codex"], enable: true }).join(" ")).toContain(
+		"memory reminders are set up",
+	);
 	expect(existsSync(join(home, ".codex/hooks.json"))).toBe(true);
 });
 
-it("activates first-map memory, saves one in-turn candidate, and stops quietly", () => {
+it("uses only readiness metadata to enable the reminder after first map", () => {
 	const revision = git("rev-parse", "HEAD");
 	const signIn = (accessToken: string) =>
 		tokenToCredentials(
@@ -240,31 +409,15 @@ it("activates first-map memory, saves one in-turn candidate, and stops quietly",
 	expect(pending.project_memory_session).toBeDefined();
 	const credentialsFile = join(home, ".pharaoh/credentials.json");
 	writeCredentials(pending, credentialsFile);
-	writeFileSync(
-		new URL("dist/refresh.js", packageRoot),
-		`
-		import { writeFileSync } from "node:fs";
-		import { CREDENTIALS_PATH, readCredentials } from "./credentials.js";
-		export function originBoundRefresh() {
-			return { load: async () => {
-				const current = readCredentials();
-				if (current.access_token !== "fixture") return {ok: true, creds: current};
-				const rotated = { ...current, access_token: "rotated", refresh_token: "rotated-refresh" };
-				writeFileSync(CREDENTIALS_PATH, JSON.stringify(rotated));
-				return {ok: true, creds: rotated};
-			} };
-		}
-	`,
-	);
 	const settings = join(home, ".codex/hooks.json");
-	expect(configure({ credentials: pending, clients: ["codex"] }).join(" ")).toContain(
+	expect(configure({ credentials: pending, clients: ["codex"], enable: true }).join(" ")).toContain(
 		"still mapping",
 	);
 	const installed = readFileSync(settings, "utf8");
 	// Later prompts run the private installed runtime, independent of the package cache.
 	rmSync(packageRoot, { recursive: true });
 	const shim = join(home, "readiness-fixture.mjs");
-	const captureLog = join(home, "capture.jsonl");
+	const requests = join(home, "memory-requests.txt");
 	writeFileSync(
 		shim,
 		`
@@ -272,83 +425,33 @@ it("activates first-map memory, saves one in-turn candidate, and stops quietly",
 		const now = Date.now.bind(Date);
 		Date.now = () => now() + Number(process.env.FIXTURE_OFFSET ?? 0);
 		globalThis.fetch = async (url, options) => {
-			if (String(url) === "https://mcp.pharaoh.so/api/project-memory/readiness" &&
-				options.redirect === "error" && options.body === JSON.stringify({repo: "fixture/project"})) {
-				if (process.env.FIXTURE_STATUS === "denied") return new Response(null, {status: 404});
-				return new Response(JSON.stringify({revision: process.env.FIXTURE_REVISION || null}));
-			}
-			if (String(url) === "https://mcp.pharaoh.so/api/project-memory/recall" &&
-				options.headers.Authorization === "Bearer rotated" && JSON.parse(options.body).format === "compact-v1")
-				return new Response(JSON.stringify({format: "compact-v1", repo: "fixture/project", records: [], moreMatches: false, omittedRecords: 0, graph: {verification: "unavailable"}}));
-			if (String(url) === "https://mcp.pharaoh.so/api/project-memory/capture" &&
-				options.headers.Authorization === "Bearer rotated") {
-				appendFileSync(process.env.FIXTURE_CAPTURE_LOG, options.body + "\\n");
-				await new Promise((resolve) => setTimeout(resolve, 3_100));
-				return new Response(JSON.stringify({record:{id:"8b24e18d-4541-4da3-941e-ce145b7cb53e",status:"candidate"}}));
-			}
-			throw new Error("Unexpected fixture request");
+			appendFileSync(process.env.FIXTURE_REQUESTS, String(url) + "\\n");
+			if (String(url) !== "https://mcp.pharaoh.so/api/project-memory/readiness" ||
+				options.redirect !== "error" || options.body !== JSON.stringify({repo: "fixture/project"}))
+				throw new Error("Unexpected fixture request");
+			if (process.env.FIXTURE_STATUS === "denied") return new Response(null, {status: 404});
+			return new Response(JSON.stringify({revision: process.env.FIXTURE_REVISION || null}));
 		};
 	`,
 	);
-	const env = { NODE_OPTIONS: `--import=${shim}`, FIXTURE_CAPTURE_LOG: captureLog };
-	expect(prompt("codex", settings, checkout, "denied", { ...env, FIXTURE_STATUS: "denied" })).toBe(
-		"",
-	);
-	expect(prompt("codex", settings, checkout, "pending", { ...env, FIXTURE_OFFSET: "16000" })).toBe(
-		"",
-	);
-	const enabled = prompt("codex", settings, checkout, "mapped", {
+	const env = { NODE_OPTIONS: `--import=${shim}`, FIXTURE_REQUESTS: requests };
+	expect(prompt(settings, checkout, { ...env, FIXTURE_STATUS: "denied" })).toBe("");
+	expect(prompt(settings, checkout, { ...env, FIXTURE_OFFSET: "16000" })).toBe("");
+	const enabled = prompt(settings, checkout, {
 		...env,
 		FIXTURE_OFFSET: "32000",
 		FIXTURE_REVISION: revision,
 	});
-	function runMemory(output: string, operation: "recall" | "capture" | "receipt", input?: object) {
-		const guidance: string = JSON.parse(output).hookSpecificOutput.additionalContext;
-		const recall = guidance
-			.split("\n")
-			.find((line) => line.includes("recall --turn"))
-			?.split(" <<")[0];
-		if (!recall) throw new Error("Expected a recall command from the installed prompt hook.");
-		const command =
-			operation === "recall"
-				? recall
-				: recall.replace("recall --turn", `${operation} --turn`).replace(" --compact", "");
-		return execFileSync("/bin/sh", ["-c", command], {
-			cwd: checkout,
-			env: { ...process.env, HOME: home, ...env },
-			encoding: "utf8",
-			input: input && JSON.stringify(input),
-		});
-	}
-	const recap = { kind: "lesson", summary: "Check the mapped revision first." };
-	expect(JSON.parse(runMemory(enabled, "recall", { terms: ["mapping"] })).format).toBe(
-		"compact-v1",
-	);
-	const rotated = JSON.parse(readFileSync(credentialsFile, "utf8"));
-	expect(rotated).toMatchObject({
-		access_token: "rotated",
-		project_memory_session: pending.project_memory_session,
-	});
-	expect(existsSync(captureLog)).toBe(false);
-	expect(runMemory(enabled, "capture", recap)).toBe("");
-	expect(prompt("codex", settings, checkout, "mapped", env, "Stop")).toBe("");
-	expect(prompt("codex", settings, checkout, "mapped", env, "Stop")).toBe("");
-	expect(JSON.parse(runMemory(enabled, "receipt")).record.status).toBe("candidate");
-	expect(readFileSync(captureLog, "utf8").trim().split("\n")).toHaveLength(1);
-
-	const noCapture = prompt("codex", settings, checkout, "no-capture", env);
-	runMemory(noCapture, "recall", { terms: ["mapping"] });
-	expect(prompt("codex", settings, checkout, "no-capture", env, "Stop")).toBe("");
-	expect(readFileSync(captureLog, "utf8").trim().split("\n")).toHaveLength(1);
+	expect(enabled).toContain("pharaoh_memory_recall");
+	expect(prompt(settings, checkout, env, "Stop")).toBe("");
 	expect(readFileSync(settings, "utf8")).toBe(installed);
 	const replacement = signIn("new-device-session");
 	expect(replacement.project_memory_session).not.toBe(pending.project_memory_session);
 	writeCredentials(replacement, credentialsFile);
 	expect(
-		prompt("codex", settings, checkout, "new-session", {
-			...env,
-			FIXTURE_OFFSET: "48000",
-			FIXTURE_STATUS: "denied",
-		}),
+		prompt(settings, checkout, { ...env, FIXTURE_OFFSET: "48000", FIXTURE_STATUS: "denied" }),
 	).toBe("");
-}, 15_000);
+	expect(readFileSync(requests, "utf8").trim().split("\n")).toEqual(
+		Array(4).fill("https://mcp.pharaoh.so/api/project-memory/readiness"),
+	);
+});

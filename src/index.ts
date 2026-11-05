@@ -65,12 +65,14 @@ const BANNER = [
 	"",
 ].join("\n");
 
-function reportMemorySetup(options: Parameters<typeof syncMemoryHooks>[0]): void {
+function reportMemorySetup(options?: Parameters<typeof syncMemoryHooks>[0]): boolean {
 	try {
 		const notices = syncMemoryHooks(options);
 		if (notices.length) printLines(...notices);
+		return notices.length === 0;
 	} catch {
 		printLines("Pharaoh: project memory setup could not update local activation.");
+		return false;
 	}
 }
 
@@ -102,6 +104,11 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	if (args.includes("--disable-memory-hooks")) {
+		if (!reportMemorySetup()) process.exitCode = 1;
+		return;
+	}
+
 	// Clean mode — remove all pharaoh traces from Claude Code config (MCP entries,
 	// disabled states, project-scoped configs). Useful for resetting broken installs.
 	if (args.includes("--clean")) {
@@ -110,7 +117,7 @@ async function main(): Promise<void> {
 		cleanSlate();
 		uninstallClaudePlugin();
 		cleanCodexSetup();
-		reportMemorySetup({ removeLegacy: true });
+		reportMemorySetup();
 		printLines("Pharaoh: local setup cleanup finished.");
 		process.exit(0);
 	}
@@ -125,7 +132,7 @@ async function main(): Promise<void> {
 		cleanSlate();
 		uninstallClaudePlugin();
 		cleanCodexSetup();
-		reportMemorySetup({ removeLegacy: true });
+		reportMemorySetup();
 		printLines("Pharaoh: credentials cleared and local setup cleanup finished.");
 		process.exit(0);
 	}
@@ -198,7 +205,7 @@ async function main(): Promise<void> {
 			);
 			if (claudeMd) printLines(claudeMd);
 		}
-		reportMemorySetup({ credentials: newCreds, clients });
+		reportMemorySetup({ credentials: newCreds, clients, enable: args.includes("--memory-hooks") });
 
 		// The registration is pinned to this version; upgrading is a deliberate
 		// re-run. Interactive only, and quiet when the registry can't be reached.

@@ -1,7 +1,7 @@
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleEvent } from "./hook-events.mjs";
-import { checkout, readStdin } from "./local.mjs";
+import { handleEvent, memoryReminder, skipMemoryPrompt } from "./hook-events.mjs";
+import { readStdin } from "./local.mjs";
 import {
 	activeMemoryRuntime,
 	readMemoryCredentials,
@@ -15,30 +15,29 @@ const exitQuietly = setTimeout(() => process.exit(0), Math.max(0, deadline - per
 try {
 	const [client, root, repo] = process.argv.slice(2);
 	const input = await readStdin(1024 * 1024);
-	const credentials = await readMemoryCredentials();
-	let target = { root, repo };
+	let result;
 	if (root === "--user") {
 		const runtime = dirname(fileURLToPath(import.meta.url));
 		if (!activeMemoryRuntime(client, runtime)) process.exit(0);
-		const isPrompt = input?.hook_event_name === "UserPromptSubmit";
+		if (input?.hook_event_name !== "UserPromptSubmit" || skipMemoryPrompt(input.prompt))
+			process.exit(0);
 		const eligible = await resolveMemoryHookTarget(
 			client,
 			input?.cwd,
-			credentials,
-			isPrompt && typeof input?.prompt === "string" && Boolean(input.prompt.trim()),
+			await readMemoryCredentials(),
+			true,
 			deadline,
 		);
-		// Cleanup must still close the turn after sign-out or loss of eligibility.
-		const resolved = eligible ?? (!isPrompt && checkout(input?.cwd, deadline));
-		if (!resolved) process.exit(0);
-		target = { ...resolved, runtime };
+		if (eligible && performance.now() < deadline) result = memoryReminder(eligible.repo);
+	} else {
+		result = handleEvent(input, {
+			client,
+			root,
+			repo,
+			credentials: await readMemoryCredentials(),
+			deadline,
+		});
 	}
-	const result = handleEvent(input, {
-		client,
-		...target,
-		credentials,
-		deadline,
-	});
 	if (result) process.stdout.write(JSON.stringify(result));
 } catch {
 	// Project memory never blocks ordinary work or opens a continuation.
