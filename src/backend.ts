@@ -47,11 +47,17 @@ export type DownstreamClient = {
 	};
 };
 
+type RequestOptions = { signal?: AbortSignal };
+
 /** The contract ProxyServer uses to delegate tool handling. */
 export interface Backend {
 	readonly name: "auth-required" | "sse";
-	listTools(): Promise<Tool[]>;
-	callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult>;
+	listTools(options?: RequestOptions): Promise<Tool[]>;
+	callTool(
+		name: string,
+		args: Record<string, unknown>,
+		options?: RequestOptions,
+	): Promise<CallToolResult>;
 	/** Optional one-time startup (e.g. connect SSE). Idempotent. */
 	start?(): Promise<void>;
 	/** Optional teardown (e.g. close SSE). Idempotent. */
@@ -148,6 +154,8 @@ export class AuthRequiredBackend implements Backend {
 
 /** Backoff schedule for reconnect attempts (milliseconds). Exported for tests. */
 export const BACKOFF_MS = [2000, 4000, 8000, 16000, 32000];
+// Each request waits only this long; the existing shared supervisor owns retries.
+const READINESS_TIMEOUT_MS = 15_000;
 
 /**
  * Build the SSEClientTransport with Bearer token auth. Injects the
@@ -195,6 +203,8 @@ export class SseProxyBackend implements Backend {
 	private downstream: DownstreamClient | null = null;
 	/** The client whose `connect` has finished; null while connecting or after its transport closed. */
 	private connectedClient: Client | null = null;
+	private readonly readyWaiters = new Set<() => void>();
+	private recoveryError: Error | null = null;
 	/** Set once a report fails; see reportClient. */
 	private reportsOff = false;
 
@@ -253,8 +263,9 @@ export class SseProxyBackend implements Backend {
 		this.reconnectPromise = this.runReconnectLoop();
 		// Surface typed errors at the top level so the CLI (or future
 		// supervisor) can act on them.
-		this.reconnectPromise.catch(() => {
-			/* error is retrieved via waitForExit() when needed */
+		this.reconnectPromise.catch((error: unknown) => {
+			this.recoveryError = error instanceof Error ? error : new Error("SSE recovery failed");
+			this.wakeWaiters();
 		});
 	}
 
@@ -293,6 +304,7 @@ export class SseProxyBackend implements Backend {
 		// A stop or a newer connect while this one was in flight owns the backend now.
 		if (this.stopped || this.client !== client) return;
 		this.connectedClient = client;
+		this.wakeWaiters();
 		// Every new upstream session (reconnects too) hears which client this is,
 		// without holding up startup or reconnect supervision.
 		void this.reportClient();
@@ -301,24 +313,36 @@ export class SseProxyBackend implements Backend {
 	/** Wait for the current transport to close, then decide what to do. */
 	private waitForClose(): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
-			if (!this.transport) {
+			if (!this.transport || !this.client) {
 				resolve();
 				return;
 			}
 			const sse = this.transport;
+			const client = this.client;
+			const disconnected = () => {
+				if (this.client !== client) return;
+				this.connectedClient = null;
+				this.wakeWaiters();
+			};
 			// The client is gone the moment its transport closes or errors,
 			// whichever way the loop then leaves (backoff or typed recovery).
+			// Preserve the SDK's transport chain so it clears state and rejects
+			// interrupted requests. Protocol errors (e.g. a canceled request's late
+			// response) must not tear down an otherwise healthy shared connection.
+			const onclose = sse.onclose;
+			const onerror = sse.onerror;
 			sse.onclose = () => {
-				this.connectedClient = null;
+				onclose?.();
+				disconnected();
 				resolve();
 			};
 			sse.onerror = (err) => {
-				this.connectedClient = null;
+				onerror?.(err);
+				disconnected();
 				try {
 					classifySSEError(err);
 				} catch (typed) {
 					reject(typed);
-					return;
 				}
 				// Non-fatal — explicitly close the transport to kill
 				// EventSource's built-in auto-reconnect. Without this,
@@ -326,7 +350,7 @@ export class SseProxyBackend implements Backend {
 				// on the server (100+ auth successes, zero tool calls
 				// completing). close() fires onclose which resolves this
 				// promise, handing control back to the backoff loop.
-				sse.close().catch(() => {});
+				sse.close().catch(reject);
 			};
 		});
 	}
@@ -384,21 +408,62 @@ export class SseProxyBackend implements Backend {
 		}
 	}
 
-	async listTools(): Promise<Tool[]> {
-		if (!this.client) throw new Error("SseProxyBackend.listTools() before start()");
-		const res = await this.client.listTools();
+	private wakeWaiters(): void {
+		for (const wake of this.readyWaiters) wake();
+	}
+
+	private async readyClient(signal?: AbortSignal): Promise<Client> {
+		const deadline = Date.now() + READINESS_TIMEOUT_MS;
+		while (true) {
+			signal?.throwIfAborted();
+			if (this.stopped) throw new Error("Pharaoh connection stopped");
+			if (this.recoveryError) throw this.recoveryError;
+			if (this.connectedClient) return this.connectedClient;
+			if (!this.client && !this.reconnectPromise) throw new Error("SseProxyBackend before start()");
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new Error("Pharaoh connection is still recovering");
+			await new Promise<void>((resolve, reject) => {
+				const finish = (error?: unknown) => {
+					clearTimeout(timer);
+					this.readyWaiters.delete(wake);
+					signal?.removeEventListener("abort", abort);
+					if (error !== undefined) reject(error);
+					else resolve();
+				};
+				const wake = () => finish();
+				const abort = () => finish(signal?.reason);
+				const timer = setTimeout(
+					() => finish(new Error("Pharaoh connection is still recovering")),
+					remaining,
+				);
+				this.readyWaiters.add(wake);
+				signal?.addEventListener("abort", abort, { once: true });
+			});
+		}
+	}
+
+	async listTools(options?: RequestOptions): Promise<Tool[]> {
+		const client = await this.readyClient(options?.signal);
+		const res = await client.listTools(undefined, options);
 		return res.tools;
 	}
 
-	async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
-		if (!this.client) throw new Error("SseProxyBackend.callTool() before start()");
-		const res = await this.client.callTool({ name, arguments: args });
+	async callTool(
+		name: string,
+		args: Record<string, unknown>,
+		options?: RequestOptions,
+	): Promise<CallToolResult> {
+		const client = await this.readyClient(options?.signal);
+		// Dispatch exactly once. An interrupted write has an uncertain outcome;
+		// recovery is for subsequent requests, never an implicit replay.
+		const res = await client.callTool({ name, arguments: args }, undefined, options);
 		return res as CallToolResult;
 	}
 
 	async stop(): Promise<void> {
 		this.stopped = true;
 		this.connectedClient = null;
+		this.wakeWaiters();
 		if (this.transport) {
 			await this.transport.close().catch(() => {});
 			this.transport = null;

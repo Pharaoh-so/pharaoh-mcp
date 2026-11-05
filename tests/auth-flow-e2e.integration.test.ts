@@ -98,6 +98,8 @@ interface MockState {
 	clientReportSessions: string[];
 	/** If set, the server rejects notifications/pharaoh/client with a 500. */
 	failClientReport: boolean;
+	toolCalls: Array<{ name: string; arguments?: Record<string, unknown> }>;
+	holdCapture: boolean;
 }
 
 interface MockServer {
@@ -129,6 +131,8 @@ async function startMockServer(): Promise<MockServer> {
 		clientReports: [],
 		clientReportSessions: [],
 		failClientReport: false,
+		toolCalls: [],
+		holdCapture: false,
 	};
 
 	const ctx: { mcpSession: MockServer["mcpSession"]; baseUrl: string } = {
@@ -254,24 +258,27 @@ async function startMockServer(): Promise<MockServer> {
 							},
 						],
 					}));
-					mcp.setRequestHandler(CallToolRequestSchema, async (req2) => ({
-						content: [
-							{
-								type: "text",
-								text: `mock pharaoh: tool=${req2.params.name}`,
-							},
-						],
-						isError: false,
-						...(Array.isArray(
-							mcp.getClientCapabilities()?.extensions?.["io.modelcontextprotocol/ui"]?.mimeTypes,
-						) &&
-						(
-							mcp.getClientCapabilities()?.extensions?.["io.modelcontextprotocol/ui"]
-								?.mimeTypes as string[]
-						).includes("text/html;profile=mcp-app")
-							? { _meta: { test_trace: { version: "1.1", label: "module" }, empty: false } }
-							: {}),
-					}));
+					mcp.setRequestHandler(CallToolRequestSchema, async (req2, extra) => {
+						state.toolCalls.push({ name: req2.params.name, arguments: req2.params.arguments });
+						if (state.holdCapture && req2.params.name === "pharaoh_memory_capture") {
+							await new Promise<void>((resolve) =>
+								extra.signal.addEventListener("abort", () => resolve(), { once: true }),
+							);
+						}
+						return {
+							content: [{ type: "text", text: `mock pharaoh: tool=${req2.params.name}` }],
+							isError: false,
+							...(Array.isArray(
+								mcp.getClientCapabilities()?.extensions?.["io.modelcontextprotocol/ui"]?.mimeTypes,
+							) &&
+							(
+								mcp.getClientCapabilities()?.extensions?.["io.modelcontextprotocol/ui"]
+									?.mimeTypes as string[]
+							).includes("text/html;profile=mcp-app")
+								? { _meta: { test_trace: { version: "1.1", label: "module" }, empty: false } }
+								: {}),
+						};
+					});
 					const transport = new SSEServerTransport("/sse/messages", res);
 					ctx.mcpSession = { server: mcp, transport };
 					await mcp.connect(transport);
@@ -644,22 +651,83 @@ describe("auth-flow E2E", () => {
 		// swap replaces never takes a tool call, so reporting it would halve pickup.
 		await expect.poll(() => mockServer.state.clientReports).toEqual([report]);
 
+		const capture = {
+			repo: "acme/repo-1",
+			operationId: "11111111-1111-4111-8111-111111111111",
+			kind: "lesson",
+			summary: "A dropped response leaves the write outcome uncertain.",
+		};
+		const connections = mockServer.state.sseGetCount;
+		let captureEndedBeforeReconnect = false;
+		const interrupted = harness
+			.waitForResponse(2, 5000)
+			.then((response) => {
+				captureEndedBeforeReconnect = mockServer.state.sseGetCount === connections;
+				return response;
+			})
+			.catch(() => ({ timedOut: true }));
+		mockServer.state.holdCapture = true;
+		harness.writeMessage({
+			jsonrpc: "2.0",
+			id: 2,
+			method: "tools/call",
+			params: { name: "pharaoh_memory_capture", arguments: capture },
+		});
+		await expect.poll(() => mockServer.state.toolCalls.length).toBe(2);
 		await mockServer.mcpSession?.transport.close();
+		await expect.poll(() => harness?.stderr.join("")).toContain("reconnecting in 2s");
+		mockServer.state.holdCapture = false;
+		// Ordered stdio messages cancel this queued write before recovery can dispatch it.
+		harness.writeMessage({
+			jsonrpc: "2.0",
+			id: 5,
+			method: "tools/call",
+			params: {
+				name: "pharaoh_memory_capture",
+				arguments: {
+					...capture,
+					operationId: "22222222-2222-4222-8222-222222222222",
+				},
+			},
+		});
+		harness.writeMessage({
+			jsonrpc: "2.0",
+			method: "notifications/cancelled",
+			params: { requestId: 5 },
+		});
+		const proxy = harness;
+		const pending = [3, 4].map((id) => {
+			const response = proxy.waitForResponse(id);
+			proxy.writeMessage({
+				jsonrpc: "2.0",
+				id,
+				method: "tools/call",
+				params: { name: "get_codebase_map", arguments: {} },
+			});
+			return response;
+		});
 		await expect
 			.poll(() => mockServer.state.initializedCapabilities.length, { timeout: 8000 })
 			.toBe(ui ? 3 : 2);
 		expect(mockServer.state.initializedCapabilities.at(-1)).toEqual(negotiated);
 		await expect.poll(() => mockServer.state.clientReports).toEqual([report, report]);
 		expect(new Set(mockServer.state.clientReportSessions).size).toBe(2);
-		harness.writeMessage({
-			jsonrpc: "2.0",
-			id: 2,
-			method: "tools/call",
-			params: { name: "get_codebase_map", arguments: {} },
+		for (const response of await Promise.all(pending)) {
+			expect(response.error).toBeUndefined();
+			expect(response.result).toMatchObject({ content: result.content });
+			expect((response.result as Record<string, unknown>)._meta).toEqual(resultMeta);
+		}
+		expect(await interrupted).toMatchObject({
+			error: { message: expect.stringContaining("Connection closed") },
 		});
-		const reconnected = (await harness.waitForResponse(2)).result as Record<string, unknown>;
-		expect(reconnected.content).toEqual(result.content);
-		expect(reconnected._meta).toEqual(resultMeta);
+		expect(captureEndedBeforeReconnect).toBe(true);
+		expect(mockServer.state.sseGetCount).toBe(connections + 1);
+		expect(mockServer.state.toolCalls).toEqual([
+			{ name: "get_codebase_map", arguments: {} },
+			{ name: "pharaoh_memory_capture", arguments: capture },
+			{ name: "get_codebase_map", arguments: {} },
+			{ name: "get_codebase_map", arguments: {} },
+		]);
 	});
 
 	it("scenario 2 — refresh-expired credentials trigger auth-required mode cleanly", async () => {

@@ -38,30 +38,23 @@ function responseText(value) {
 		: [];
 }
 
-function mappedRevision(input, target, repos) {
+function mappedRevision(input, target) {
 	const requested = input.tool_input?.repo;
 	if (typeof requested !== "string") return;
 	const full = target.repo.toLowerCase();
 	const short = full.split("/")[1];
-	if (requested.toLowerCase() !== full) {
-		if (requested.toLowerCase() !== short) return;
-		const matches = new Set(
-			repos
-				.filter((repo) => typeof repo === "string")
-				.map((repo) => repo.toLowerCase())
-				.filter((repo) => repo.split("/").at(-1) === short),
-		);
-		if (matches.size !== 1 || !matches.has(full)) return;
-	}
-	const maps = responseText(input.tool_response).filter((text) =>
-		text
-			.split(/\r?\n/)
-			.some((line) =>
-				[`# ${short} codebase map`, `# ${full} codebase map`].includes(line.toLowerCase()),
-			),
-	);
-	if (maps.length !== 1) return;
-	const revisions = [...maps[0].matchAll(/^Indexed commit: ([^\r\n]+)\r?$/gm)];
+	const fullRequest = requested.toLowerCase() === full;
+	if (!fullRequest && requested.toLowerCase() !== short) return;
+	const maps = responseText(input.tool_response).flatMap((text) => {
+		const headers = [...text.matchAll(/^# (.+) Codebase Map\r?$/gim)];
+		return headers.length ? [{ text, headers }] : [];
+	});
+	if (maps.length !== 1 || maps[0].headers.length !== 1) return;
+	const header = maps[0].headers[0][1].toLowerCase();
+	// Credential repo hints can omit organizations. Only canonical output proves
+	// which repo a short request resolved to; full requests keep legacy support.
+	if (header !== full && !(fullRequest && header === short)) return;
+	const revisions = [...maps[0].text.matchAll(/^Indexed commit: ([^\r\n]+)\r?$/gm)];
 	const revision = revisions.length === 1 && revisions[0][1];
 	if (revision && SHA.test(revision)) return revision.toLowerCase();
 }
@@ -199,7 +192,6 @@ export function worktreeCue(
 		client,
 		target,
 		binding,
-		repos = [],
 		stateDirectory,
 		structuralSearch,
 		deadline = Infinity,
@@ -212,7 +204,7 @@ export function worktreeCue(
 	const event = input.hook_event_name;
 	const search = event === "PreToolUse" && structuralSearch;
 	const revision =
-		event === "PostToolUse" && input.tool_name === MAP_TOOL && mappedRevision(input, target, repos);
+		event === "PostToolUse" && input.tool_name === MAP_TOOL && mappedRevision(input, target);
 	const paths = event === "PostToolUse" ? editedPaths(input, client, target.root) : [];
 	if (!search && !revision && !paths.length) return;
 	const key = digest(`${binding}\0${session}\0${target.root}\0${target.repo.toLowerCase()}`);
