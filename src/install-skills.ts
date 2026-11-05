@@ -776,6 +776,7 @@ export const PHARAOH_ALLOW_RULES: readonly string[] = [
 	"mcp__pharaoh__get_unused_code",
 	"mcp__pharaoh__pharaoh_recon",
 	"mcp__pharaoh__pharaoh_account",
+	"mcp__pharaoh__pharaoh_setup",
 ];
 
 /** The prefix rule proxies 0.3.46 and earlier wrote on every start; replaced by the list above. */

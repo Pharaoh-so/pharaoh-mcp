@@ -258,11 +258,10 @@ async function main(): Promise<void> {
 
 		printLines(
 			"",
-			"Pharaoh is ready. Try these in a new conversation:",
+			// The server's SETUP_TOOL_PROMPT (src/install-commands.ts); pharaoh_setup does the rest.
+			"Pharaoh is ready. In a new conversation in your repo, ask your agent:",
 			"",
-			'  "What modules does this codebase have?"',
-			'  "Search for functions related to authentication"',
-			'  "What breaks if I change this file?"',
+			'  "Run the Pharaoh setup tool"',
 			"",
 		);
 		process.exit(0);

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "b02cd8cab753de258880cb31e710a5303039355c",
-  "payloadSha256": "caa7ca4384501a9a876290e18b5cc0fbff5d97d1249a75e88691b98d7ba19df3",
+  "commit": "01fbf4e6376ebee526b674e4257c403b7900246e",
+  "payloadSha256": "9a4f3fb32aa3876d938b79fd3b737e8951f8a4e0097a3fe4a50fb917227a2864",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "3a0b39984292391a5697d24958a1e6ba0b309fa1f51cab7b690092884f8afb1d",
+      "sha256": "d7cf686ab57a05eacb6736b9783c65fa0cc4f3da5087ea64e97feaabb050ca74",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "b8a59e26a2abe3791421d76cb0054f3bc8a82ea60e885ac56eeca466965d3ed3",
+      "sha256": "ebdc799f79b003ee16972bd433583a4b9b2d22fa7e7c5dea805462b2b1b1fb68",
       "mode": "100644"
     },
     {
@@ -51,7 +51,7 @@
     },
     {
       "path": "inspect-tools.json",
-      "sha256": "68944b0bb1d40641f9ec01ff2384ddd282f387dd3ab2c31410348c07d52a874e",
+      "sha256": "54cca6955fe482d8d4fa9917f8a9ce2657074f9523053d641fff040a513cb72d",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "6b2b299b1d076cbf47c36696f705a4a7f265823e003f912aea947b7d2160dc64",
+      "sha256": "5b9c46cea0638f630daf9be634297c94c79d989b3c1c26a4532c90949331b239",
       "mode": "100644"
     },
     {
@@ -106,7 +106,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "2f4f6299ab3a65b82d8a04ade6022e2328f093ce42b106ea319bd21b08f226b3",
+      "sha256": "f10a9e3e9247867c3fce2a58046936b827097d9ac5ff6146a427b2cba2533b47",
       "mode": "100644"
     },
     {
@@ -296,7 +296,7 @@
     },
     {
       "path": "src/index.ts",
-      "sha256": "730604b5c985c75105b1a50fb88c438b7e17491fdfe4d2bfe149c108365d2ea1",
+      "sha256": "cf68c940350b4b4096e8b86bca44f365dd45a9c2a698dcb6f34e254ba6ba2660",
       "mode": "100644"
     },
     {
@@ -306,7 +306,7 @@
     },
     {
       "path": "src/install-skills.ts",
-      "sha256": "81f44b2a44792f639664bf6508547c1e625e417ab30d3f0ac3a1394f2a482ded",
+      "sha256": "0b37d0db925b09c03ddd76ced64d6f8abb49a2ab4953920af64612d709330ea0",
       "mode": "100644"
     },
     {
@@ -366,7 +366,7 @@
     },
     {
       "path": "tests/install-skills.test.ts",
-      "sha256": "8b00efae43b14f30a552884b8032c7d6a00583ea9f75e77681811a76e3b2174f",
+      "sha256": "5ffd0bb574e2c63dbec5a61d2b775ccd89ac79b110101a51ce30af2d4f1185c6",
       "mode": "100644"
     },
     {
