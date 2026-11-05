@@ -936,14 +936,15 @@ describe("the Pharaoh-first line in ~/.claude/CLAUDE.md (interactive setup only)
 	});
 
 	it("askYesNo: Enter is yes, n is no, anything else asks again, EOF is no answer", async () => {
-		const reply = async (input: string, end = false) => {
+		const reply = async (input: string, end = false, defaultAnswer = true) => {
 			const stdin = new PassThrough();
-			const answer = askYesNo("Add it? [Y/n] ", stdin, new PassThrough());
+			const answer = askYesNo("Add it? ", stdin, new PassThrough(), defaultAnswer);
 			stdin.write(input);
 			if (end) stdin.end();
 			return answer;
 		};
 		expect(await reply("\n")).toBe(true);
+		expect(await reply("\n", false, false)).toBe(false);
 		expect(await reply("N\n")).toBe(false);
 		expect(await reply("maybe\n", true)).toBe(null);
 	});

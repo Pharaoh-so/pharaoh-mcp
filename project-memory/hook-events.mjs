@@ -52,7 +52,7 @@ export function memoryReminder(repo) {
 	return {
 		hookSpecificOutput: {
 			hookEventName: "UserPromptSubmit",
-			additionalContext: `For work in ${repo}, use pharaoh_memory_recall if prior decisions may matter. Use pharaoh_memory_expand if you need the full record, and pharaoh_memory_capture for one supported candidate when the task permits. Mention memory only when it changes a decision.`,
+			additionalContext: `For work in ${repo}, call pharaoh_memory_recall before source inspection when prior decisions could matter. Use specific, non-sensitive terms. Use pharaoh_memory_expand only for needed evidence and pharaoh_memory_capture for one supported candidate when the user permits a write. Mention memory only if it changes a decision.`,
 		},
 	};
 }

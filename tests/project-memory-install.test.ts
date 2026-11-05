@@ -17,7 +17,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { syncMemoryHooks } from "../project-memory/setup.mjs";
+import { worktreeCue } from "../project-memory/graph-cues.mjs";
+import { readHookPreferences, resetHookPreferences } from "../project-memory/preferences.mjs";
+import {
+	applyMemoryHookChoices,
+	chooseMemoryHooks,
+	syncMemoryHooks,
+} from "../project-memory/setup.mjs";
 import { type Credentials, writeCredentials } from "../src/credentials.js";
 import { tokenToCredentials } from "../src/helpers.js";
 
@@ -32,12 +38,7 @@ function git(...args: string[]): string {
 	return execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8" }).trim();
 }
 
-beforeEach(() => {
-	home = realpathSync(mkdtempSync(join(tmpdir(), "pharaoh-memory-install-")));
-	checkout = join(home, "checkout");
-	mkdirSync(checkout);
-	git("init", "-q");
-	git("remote", "add", "origin", `https://github.com/${repo}.git`);
+function commitFixture() {
 	git(
 		"-c",
 		"user.name=Fixture",
@@ -48,12 +49,23 @@ beforeEach(() => {
 		"-qm",
 		"seed",
 	);
+}
+
+beforeEach(() => {
+	home = realpathSync(mkdtempSync(join(tmpdir(), "pharaoh-memory-install-")));
+	checkout = join(home, "checkout");
+	mkdirSync(checkout);
+	git("init", "-q");
+	git("remote", "add", "origin", `https://github.com/${repo}.git`);
+	commitFixture();
 	const pkg = join(home, "package");
 	packageRoot = pathToFileURL(`${pkg}/`);
 	mkdirSync(join(pkg, "dist"), { recursive: true });
 	cpSync(new URL("../project-memory/", import.meta.url), join(pkg, "project-memory"), {
 		recursive: true,
 	});
+	mkdirSync(join(pkg, "hooks"));
+	cpSync(new URL("../hooks/route-grep.mjs", import.meta.url), join(pkg, "hooks/route-grep.mjs"));
 	writeFileSync(join(pkg, "dist/refresh.js"), "export function originBoundRefresh() {}\n");
 	writeFileSync(
 		join(pkg, "dist/credentials.js"),
@@ -121,6 +133,118 @@ function prompt(
 	});
 }
 
+it("runs the worktree cue from the installed, activated bundle", () => {
+	writeCredentials(
+		{ ...credentials, project_memory_session: "79d35b00-e832-4b5b-972d-acbb9ec59622" },
+		join(home, ".pharaoh/credentials.json"),
+	);
+	configure({ enable: true, clients: ["codex"], graphClients: ["codex"] });
+	const settings = join(home, ".codex/hooks.json");
+	const run = (command: string, env: NodeJS.ProcessEnv = {}) =>
+		execFileSync("/bin/sh", ["-c", hookCommand(settings, "PreToolUse")], {
+			cwd: checkout,
+			env: { ...process.env, HOME: home, ...env },
+			encoding: "utf8",
+			input: JSON.stringify({
+				hook_event_name: "PreToolUse",
+				cwd: checkout,
+				session_id: "graph-session",
+				tool_name: "Bash",
+				tool_input: { command },
+			}),
+		});
+	const trace = join(home, "git-started");
+	const probe = join(home, "probe.cjs");
+	writeFileSync(
+		probe,
+		`require("node:child_process").execFileSync = () => {
+		require("node:fs").writeFileSync(${JSON.stringify(trace)}, "started");
+		throw new Error("Unexpected subprocess");
+	};
+	require("node:module").syncBuiltinESMExports();`,
+	);
+	for (const search of [
+		"pwd",
+		"rg -F 'function readWidget'",
+		"rg 'function readWidget' -F",
+		"rg 'readWidget'",
+		"rg 'function readWidget' docs/",
+		"rg 'function readWidget' app.config.ts",
+		"rg 'function readWidget' ../another-repo",
+		"rg 'function readWidget' | head",
+		"rg -g '*.{ts,json}' 'function readWidget'",
+	])
+		expect(run(search, { NODE_OPTIONS: `--require="${probe}"` })).toBe("");
+	expect(existsSync(trace)).toBe(false);
+	const command = "rg -n 'function readWidget'";
+	expect(JSON.parse(run(command)).hookSpecificOutput).toEqual({
+		hookEventName: "PreToolUse",
+		additionalContext: expect.stringContaining("search_functions"),
+	});
+	expect(run(command)).toBe("");
+	resetHookPreferences(true, home);
+	expect(run("rg 'function anotherWidget'")).toBe("");
+});
+
+it("advises once on a changed indexed file without invoking a configured Git filter", () => {
+	const file = "secret-path.ts";
+	writeFileSync(join(checkout, file), "export function temporary() {}\n");
+	git("add", file);
+	commitFixture();
+	const revision = git("rev-parse", "HEAD");
+	const filter = join(home, "filter-started");
+	git("config", "filter.pilot.clean", `touch "${filter}" && cat`);
+	writeFileSync(join(checkout, ".gitattributes"), `${file} filter=pilot\n`);
+	const stateDirectory = join(home, ".pharaoh/project-memory-client");
+	const options = {
+		client: "codex",
+		target: { root: checkout, repo },
+		binding: "fixture",
+		repos: [repo],
+		stateDirectory,
+	};
+	const cue = (input: object, overrides = {}) =>
+		worktreeCue(
+			{ hook_event_name: "PostToolUse", session_id: "same-session", cwd: checkout, ...input },
+			{ ...options, ...overrides },
+		);
+	const map = {
+		tool_name: "mcp__pharaoh__get_codebase_map",
+		tool_input: { repo },
+		tool_response: {
+			content: [{ type: "text", text: `# project Codebase Map\nIndexed commit: ${revision}` }],
+		},
+	};
+	const patch = (path: string) => ({
+		tool_name: "apply_patch",
+		tool_input: { command: `*** Begin Patch\n*** Update File: ${path}\n*** End Patch\n` },
+		tool_response: "Success. Updated the following files:",
+	});
+	writeFileSync(join(checkout, file), "export function temporary() { return 1; }\n");
+	cue({ ...map, tool_input: { repo: "other/project" } });
+	cue({ ...map, tool_input: { repo: "project" } }, { repos: [repo, "other/project"] });
+	cue({ ...map, tool_response: { ...map.tool_response, isError: true } });
+	expect(cue(patch(file))).toBeUndefined();
+	cue(map);
+	expect(cue({ ...patch(file), tool_response: "Failed to apply patch" })).toBeUndefined();
+	expect(cue(patch("unchanged.ts"))).toBeUndefined();
+	expect(
+		cue(patch(file), {
+			git: (_cwd: string, deadline: number) => {
+				expect(deadline - performance.now()).toBeLessThanOrEqual(300);
+				throw new Error("Git timeout");
+			},
+		}),
+	).toBeUndefined();
+	expect(cue(patch(file))?.hookSpecificOutput.additionalContext).toContain(revision.slice(0, 12));
+	expect(cue(patch(file))).toBeUndefined();
+	writeFileSync(join(checkout, "new.ts"), "export {}\n");
+	expect(cue(patch("new.ts"))?.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+	expect(cue(patch("settings.json"))).toBeUndefined();
+	expect(existsSync(filter)).toBe(false);
+	expect(readFileSync(join(stateDirectory, "worktree-cues.json"), "utf8")).not.toContain(file);
+});
+
 function commandHook(command: string) {
 	return { type: "command", command };
 }
@@ -148,11 +272,94 @@ function legacySettings() {
 	return path;
 }
 
-it("installs no memory hooks by default even for the pilot", () => {
-	expect(configure()).toEqual([]);
-	expect(existsSync(join(home, ".claude"))).toBe(false);
-	expect(existsSync(join(home, ".codex"))).toBe(false);
-	expect(existsSync(join(home, ".pharaoh/project-memory-client"))).toBe(false);
+function choose(options: Partial<Parameters<typeof chooseMemoryHooks>[0]> = {}) {
+	return chooseMemoryHooks({
+		credentials,
+		clients: ["codex"],
+		home,
+		env: {},
+		ask: async () => {
+			throw new Error("Unexpected prompt");
+		},
+		...options,
+	});
+}
+
+it("remembers the recommended memory choice and offers independent default-no worktree cues", async () => {
+	const defaults: boolean[] = [];
+	const decision = await choose({
+		ask: async (_, defaultAnswer) => {
+			defaults.push(defaultAnswer);
+			return defaultAnswer;
+		},
+	});
+	expect(defaults).toEqual([true, false]);
+	expect(decision).toMatchObject({ accepted: ["codex"], declined: [], graphClients: [] });
+	configure({ enable: true, clients: decision.accepted, graphClients: decision.graphClients });
+	expect(await choose()).toEqual(decision);
+});
+
+function applyChoice(decision: Awaited<ReturnType<typeof choose>>, creds = credentials) {
+	return applyMemoryHookChoices(decision, {
+		home,
+		cwd: checkout,
+		env: {},
+		credentials: creds,
+		packageRoot,
+	});
+}
+
+it("honors an opt-out saved after setup answers and re-offers cues only when requested", async () => {
+	const accepted = await choose({ ask: async () => true });
+	resetHookPreferences(true, home);
+	applyChoice(accepted);
+	expect(existsSync(join(home, ".codex/hooks.json"))).toBe(false);
+	expect((await choose()).declined).toEqual(["codex"]);
+	applyChoice(await choose({ requested: true, ask: async () => true }));
+	const path = join(home, ".codex/hooks.json");
+	const config = JSON.parse(readFileSync(path, "utf8"));
+	expect(config.hooks.PreToolUse).toHaveLength(1);
+	const unrelated = [{ hooks: [commandHook("keep-unrelated-cue")] }];
+	config.hooks.PostToolUse = unrelated;
+	writeFileSync(path, JSON.stringify(config));
+	applyChoice(await choose({ ask: async () => null }));
+	const hooks = JSON.parse(readFileSync(path, "utf8")).hooks;
+	expect(hooks.PreToolUse).toBeUndefined();
+	expect(hooks.PostToolUse).toEqual(unrelated);
+	expect(hooks.UserPromptSubmit).toHaveLength(1);
+});
+
+it("preserves setup after a temporary eligibility failure and deactivates both clients after grant loss", async () => {
+	const clients = ["claude-code", "codex"];
+	applyChoice(await choose({ clients, ask: async () => true }));
+	const before = readHookPreferences(home);
+	const activation = join(home, ".pharaoh/project-memory-client/active.json");
+	const noGrant = { ...credentials, project_memory: undefined };
+	const unavailable = { ...noGrant, project_memory_status: "unavailable" as const };
+	applyChoice(await choose({ clients: ["claude-code"], credentials: unavailable }), unavailable);
+	expect(existsSync(activation)).toBe(true);
+	applyChoice(await choose({ clients: ["claude-code"], credentials: noGrant }), noGrant);
+	expect(existsSync(activation)).toBe(false);
+	for (const path of [".codex/hooks.json", ".claude/settings.json"])
+		expect(JSON.parse(readFileSync(join(home, path), "utf8")).hooks).toEqual({});
+	expect(readHookPreferences(home)).toEqual(before);
+});
+
+it("preserves declines through cleanup", async () => {
+	const answers = [false, true, true];
+	await choose({ clients: ["claude-code", "codex"], ask: async () => answers.shift() ?? null });
+	resetHookPreferences(false, home);
+	expect(readHookPreferences(home)).toEqual({ "claude-code": { memory: false } });
+});
+
+it("requires consent for legacy or missing hooks and respects native disable", async () => {
+	configure({ enable: true });
+	expect((await choose({ ask: async () => null })).accepted).toEqual([]);
+	await choose({ requested: true, ask: async () => false });
+	writeFileSync(join(home, ".codex/hooks.json"), '{"hooks":{"Notification":[]}}');
+	expect((await choose({ ask: async () => null })).accepted).toEqual([]);
+	writeFileSync(join(home, ".claude/settings.json"), '{"disableAllHooks":true}');
+	expect((await choose({ clients: ["claude-code"], requested: true })).accepted).toEqual([]);
 });
 
 it("removes owned pilot hooks during default setup without changing unrelated settings", () => {
@@ -197,7 +404,7 @@ it("removes owned pilot hooks during default setup without changing unrelated se
 	writeFileSync(elsewhereSettings, elsewhereConfig);
 	const credentialsFile = join(home, ".pharaoh/credentials.json");
 	const originalCredentials = readFileSync(credentialsFile, "utf8");
-	expect(configure({ credentials: undefined, clients: [] })).toEqual([]);
+	expect(configure({ credentials: undefined })).toEqual([]);
 	expect(JSON.parse(readFileSync(codex, "utf8"))).toEqual({
 		hooks: {
 			UserPromptSubmit: [{ hooks: [keep] }],
@@ -326,6 +533,10 @@ it("disables quietly with unrelated linked settings and fails for known linked h
 	const clean = disable();
 	expect(clean).toMatchObject({ status: 0, stdout: "", stderr: "" });
 	expect(readFileSync(external, "utf8")).toBe(unrelated);
+	expect(readHookPreferences(home)).toEqual({
+		"claude-code": { memory: false, graph: false },
+		codex: { memory: false, graph: false },
+	});
 
 	const managed = JSON.stringify({
 		hooks: {
@@ -374,15 +585,9 @@ it("opts in to one MCP reminder per client and scopes it to eligible worktrees",
 });
 
 it("can opt in from an unrelated repository rooted at the user's home", () => {
-	execFileSync("git", ["-C", home, "init", "-q"]);
-	execFileSync("git", [
-		"-C",
-		home,
-		"remote",
-		"add",
-		"origin",
-		"https://github.com/fixture/dotfiles.git",
-	]);
+	const dotfiles = "https://github.com/fixture/dotfiles.git";
+	execFileSync("git", ["init", "-q", home]);
+	execFileSync("git", ["-C", home, "remote", "add", "origin", dotfiles]);
 	expect(configure({ cwd: home, clients: ["codex"], enable: true }).join(" ")).toContain(
 		"memory reminders are set up",
 	);
