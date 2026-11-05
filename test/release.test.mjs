@@ -240,6 +240,19 @@ test("reads actual npm 12 pack JSON and rejects multiple or misidentified packag
 	assert.throws(() => readPackResult([{ ...packed, filename: "../other.tgz" }], version));
 });
 
+test("diagnostic runtime is an exact complete pair bound to verified source", () => {
+	const diagnostics = ["project-memory/diagnostics-collector.mjs", "project-memory/diagnostics-sender.mjs"];
+	const complete = [...paths, ...diagnostics];
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths(complete, [], complete);
+	for (const omitted of diagnostics) {
+		assert.throws(() => verifyPackPaths(complete.filter((path) => path !== omitted), [], complete));
+		assert.throws(() => verifyPackPaths(complete, [], complete.filter((path) => path !== omitted)));
+	}
+	assert.throws(() => verifyPackPaths(complete, [], paths), /absent from the verified source/);
+	assert.throws(() => verifyPackPaths([...complete, "project-memory/diagnostics-credentials.json"]));
+});
+
 test("release intent uses immutable previous package versions and skips maintenance/PR publication", () => {
 	const root = mkdtempSync(join(tmpdir(), "pharaoh-release-intent-"));
 	const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
