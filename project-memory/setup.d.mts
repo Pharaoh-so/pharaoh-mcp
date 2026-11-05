@@ -5,10 +5,10 @@ export function syncMemoryHooks(options?: {
 		project_memory_status?: "unavailable";
 	};
 	clients?: string[];
+	enable?: boolean;
 	home?: string;
 	env?: NodeJS.ProcessEnv;
 	cwd?: string;
 	node?: string;
-	removeLegacy?: boolean;
 	packageRoot?: URL;
 }): string[];

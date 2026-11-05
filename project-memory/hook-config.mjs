@@ -20,15 +20,29 @@ function hookCommand(entry) {
 	return entry?.type === "command" && typeof entry.command === "string" ? entry.command : "";
 }
 
+function matchesLegacyHook(client, root) {
+	const suffix = ` ${legacyMarker(client, root)}`;
+	return (value) => value.includes("pharaoh-memory-hook.mjs") && value.endsWith(suffix);
+}
+
+function matchesUserHook(value) {
+	return (
+		value.includes("pharaoh-memory-hook.mjs") &&
+		(value.endsWith(` ${GLOBAL_MARKER}`) || LEGACY_MARKER.test(value))
+	);
+}
+
 /** Keep unrelated handlers even when they share an event group with ours. */
-function replaceHooks(config, client, matches, command) {
+function replaceHooks(config, client, matches, command, installEvents = EVENTS[client]) {
 	if (!isObject(config) || (config.hooks !== undefined && !isObject(config.hooks))) {
 		throw new Error("The existing hooks configuration is not a JSON object.");
 	}
 	const hooks = { ...config.hooks };
 	for (const event of EVENTS[client]) {
 		const current = hooks[event];
-		if (current === undefined && !command) continue;
+		const install = command && installEvents.includes(event);
+		if (!install && (current === undefined || (Array.isArray(current) && !current.length)))
+			continue;
 		if (
 			current !== undefined &&
 			(!Array.isArray(current) || current.some((group) => !Array.isArray(group?.hooks)))
@@ -40,7 +54,7 @@ function replaceHooks(config, client, matches, command) {
 			if (rest.length === group.hooks.length) return [group];
 			return rest.length ? [{ ...group, hooks: rest }] : [];
 		});
-		if (command) kept.push({ hooks: [{ type: "command", command, timeout: 3 }] });
+		if (install) kept.push({ hooks: [{ type: "command", command, timeout: 3 }] });
 		if (kept.length) hooks[event] = kept;
 		else delete hooks[event];
 	}
@@ -55,37 +69,33 @@ export function updateHooks(config, client, target, remove, hookPath, node = pro
 	const command = remove
 		? null
 		: `${[node, hookPath, client, target.root, target.repo].map(shellWord).join(" ")} ${marker}`;
-	return replaceHooks(config, client, (value) => value.endsWith(` ${marker}`), command);
+	return replaceHooks(config, client, matchesLegacyHook(client, target.root), command);
 }
 
 export function updateUserHooks(config, client, hookPath, node = process.execPath) {
 	const command = hookPath
 		? `${[node, hookPath, client, "--user"].map(shellWord).join(" ")} ${GLOBAL_MARKER}`
 		: null;
-	return replaceHooks(
-		config,
-		client,
-		(value) =>
-			value.endsWith(` ${GLOBAL_MARKER}`) ||
-			(value.includes("pharaoh-memory-hook.mjs") && LEGACY_MARKER.test(value)),
-		command,
-	);
+	return replaceHooks(config, client, matchesUserHook, command, ["UserPromptSubmit"]);
 }
 
-export function hasLegacyHooks(config, client, root) {
-	const suffix = ` ${legacyMarker(client, root)}`;
+function hasHooks(config, client, matches) {
 	return EVENTS[client].some((event) => {
 		const groups = config?.hooks?.[event];
 		return (
 			Array.isArray(groups) &&
 			groups.some(
 				(group) =>
-					Array.isArray(group?.hooks) &&
-					group.hooks.some((entry) => {
-						const command = hookCommand(entry);
-						return command.includes("pharaoh-memory-hook.mjs") && command.endsWith(suffix);
-					}),
+					Array.isArray(group?.hooks) && group.hooks.some((entry) => matches(hookCommand(entry))),
 			)
 		);
 	});
+}
+
+export function hasLegacyHooks(config, client, root) {
+	return hasHooks(config, client, matchesLegacyHook(client, root));
+}
+
+export function hasUserHooks(config, client) {
+	return hasHooks(config, client, matchesUserHook);
 }

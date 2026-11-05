@@ -33,7 +33,7 @@ export function projectMemorySession(credentials) {
 		return session;
 }
 
-function matchingHint(target, hints) {
+export function matchingMemoryHint(target, hints) {
 	return hints.find(
 		(entry) =>
 			typeof entry?.repo === "string" && entry.repo.toLowerCase() === target.repo.toLowerCase(),
@@ -49,12 +49,6 @@ function hasMappedCommit(target, revision, deadline = Infinity) {
 	} catch {
 		return false;
 	}
-}
-
-export function eligibleCheckout(cwd, hints) {
-	if (!hints.length) return;
-	const target = checkout(cwd);
-	if (target && hasMappedCommit(target, matchingHint(target, hints)?.revision)) return target;
 }
 
 function hash(value) {
@@ -142,7 +136,7 @@ export async function cachedMemoryCheckout(cwd, credentials) {
 	const hints = projectMemoryHint(credentials);
 	if (!hints.length) return;
 	const target = checkout(cwd);
-	const hint = target && matchingHint(target, hints);
+	const hint = target && matchingMemoryHint(target, hints);
 	if (hint) return resolveMappedCheckout(target, credentials, hint, false);
 }
 
@@ -169,7 +163,7 @@ export async function resolveMemoryHookTarget(
 	const hints = projectMemoryHint(credentials);
 	if (!hints.length) return;
 	const target = checkout(cwd, deadline);
-	const hint = target && matchingHint(target, hints);
+	const hint = target && matchingMemoryHint(target, hints);
 	if (!hint) return;
 	try {
 		// A checkout enrolled by the original pilot may still have its own hook.

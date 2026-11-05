@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "28dfd6f9194f52d9aaf821fb03d85434595239dd",
-  "payloadSha256": "ccdf6dc40fe483ce2b1d7938242c0a63bcbc0dfd6fcdd281ea646365a5d89c43",
+  "commit": "c24533fc56c07c3e9d88f9065795c586c5175939",
+  "payloadSha256": "f09e2abd09802fdb6a2d28851f1a9097fc2190019214e702104266440fcc1812",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "9945be2df800f93719a8a3b59b7e8e1ed5ef482468d8903c79ce9920f751ec4a",
+      "sha256": "87b2c0d499dc761a062a96e0fc34db9de273eb39551c362919d7242bb40a71e0",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "4449e86952bb12c4af413bbf840f70a57e162fad5f219483d75fddddf03b5fef",
+      "sha256": "e74edaf1b860c42f988a6c499903cf29e02260bed04c7d45c786a130d96b0def",
       "mode": "100644"
     },
     {
@@ -26,7 +26,7 @@
     },
     {
       "path": "clawhub/pharaoh/SKILL.md",
-      "sha256": "f3216ac18e5a48a3891a0ce756eebeebb4958e7a7871b7f5a783975a08ce2485",
+      "sha256": "2e6c445346ff34b23882fb60009fd2790becfb699c98203da8d5a064372cb427",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "9851d079809cc1ede7a361d0e1697b606e5d5c069dc88659e77692ccb4459724",
+      "sha256": "e938f4ae1f67a6a06cf67758eb8bbbe566db81b2c71aaa6939a07b4ae848451f",
       "mode": "100644"
     },
     {
@@ -106,7 +106,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "8e5dd3495c2a1ffa0495d9f9e8c2228a878249bf932e3ad78ee6d562504129bd",
+      "sha256": "c2bd6f5b63d7afe9ca3ce51b960c0d2b42bddacdc012871c80b3f79b8c12afc4",
       "mode": "100644"
     },
     {
@@ -156,12 +156,12 @@
     },
     {
       "path": "project-memory/hook-config.mjs",
-      "sha256": "42692b98b8c100f35fb7c664da9718d607ddb5f7d81e6e96b9f9ab5dffe8c79e",
+      "sha256": "fa93915625257fcc83c6ab2b3dd1cc87a9a11a0b5bf26831a152a81499a33430",
       "mode": "100644"
     },
     {
       "path": "project-memory/hook-events.mjs",
-      "sha256": "f97fb44ca661cf693f3f02537fe9097b3b5e2168c3477b8bd3dde191b256c9f3",
+      "sha256": "ba7ac656b563a8a73090a54a2e0eb09f9fab2342d688c5ea0d9b5156279892d6",
       "mode": "100644"
     },
     {
@@ -176,7 +176,7 @@
     },
     {
       "path": "project-memory/pharaoh-memory-hook.mjs",
-      "sha256": "a961441c64f2585dfc7752f1e25b04549645155c1ce9c82c8ef003d23a3f23d2",
+      "sha256": "153fb47e7965d673a1a6c3b868eb12e0e1435ecffa64612426a51be5338e6bee",
       "mode": "100644"
     },
     {
@@ -186,17 +186,17 @@
     },
     {
       "path": "project-memory/setup.d.mts",
-      "sha256": "9832b825861a71a7ae81b73e3bcef62aa69f6ade98f507f637f65494a1f5d18a",
+      "sha256": "686097d261760d1980fa715e6a8bc5c0c29edd3ef826b7cf619c1e2c9c9fa1f1",
       "mode": "100644"
     },
     {
       "path": "project-memory/setup.mjs",
-      "sha256": "ed2177d6d72dba6f8687811a817dbaa6aed6b3bbf188643ac0c775e3c062e1e9",
+      "sha256": "e5f6809e0de182691d2f768f65bab88d1d50414dcb8c075c91d10f22dd823017",
       "mode": "100644"
     },
     {
       "path": "project-memory/user-target.mjs",
-      "sha256": "c884e8636553a0a9c11832c3941ef2345f0515c27db4e5252ce18995d050fbdf",
+      "sha256": "bea8150b639b9923ee9971f3f8c57ec86a36f15c2cbd5ababdfa1ecf59a3cfb2",
       "mode": "100644"
     },
     {
@@ -276,12 +276,12 @@
     },
     {
       "path": "src/helpers.ts",
-      "sha256": "d4b2a68d0d5fab97bbc61c25525b02e6cd941870b008a8d3a89f19cf02847b3b",
+      "sha256": "4e7c1216be03bf91e486d0f3650f177de0d67fa95a20414afb3ea3d74d2331e1",
       "mode": "100644"
     },
     {
       "path": "src/index.ts",
-      "sha256": "b83efb49e859de44dfcbf269bda30ae95c7184f1e046bc3d993c91f60d9b0cff",
+      "sha256": "8d8e7582e6e7723b1558633356c76725908b109707fabf06184108e741fd5f5c",
       "mode": "100644"
     },
     {
@@ -361,7 +361,7 @@
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "0230b86be28e82b709f308110313c9346191f5f28e1ac05defd150c06268683e",
+      "sha256": "e15475dde4820e4cd6bc6e7f8b3da48acaf5a4a9c24b00afcb47ea41933fa064",
       "mode": "100644"
     },
     {

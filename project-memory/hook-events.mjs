@@ -35,7 +35,7 @@ function promptContext(token, compact, mayCapture) {
 	].join("\n");
 }
 
-function skipPrompt(value) {
+export function skipMemoryPrompt(value) {
 	const prompt = typeof value === "string" ? value.trim() : "";
 	return (
 		!prompt ||
@@ -45,6 +45,16 @@ function skipPrompt(value) {
 		) ||
 		/^(?:skip|do not use|don't use) (?:pharaoh )?(?:project )?memory[.!]?\s*$/i.test(prompt)
 	);
+}
+
+export function memoryReminder(repo) {
+	if (!REPO.test(repo)) return;
+	return {
+		hookSpecificOutput: {
+			hookEventName: "UserPromptSubmit",
+			additionalContext: `For work in ${repo}, use pharaoh_memory_recall if prior decisions may matter. Use pharaoh_memory_expand if you need the full record, and pharaoh_memory_capture for one supported candidate when the task permits. Mention memory only when it changes a decision.`,
+		},
+	};
 }
 
 /** Hook input can contain raw prompts and transcripts. Neither is persisted or transmitted. */
@@ -90,7 +100,7 @@ export function handleEvent(
 				input.prompt,
 			);
 		const opened = store.begin(key, target, client, nativeTurn, {
-			skip: skipPrompt(input.prompt),
+			skip: skipMemoryPrompt(input.prompt),
 			readOnly: noCapture,
 			memorySession,
 		});
