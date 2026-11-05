@@ -195,10 +195,7 @@ export function tokenToCredentials(
 		github_login: token.github_login ?? null,
 		tenant_name: token.tenant_name ?? null,
 		repos: token.repos ?? [],
-		...(memory.length ? { project_memory: memory } : {}),
-		...(memory.some((entry) => entry.revision === null)
-			? { project_memory_session: randomUUID() }
-			: {}),
+		...(memory.length ? { project_memory: memory, project_memory_session: randomUUID() } : {}),
 		...(production && token.project_memory_status === "unavailable"
 			? { project_memory_status: "unavailable" }
 			: {}),

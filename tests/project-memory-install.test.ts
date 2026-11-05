@@ -90,6 +90,25 @@ function configure(options: Partial<Parameters<typeof syncMemoryHooks>[0]> = {})
 	});
 }
 
+function hookCommand(settings: string, event: string): string {
+	const hooks = JSON.parse(readFileSync(settings, "utf8")).hooks[event];
+	return hooks.find((group: { hooks: Array<{ command?: string }> }) =>
+		group.hooks[0]?.command?.endsWith("# pharaoh-project-memory:user-v1"),
+	).hooks[0].command;
+}
+
+function hookInput(client: string, cwd: string, turn: string, event: string) {
+	return JSON.stringify({
+		hook_event_name: event,
+		cwd,
+		prompt: "Investigate a real project issue",
+		stop_hook_active: false,
+		last_assistant_message: "Verified the mapped repository.",
+		session_id: `fixture-${client}-${turn}`,
+		turn_id: turn,
+	});
+}
+
 function prompt(
 	client: string,
 	settings: string,
@@ -98,23 +117,11 @@ function prompt(
 	env: NodeJS.ProcessEnv = {},
 	event = "UserPromptSubmit",
 ) {
-	const hooks = JSON.parse(readFileSync(settings, "utf8")).hooks[event];
-	const command = hooks.find((group: { hooks: Array<{ command?: string }> }) =>
-		group.hooks[0]?.command?.endsWith("# pharaoh-project-memory:user-v1"),
-	).hooks[0].command;
-	return execFileSync("/bin/sh", ["-c", command], {
+	return execFileSync("/bin/sh", ["-c", hookCommand(settings, event)], {
 		cwd,
 		env: { ...process.env, HOME: home, ...env },
 		encoding: "utf8",
-		input: JSON.stringify({
-			hook_event_name: event,
-			cwd,
-			prompt: "Investigate a real project issue",
-			stop_hook_active: false,
-			last_assistant_message: "Verified the mapped repository.",
-			session_id: `fixture-${client}-${turn}`,
-			turn_id: turn,
-		}),
+		input: hookInput(client, cwd, turn, event),
 	});
 }
 
@@ -213,7 +220,7 @@ it("installs from an unrelated repository rooted at the user's home", () => {
 	expect(existsSync(join(home, ".codex/hooks.json"))).toBe(true);
 });
 
-it("activates the ordinary installed hook after the first map without a second setup", () => {
+it("activates first-map memory, saves one in-turn candidate, and stops quietly", () => {
 	const revision = git("rev-parse", "HEAD");
 	const signIn = (accessToken: string) =>
 		tokenToCredentials(
@@ -257,9 +264,11 @@ it("activates the ordinary installed hook after the first map without a second s
 	// Later prompts run the private installed runtime, independent of the package cache.
 	rmSync(packageRoot, { recursive: true });
 	const shim = join(home, "readiness-fixture.mjs");
+	const captureLog = join(home, "capture.jsonl");
 	writeFileSync(
 		shim,
 		`
+		import { appendFileSync } from "node:fs";
 		const now = Date.now.bind(Date);
 		Date.now = () => now() + Number(process.env.FIXTURE_OFFSET ?? 0);
 		globalThis.fetch = async (url, options) => {
@@ -269,16 +278,19 @@ it("activates the ordinary installed hook after the first map without a second s
 				return new Response(JSON.stringify({revision: process.env.FIXTURE_REVISION || null}));
 			}
 			if (String(url) === "https://mcp.pharaoh.so/api/project-memory/recall" &&
-				options.headers.Authorization === "Bearer rotated")
-				return new Response(JSON.stringify({records: [], graph: {verification: "unavailable"}}));
+				options.headers.Authorization === "Bearer rotated" && JSON.parse(options.body).format === "compact-v1")
+				return new Response(JSON.stringify({format: "compact-v1", repo: "fixture/project", records: [], moreMatches: false, omittedRecords: 0, graph: {verification: "unavailable"}}));
 			if (String(url) === "https://mcp.pharaoh.so/api/project-memory/capture" &&
-				options.headers.Authorization === "Bearer rotated")
+				options.headers.Authorization === "Bearer rotated") {
+				appendFileSync(process.env.FIXTURE_CAPTURE_LOG, options.body + "\\n");
+				await new Promise((resolve) => setTimeout(resolve, 3_100));
 				return new Response(JSON.stringify({record:{id:"8b24e18d-4541-4da3-941e-ce145b7cb53e",status:"candidate"}}));
+			}
 			throw new Error("Unexpected fixture request");
 		};
 	`,
 	);
-	const env = { NODE_OPTIONS: `--import=${shim}` };
+	const env = { NODE_OPTIONS: `--import=${shim}`, FIXTURE_CAPTURE_LOG: captureLog };
 	expect(prompt("codex", settings, checkout, "denied", { ...env, FIXTURE_STATUS: "denied" })).toBe(
 		"",
 	);
@@ -290,38 +302,44 @@ it("activates the ordinary installed hook after the first map without a second s
 		FIXTURE_OFFSET: "32000",
 		FIXTURE_REVISION: revision,
 	});
-	const guidance: string = JSON.parse(enabled).hookSpecificOutput.additionalContext;
-	const command = guidance
-		.split("\n")
-		.find((line) => line.includes("recall --turn"))
-		?.split(" <<")[0];
-	expect(command).toBeDefined();
-	const recalled = execFileSync("/bin/sh", ["-c", command as string], {
-		cwd: checkout,
-		env: { ...process.env, HOME: home, ...env },
-		encoding: "utf8",
-		input: JSON.stringify({ terms: ["mapping"] }),
-	});
-	expect(JSON.parse(recalled).records).toEqual([]);
+	function runMemory(output: string, operation: "recall" | "capture" | "receipt", input?: object) {
+		const guidance: string = JSON.parse(output).hookSpecificOutput.additionalContext;
+		const recall = guidance
+			.split("\n")
+			.find((line) => line.includes("recall --turn"))
+			?.split(" <<")[0];
+		if (!recall) throw new Error("Expected a recall command from the installed prompt hook.");
+		const command =
+			operation === "recall"
+				? recall
+				: recall.replace("recall --turn", `${operation} --turn`).replace(" --compact", "");
+		return execFileSync("/bin/sh", ["-c", command], {
+			cwd: checkout,
+			env: { ...process.env, HOME: home, ...env },
+			encoding: "utf8",
+			input: input && JSON.stringify(input),
+		});
+	}
+	const recap = { kind: "lesson", summary: "Check the mapped revision first." };
+	expect(JSON.parse(runMemory(enabled, "recall", { terms: ["mapping"] })).format).toBe(
+		"compact-v1",
+	);
 	const rotated = JSON.parse(readFileSync(credentialsFile, "utf8"));
 	expect(rotated).toMatchObject({
 		access_token: "rotated",
 		project_memory_session: pending.project_memory_session,
 	});
-	const stop = JSON.parse(prompt("codex", settings, checkout, "mapped", env, "Stop"));
-	expect(stop.decision).toBe("block");
-	const capture = (stop.reason as string)
-		.split("\n")
-		.find((line) => line.includes("capture --turn"))
-		?.split(" <<")[0];
-	expect(capture).toBeDefined();
-	const captured = execFileSync("/bin/sh", ["-c", capture as string], {
-		cwd: checkout,
-		env: { ...process.env, HOME: home, ...env },
-		encoding: "utf8",
-		input: JSON.stringify({ kind: "lesson", summary: "Check the mapped revision first." }),
-	});
-	expect(JSON.parse(captured).record.status).toBe("candidate");
+	expect(existsSync(captureLog)).toBe(false);
+	expect(runMemory(enabled, "capture", recap)).toBe("");
+	expect(prompt("codex", settings, checkout, "mapped", env, "Stop")).toBe("");
+	expect(prompt("codex", settings, checkout, "mapped", env, "Stop")).toBe("");
+	expect(JSON.parse(runMemory(enabled, "receipt")).record.status).toBe("candidate");
+	expect(readFileSync(captureLog, "utf8").trim().split("\n")).toHaveLength(1);
+
+	const noCapture = prompt("codex", settings, checkout, "no-capture", env);
+	runMemory(noCapture, "recall", { terms: ["mapping"] });
+	expect(prompt("codex", settings, checkout, "no-capture", env, "Stop")).toBe("");
+	expect(readFileSync(captureLog, "utf8").trim().split("\n")).toHaveLength(1);
 	expect(readFileSync(settings, "utf8")).toBe(installed);
 	const replacement = signIn("new-device-session");
 	expect(replacement.project_memory_session).not.toBe(pending.project_memory_session);
@@ -333,4 +351,4 @@ it("activates the ordinary installed hook after the first map without a second s
 			FIXTURE_STATUS: "denied",
 		}),
 	).toBe("");
-});
+}, 15_000);

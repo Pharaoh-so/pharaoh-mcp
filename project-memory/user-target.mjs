@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, realpathSync, rmSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { hasLegacyHooks } from "./hook-config.mjs";
-import { atomicWrite, checkout, git } from "./local.mjs";
+import { atomicWrite, checkout, gitBefore } from "./local.mjs";
 import { PROJECT_MEMORY_ORIGIN, requestMemoryReadiness } from "./memory-api.mjs";
 
 const REVISION = /^(?!0{40}$)[a-f0-9]{40}$/;
@@ -27,6 +27,12 @@ export function projectMemoryHint(credentials) {
 	return credentials.project_memory;
 }
 
+export function projectMemorySession(credentials) {
+	const session = credentials?.project_memory_session;
+	if (typeof session === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(session))
+		return session;
+}
+
 function matchingHint(target, hints) {
 	return hints.find(
 		(entry) =>
@@ -34,12 +40,12 @@ function matchingHint(target, hints) {
 	);
 }
 
-function hasMappedCommit(target, revision) {
+function hasMappedCommit(target, revision, deadline = Infinity) {
 	if (typeof revision !== "string" || !REVISION.test(revision)) return false;
 	try {
 		// An origin URL is editable. Require an actual GitHub-mapped commit
 		// locally, without fetching, consulting replace refs, or running hooks.
-		return git(target.root, "cat-file", "-t", revision) === "commit";
+		return gitBefore(target.root, deadline, "cat-file", "-t", revision) === "commit";
 	} catch {
 		return false;
 	}
@@ -95,9 +101,9 @@ function tryReadinessLease(path, now) {
 	}
 }
 
-async function resolveRevision(repo, credentials, probe) {
-	const session = credentials.project_memory_session;
-	if (typeof session !== "string" || !/^[0-9a-f-]{36}$/.test(session)) return;
+async function resolveRevision(repo, credentials, probe, deadline) {
+	const session = projectMemorySession(credentials);
+	if (!session) return;
 	const binding = hash(session);
 	const path = join(memoryClientRoot(), `ready-${hash(repo.toLowerCase())}.json`);
 	const saved = readReadiness(path, binding);
@@ -112,7 +118,7 @@ async function resolveRevision(repo, credentials, probe) {
 			return latest.revision;
 		if (now - (latest?.checkedAt ?? 0) < READINESS_RETRY_MS) return;
 		atomicWrite(path, JSON.stringify({ binding, checkedAt: now }));
-		const revision = await requestMemoryReadiness(repo, credentials);
+		const revision = await requestMemoryReadiness(repo, credentials, deadline);
 		if (typeof revision === "string" && REVISION.test(revision)) {
 			atomicWrite(path, JSON.stringify({ binding, checkedAt: now, revision }));
 			return revision;
@@ -124,10 +130,12 @@ async function resolveRevision(repo, credentials, probe) {
 	}
 }
 
-async function resolveMappedCheckout(target, credentials, hint, probe) {
+async function resolveMappedCheckout(target, credentials, hint, probe, deadline = Infinity) {
 	const revision =
-		hint.revision === null ? await resolveRevision(hint.repo, credentials, probe) : hint.revision;
-	if (hasMappedCommit(target, revision)) return target;
+		hint.revision === null
+			? await resolveRevision(hint.repo, credentials, probe, deadline)
+			: hint.revision;
+	if (hasMappedCommit(target, revision, deadline)) return target;
 }
 
 export async function cachedMemoryCheckout(cwd, credentials) {
@@ -150,11 +158,17 @@ export function readHookSettings(path) {
 	}
 }
 
-export async function resolveMemoryHookTarget(client, cwd, credentials, probe = false) {
+export async function resolveMemoryHookTarget(
+	client,
+	cwd,
+	credentials,
+	probe = false,
+	deadline = Infinity,
+) {
 	if (!Object.hasOwn(LEGACY_SETTINGS, client)) return;
 	const hints = projectMemoryHint(credentials);
 	if (!hints.length) return;
-	const target = checkout(cwd);
+	const target = checkout(cwd, deadline);
 	const hint = target && matchingHint(target, hints);
 	if (!hint) return;
 	try {
@@ -168,7 +182,7 @@ export async function resolveMemoryHookTarget(client, cwd, credentials, probe = 
 		// A client settings file we cannot inspect is not safe to double-enroll.
 		return;
 	}
-	return resolveMappedCheckout(target, credentials, hint, probe);
+	return resolveMappedCheckout(target, credentials, hint, probe, deadline);
 }
 
 export function memoryClientRoot(home = homedir()) {
