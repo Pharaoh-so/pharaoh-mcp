@@ -4,7 +4,7 @@ prompt-name: plan-with-pharaoh
 description: Review a plan or spec against the codebase before implementing it. Pharaoh reconnaissance, a BIG or SMALL change choice, then architecture, code quality, wiring, tests, performance and security sections with numbered decisions.
 version: 0.7.1
 homepage: https://pharaoh.so
-metadata: {"emoji": "☥", "tags": ["planning", "architecture", "blast-radius", "pharaoh", "review", "interactive"]}
+metadata: {"tags": ["planning", "architecture", "blast-radius", "pharaoh", "review", "interactive"]}
 ---
 
 # Plan Review

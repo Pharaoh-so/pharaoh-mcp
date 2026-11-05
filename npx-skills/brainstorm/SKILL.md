@@ -6,7 +6,7 @@ license: MIT. Adapted from obra/superpowers, Copyright (c) 2025 Jesse Vincent; s
 version: 0.2.1
 homepage: https://pharaoh.so
 user-invocable: true
-metadata: {"emoji": "☥", "tags": ["planning", "design", "brainstorming", "requirements", "architecture"]}
+metadata: {"tags": ["planning", "design", "brainstorming", "requirements", "architecture"]}
 ---
 
 # Brainstorm

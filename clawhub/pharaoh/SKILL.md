@@ -3,7 +3,7 @@ name: pharaoh
 description: "Codebase knowledge graph with 8 development workflow skills. Query architecture, dependencies, blast radius and dead code via MCP. Requires GitHub App installation (read-only repo access) and OAuth authentication. Connects to external MCP server at mcp.pharaoh.so."
 version: 0.3.5
 homepage: https://pharaoh.so
-metadata: {"emoji": "☥", "openclaw": {"requires": {"bins": ["npx", "node"], "env": [], "config": "~/.pharaoh/credentials.json"}, "permissions": {"network": ["mcp.pharaoh.so", "github.com"], "filesystem": ["~/.pharaoh/", "~/.openclaw/"]}, "always": false}, "tags": ["code-intelligence", "architecture", "mcp", "knowledge-graph", "dependencies", "blast-radius", "dead-code", "code-review", "refactoring", "codebase-understanding", "developer-tools", "ai-coding"]}
+metadata: {"openclaw": {"requires": {"bins": ["npx", "node"], "env": [], "config": "~/.pharaoh/credentials.json"}, "permissions": {"network": ["mcp.pharaoh.so", "github.com"], "filesystem": ["~/.pharaoh/", "~/.openclaw/"]}, "always": false}, "tags": ["code-intelligence", "architecture", "mcp", "knowledge-graph", "dependencies", "blast-radius", "dead-code", "code-review", "refactoring", "codebase-understanding", "developer-tools", "ai-coding"]}
 ---
 
 # Pharaoh — Codebase Knowledge Graph + Developer Skill Library

@@ -29,7 +29,6 @@
     .mark-s { font:var(--strong) var(--type-caption) var(--mono); width:1ch; }
     #trace { color:var(--text); border:var(--line); border-radius:var(--radius); padding:10px 12px; font:var(--regular) var(--type-body)/var(--leading) var(--sans); min-width:0; }
     .head { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 10px; }
-    .mark { color:var(--gold); font-size:var(--type-heading); line-height:1; }
     .headline { flex:1 1 16em; margin:0; min-width:0; overflow-wrap:anywhere; }
     #kind { color:var(--muted); }
     #target { color:var(--ink); font:var(--strong) var(--type-heading)/var(--leading) var(--mono); }
@@ -126,7 +125,6 @@
 <body>
   <main id="trace" data-state="waiting">
     <div class="head">
-      <span class="mark" aria-hidden="true">☥</span>
       <p class="headline"><span id="kind"></span><span id="target"></span><span id="title">Pharaoh</span><span id="summary" role="status" aria-live="polite">Waiting for the tool</span></p>
       <span class="meta"><span id="verdict" hidden></span><span id="sha" hidden></span></span>
     </div>

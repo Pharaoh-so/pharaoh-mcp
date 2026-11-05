@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "ae66b2d6df4ea08fe8d81170461cfdaf9a80b982",
-  "payloadSha256": "d110c2d836bcf8bcc84dc89bf9178476514c9547980afe73c86671f93406b90b",
+  "commit": "28dfd6f9194f52d9aaf821fb03d85434595239dd",
+  "payloadSha256": "ccdf6dc40fe483ce2b1d7938242c0a63bcbc0dfd6fcdd281ea646365a5d89c43",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -26,7 +26,7 @@
     },
     {
       "path": "clawhub/pharaoh/SKILL.md",
-      "sha256": "d90c2d7e4d9ca478c25560abd56546d4494402d5df07a03ddf4d974dd6505fdf",
+      "sha256": "f3216ac18e5a48a3891a0ce756eebeebb4958e7a7871b7f5a783975a08ce2485",
       "mode": "100644"
     },
     {
@@ -56,42 +56,42 @@
     },
     {
       "path": "npx-skills/brainstorm/SKILL.md",
-      "sha256": "9c53a364bd2b5b4b089bee7d8b6153b0633477d852288fc73cbb2c7d51cd1d68",
+      "sha256": "409051d96d67febc02357c31b0a7dd9e0811c338c0a4cabe1aec2e86c20efdeb",
       "mode": "100644"
     },
     {
       "path": "npx-skills/debug/SKILL.md",
-      "sha256": "9dd3ccc813e8835e494a8ea5b3b4abc3c2e60186260ecf0d3b297b03c2d9e8b4",
+      "sha256": "a9e1f64f8203a1c8d9b86b5f7505ff60edaa5104a3900e594c7bd42e2ff52a59",
       "mode": "100644"
     },
     {
       "path": "npx-skills/pharaoh/SKILL.md",
-      "sha256": "6132ddcaa1b12c6b3513e14fb0ced25e1c802285845fe970b50c2c45b4fdd9a6",
+      "sha256": "0d6276232f10e748f16a84b15661636f9a9684689a994b006eff51d98ed8dda5",
       "mode": "100644"
     },
     {
       "path": "npx-skills/plan/SKILL.md",
-      "sha256": "385109cc0cd6a22514ea1b4cd40c4ca235c8fde04c6be3badcf127f350817583",
+      "sha256": "d073e6d9806d3286940b7e40c2063c6159b3bba3b63fdbfde43686a7372da432",
       "mode": "100644"
     },
     {
       "path": "npx-skills/refactor/SKILL.md",
-      "sha256": "bb4f9b5dfeb757d04d3c95642d16bdd4a47c2f34eebbfd85a3255f55bb61f7a0",
+      "sha256": "70033c6c22dc0194bc8ea879b497dac54a466bbd08359e315fbdbea07be76720",
       "mode": "100644"
     },
     {
       "path": "npx-skills/review/SKILL.md",
-      "sha256": "e49681c830f7188e5f3857cb4977e04abbb8322796810d99faae2fd82b417e29",
+      "sha256": "a26a34e1bed8e09e1324d50d0e9dfc43ef838fd31d0c37adbc353d832c911a8e",
       "mode": "100644"
     },
     {
       "path": "npx-skills/tdd/SKILL.md",
-      "sha256": "e7e8f8803c38f3d76ed7bb20f2c3f0d53305b95c25d509d266315ff5ea728f7f",
+      "sha256": "8ce4e0f53c53d894e1d267508d3313bef868d1161e4bfa6e20ab57a26ccb0da0",
       "mode": "100644"
     },
     {
       "path": "npx-skills/verify/SKILL.md",
-      "sha256": "bbb53533b9195dbadda451280e455517cced7fd1f21b4b04206c3cd03aeb8187",
+      "sha256": "f2f1a61c0014d47c76fd0005bc1160e5ff1614a30e9cd9eeb1826c1cf3982080",
       "mode": "100644"
     },
     {
@@ -211,42 +211,42 @@
     },
     {
       "path": "skills/brainstorm/SKILL.md",
-      "sha256": "aeaf11f897cd7ee2e82326e143b272edd7c7e2f537a27e5107c9de39757f9cf4",
+      "sha256": "d5a9fc240a1705c1f27b8e86d2f4bf546a89ce2e66de6a7c17effd9684cec2fb",
       "mode": "100644"
     },
     {
       "path": "skills/debug/SKILL.md",
-      "sha256": "d62ef83965e32ffcb4e81ce0143e7107f73d6ef1db613a7dfc4be099e3a703b0",
+      "sha256": "7ef24d58b464060496d2fee96aea220c5be1e7ab21214724ea6df78c215888d5",
       "mode": "100644"
     },
     {
       "path": "skills/pharaoh/SKILL.md",
-      "sha256": "9714ed8297fdd4e534f861c13169bb24bc68d45147e3740dabb739048b16871e",
+      "sha256": "34db840d1d90e0f75c3eaf5955e410394696568e1885671825361566a6371462",
       "mode": "100644"
     },
     {
       "path": "skills/plan/SKILL.md",
-      "sha256": "2c76a2fcf357f7b58662fa55196b21e1db04017a2b8d60406db1e5940d9fe6a4",
+      "sha256": "8969fdeeb695a617bfbdbf77829a1b339b9411c284beda380ed4c930fff823bc",
       "mode": "100644"
     },
     {
       "path": "skills/refactor/SKILL.md",
-      "sha256": "bb4f9b5dfeb757d04d3c95642d16bdd4a47c2f34eebbfd85a3255f55bb61f7a0",
+      "sha256": "70033c6c22dc0194bc8ea879b497dac54a466bbd08359e315fbdbea07be76720",
       "mode": "100644"
     },
     {
       "path": "skills/review/SKILL.md",
-      "sha256": "5e972a791883db24c5c7bbddbd979f4d2d12de34b52afc8e9288133134d61c2f",
+      "sha256": "9c9987a13c79fc4aa157c23a4aef0afa74d9889678ab8f9ccce0dcc07bdc4933",
       "mode": "100644"
     },
     {
       "path": "skills/tdd/SKILL.md",
-      "sha256": "4ff94e9a123e5bd54df1cccfdce717249c67b09265a7ff0a0fe9a5baace97643",
+      "sha256": "f257d2418e992d8c9f735d45185e17742446cd001025224e28922f3c76c5eecc",
       "mode": "100644"
     },
     {
       "path": "skills/verify/SKILL.md",
-      "sha256": "0cd99c92e4a8edb0fab92020182e48c370b0fb024b29f91126980f3e8743d32e",
+      "sha256": "7a0f6c0fa9ccf45954cdc52744f20e861742f621aa034db6b4a3cafe723ba4d0",
       "mode": "100644"
     },
     {
@@ -391,7 +391,7 @@
     },
     {
       "path": "trace-app.html",
-      "sha256": "984bf81384710047dca582fb679a0a6b88da2817c610591ea19c71ffd98b1e20",
+      "sha256": "f69fbfa2e1c350363e85e727b634ba1fb261080d0c02902161c6496c7d44d5fa",
       "mode": "100644"
     },
     {
