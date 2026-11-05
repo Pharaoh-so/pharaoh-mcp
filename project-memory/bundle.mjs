@@ -12,7 +12,7 @@ import {
 import { dirname, join, relative } from "node:path";
 
 const LIMIT = 256 * 1024;
-export const MEMORY_RUNTIME_FILES = [
+export const LEGACY_MEMORY_RUNTIME_FILES = [
 	"execute-turn.mjs",
 	"hook-config.mjs",
 	"hook-events.mjs",
@@ -24,6 +24,13 @@ export const MEMORY_RUNTIME_FILES = [
 	"runtime/credentials.js",
 	"runtime/package.json",
 	"runtime/refresh.js",
+];
+export const MEMORY_RUNTIME_FILES = [
+	...LEGACY_MEMORY_RUNTIME_FILES,
+	"bundle.mjs",
+	"graph-cues.mjs",
+	"preferences.mjs",
+	"route-grep.mjs",
 ];
 
 function digest(files) {
@@ -51,7 +58,7 @@ export function packagedMemoryBundle(packageRoot = new URL("../", import.meta.ur
 		} else {
 			const location = name.startsWith("runtime/")
 				? new URL(`dist/${name.slice(8)}`, packageRoot)
-				: new URL(`project-memory/${name}`, packageRoot);
+				: new URL(`${name === "route-grep.mjs" ? "hooks" : "project-memory"}/${name}`, packageRoot);
 			try {
 				bytes = readFileSync(location);
 			} catch {

@@ -7,6 +7,7 @@ const EVENTS = {
 };
 const GLOBAL_MARKER = "# pharaoh-project-memory:user-v1";
 const LEGACY_MARKER = / # pharaoh-project-memory:[a-f0-9]{64}$/;
+const TOOL_EVENTS = ["PreToolUse", "PostToolUse"];
 
 function isObject(value) {
 	return value && typeof value === "object" && !Array.isArray(value);
@@ -33,14 +34,14 @@ function matchesUserHook(value) {
 }
 
 /** Keep unrelated handlers even when they share an event group with ours. */
-function replaceHooks(config, client, matches, command, installEvents = EVENTS[client]) {
+function replaceHooks(config, events, matches, additions) {
 	if (!isObject(config) || (config.hooks !== undefined && !isObject(config.hooks))) {
 		throw new Error("The existing hooks configuration is not a JSON object.");
 	}
 	const hooks = { ...config.hooks };
-	for (const event of EVENTS[client]) {
+	for (const event of events) {
 		const current = hooks[event];
-		const install = command && installEvents.includes(event);
+		const install = additions[event];
 		if (!install && (current === undefined || (Array.isArray(current) && !current.length)))
 			continue;
 		if (
@@ -54,7 +55,7 @@ function replaceHooks(config, client, matches, command, installEvents = EVENTS[c
 			if (rest.length === group.hooks.length) return [group];
 			return rest.length ? [{ ...group, hooks: rest }] : [];
 		});
-		if (install) kept.push({ hooks: [{ type: "command", command, timeout: 3 }] });
+		if (install) kept.push(install);
 		if (kept.length) hooks[event] = kept;
 		else delete hooks[event];
 	}
@@ -63,24 +64,50 @@ function replaceHooks(config, client, matches, command, installEvents = EVENTS[c
 		: { ...config, hooks };
 }
 
+function group(command, matcher) {
+	return { ...(matcher && { matcher }), hooks: [{ type: "command", command, timeout: 3 }] };
+}
+
 export function updateHooks(config, client, target, remove, hookPath, node = process.execPath) {
 	const marker = legacyMarker(client, target.root);
 	if (!remove && !hookPath) throw new Error("A pinned project memory hook is required.");
 	const command = remove
 		? null
 		: `${[node, hookPath, client, target.root, target.repo].map(shellWord).join(" ")} ${marker}`;
-	return replaceHooks(config, client, matchesLegacyHook(client, target.root), command);
+	const events = EVENTS[client];
+	const additions = command
+		? Object.fromEntries(events.map((event) => [event, group(command)]))
+		: {};
+	return replaceHooks(config, events, matchesLegacyHook(client, target.root), additions);
 }
 
-export function updateUserHooks(config, client, hookPath, node = process.execPath) {
-	const command = hookPath
-		? `${[node, hookPath, client, "--user"].map(shellWord).join(" ")} ${GLOBAL_MARKER}`
-		: null;
-	return replaceHooks(config, client, matchesUserHook, command, ["UserPromptSubmit"]);
+export function updateUserHooks(
+	config,
+	client,
+	hookPath,
+	node = process.execPath,
+	graphCues = false,
+) {
+	const additions = {};
+	if (hookPath) {
+		const command = (mode) =>
+			`${[node, hookPath, client, mode].map(shellWord).join(" ")} ${GLOBAL_MARKER}`;
+		additions.UserPromptSubmit = group(command("--user"));
+		if (graphCues) {
+			const graph = command("--graph");
+			const edit = client === "codex" ? "apply_patch" : "Edit|Write|MultiEdit";
+			additions.PreToolUse = group(graph, "^Bash$");
+			additions.PostToolUse = group(graph, `^(?:${edit}|mcp__pharaoh__get_codebase_map)$`);
+		}
+	}
+	const toolEvents = TOOL_EVENTS.filter(
+		(event) => additions[event] || hasHooks(config, [event], matchesUserHook),
+	);
+	return replaceHooks(config, [...EVENTS[client], ...toolEvents], matchesUserHook, additions);
 }
 
-function hasHooks(config, client, matches) {
-	return EVENTS[client].some((event) => {
+function hasHooks(config, events, matches) {
+	return events.some((event) => {
 		const groups = config?.hooks?.[event];
 		return (
 			Array.isArray(groups) &&
@@ -93,9 +120,9 @@ function hasHooks(config, client, matches) {
 }
 
 export function hasLegacyHooks(config, client, root) {
-	return hasHooks(config, client, matchesLegacyHook(client, root));
+	return hasHooks(config, EVENTS[client], matchesLegacyHook(client, root));
 }
 
 export function hasUserHooks(config, client) {
-	return hasHooks(config, client, matchesUserHook);
+	return hasHooks(config, [...EVENTS[client], ...TOOL_EVENTS], matchesUserHook);
 }

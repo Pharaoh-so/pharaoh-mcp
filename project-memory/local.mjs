@@ -252,6 +252,35 @@ function recoverLock(path, now) {
 	return true;
 }
 
+function acquireLocalLock(directory, path, now) {
+	return (
+		acquireLock(directory, path, now) ??
+		(recoverLock(path, now) ? acquireLock(directory, path, now) : undefined)
+	);
+}
+
+/** Update only the bounded worktree cue metadata. Concurrent events can skip. */
+export function updateWorktreeCueState(directory, update, now = Date.now()) {
+	makePrivateDirectory(directory);
+	const release = acquireLocalLock(directory, join(directory, "worktree-cues.lock"), now);
+	if (!release) return;
+	try {
+		const path = join(directory, "worktree-cues.json");
+		const file = lstatSync(path, { throwIfNoEntry: false });
+		if (file && file.uid !== process.getuid?.()) return;
+		const before = file ? readJson(path) : undefined;
+		if (file && before === undefined) return;
+		const change = update(before);
+		if (!change) return;
+		const data = JSON.stringify(change.state);
+		if (Buffer.byteLength(data) > 8192) return;
+		atomicWrite(path, data);
+		return change.context;
+	} finally {
+		release();
+	}
+}
+
 /** Serialize local state transitions only; network operations never hold this lock. */
 export function turnStore(home = homedir(), now = Date.now) {
 	const directory = join(home, ".pharaoh", "project-memory-turns-v2");
@@ -276,9 +305,7 @@ export function turnStore(home = homedir(), now = Date.now) {
 		if (!TOKEN.test(key)) return;
 		const path = join(directory, `${key}.lock`);
 		const time = now();
-		const release =
-			acquireLock(directory, path, time) ??
-			(recoverLock(path, time) ? acquireLock(directory, path, time) : undefined);
+		const release = acquireLocalLock(directory, path, time);
 		if (!release) return onBusy?.();
 		try {
 			const stored = readJson(overlapPath(key));

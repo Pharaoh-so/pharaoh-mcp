@@ -153,7 +153,7 @@ describe("no `claude` CLI on PATH (the desktop app's built-in one isn't)", () =>
 
 		expect(interactive).toMatch(/if \(!claude && !codex\) \{[^}]*process\.exit\(1\)/);
 		expect(at("if (!claude && !codex)")).toBeLessThan(at("deleteCredentials()"));
-		expect(interactive).toMatch(/if \(!clients\.length\) process\.exit\(1\)/);
+		expect(interactive).toMatch(/if \(!clients\.length\) \{[^}]*process\.exit\(1\)/);
 		expect(at("runSetup({ silent: true })")).toBeLessThan(at("Pharaoh is ready"));
 	});
 

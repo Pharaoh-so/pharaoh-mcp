@@ -12,7 +12,12 @@
  *                      mode until device flow completes, then swap to SSE in
  *                      place — the stdio session never disconnects.
  */
-import { syncMemoryHooks } from "../project-memory/setup.mjs";
+import { resetHookPreferences } from "../project-memory/preferences.mjs";
+import {
+	applyMemoryHookChoices,
+	chooseMemoryHooks,
+	syncMemoryHooks,
+} from "../project-memory/setup.mjs";
 import {
 	pollForToken,
 	printActivationPrompt,
@@ -76,6 +81,34 @@ function reportMemorySetup(options?: Parameters<typeof syncMemoryHooks>[0]): boo
 	}
 }
 
+function clearMemoryHookChoices(disable: boolean): boolean {
+	try {
+		resetHookPreferences(disable);
+		return true;
+	} catch {
+		printLines("Pharaoh: could not update local project memory choices.");
+		return false;
+	}
+}
+
+async function setupMemoryHooks(credentials: Credentials, clients: string[], requested: boolean) {
+	try {
+		const decision = await chooseMemoryHooks({
+			credentials,
+			clients,
+			requested,
+			ask: (question, defaultAnswer) =>
+				process.stderr.isTTY
+					? askYesNo(question, process.stdin, process.stderr, defaultAnswer)
+					: Promise.resolve(null),
+		});
+		const notices = applyMemoryHookChoices(decision, { credentials });
+		if (notices.length) printLines(...notices);
+	} catch {
+		printLines("Pharaoh: could not finish local project memory setup. MCP remains available.");
+	}
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 
@@ -105,7 +138,8 @@ async function main(): Promise<void> {
 	}
 
 	if (args.includes("--disable-memory-hooks")) {
-		if (!reportMemorySetup()) process.exitCode = 1;
+		const saved = clearMemoryHookChoices(true);
+		if (!reportMemorySetup() || !saved) process.exitCode = 1;
 		return;
 	}
 
@@ -114,10 +148,11 @@ async function main(): Promise<void> {
 	if (args.includes("--clean")) {
 		const { cleanCodexSetup, cleanSlate } = await import("./setup.js");
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
+		clearMemoryHookChoices(false);
+		reportMemorySetup();
 		cleanSlate();
 		uninstallClaudePlugin();
 		cleanCodexSetup();
-		reportMemorySetup();
 		printLines("Pharaoh: local setup cleanup finished.");
 		process.exit(0);
 	}
@@ -129,10 +164,11 @@ async function main(): Promise<void> {
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
 		// Credentials first: a cleanup step that fails must never leave the tokens behind.
 		deleteCredentials();
+		clearMemoryHookChoices(false);
+		reportMemorySetup();
 		cleanSlate();
 		uninstallClaudePlugin();
 		cleanCodexSetup();
-		reportMemorySetup();
 		printLines("Pharaoh: credentials cleared and local setup cleanup finished.");
 		process.exit(0);
 	}
@@ -187,7 +223,10 @@ async function main(): Promise<void> {
 		if (codex && (!claude || newCreds.project_memory?.length)) {
 			if (runCodexSetup()) clients.push("codex");
 		}
-		if (!clients.length) process.exit(1);
+		if (!clients.length) {
+			await setupMemoryHooks(newCreds, clients, args.includes("--memory-hooks"));
+			process.exit(1);
+		}
 		if (clients.includes("claude-code")) {
 			process.stderr.write("  Setting up...");
 			const { keptCommands } = runInstallSkills(undefined, { silent: true });
@@ -205,7 +244,7 @@ async function main(): Promise<void> {
 			);
 			if (claudeMd) printLines(claudeMd);
 		}
-		reportMemorySetup({ credentials: newCreds, clients, enable: args.includes("--memory-hooks") });
+		await setupMemoryHooks(newCreds, clients, args.includes("--memory-hooks"));
 
 		// The registration is pinned to this version; upgrading is a deliberate
 		// re-run. Interactive only, and quiet when the registry can't be reached.

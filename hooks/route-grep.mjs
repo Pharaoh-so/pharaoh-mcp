@@ -103,6 +103,69 @@ export function routeGrep(input, signedIn, redirected) {
 	].join(" ");
 }
 
+/**
+ * Match one plain Bash rg invocation with an explicit declaration or call pattern.
+ * @param {unknown} command
+ * @returns {{ symbol: string, tool: "search_functions" | "get_blast_radius" } | undefined}
+ */
+export function classifyBashGrep(command) {
+	if (typeof command !== "string" || command.length > 1024 || /[\r\n]/.test(command)) return;
+	const source = command.trim();
+	// Only the quoting and flags needed by a simple rg search. Unrecognized
+	// shell syntax falls through, including expansions, redirects and pipelines.
+	const word = /(?:'([^']*)'|"([^"$`\\]*)"|([A-Za-z0-9_./:-]+))(?:[ \t]+|$)/gy;
+	const args = [];
+	while (word.lastIndex < source.length) {
+		const match = word.exec(source);
+		if (!match) return;
+		args.push(match[1] ?? match[2] ?? match[3]);
+	}
+	if (args.shift() !== "rg") return;
+
+	const scope = {};
+	while (args[0]?.startsWith("-")) {
+		const option = args.shift();
+		if (option === "--") break;
+		if (["-n", "--line-number", "--no-heading", "-S", "--smart-case"].includes(option ?? ""))
+			continue;
+		const value = args.shift();
+		if (!value) return;
+		if ((option === "-g" || option === "--glob") && scope.glob === undefined) scope.glob = value;
+		else if ((option === "-t" || option === "--type") && scope.type === undefined)
+			scope.type = value;
+		else return;
+	}
+	const [pattern, path] = args;
+	const globExtensions = scope.glob?.match(/^\*\.(?:\{([a-z]+(?:,[a-z]+)*)\}|([a-z]+))$/i);
+	if (
+		!pattern ||
+		args.length > 2 ||
+		(path &&
+			(!/^[A-Za-z0-9_./][A-Za-z0-9_./-]*$/.test(path) ||
+				path.startsWith("/") ||
+				path.split("/").includes(".."))) ||
+		[scope.glob, path].some((value) =>
+			/(?:^|[/.\-_])(?:config|settings|env|docs|documentation|fixtures|snapshots)(?:[/.\-_]|$)/i.test(
+				value ?? "",
+			),
+		) ||
+		(scope.glob &&
+			(!globExtensions ||
+				!(globExtensions[1] ?? globExtensions[2])
+					.toLowerCase()
+					.split(",")
+					.every((extension) => MAPPED_EXTENSIONS.has(extension)))) ||
+		!searchesMappedCode({ type: scope.type }) ||
+		!searchesMappedCode({ path })
+	)
+		return;
+	const symbol = symbolSearched(pattern);
+	if (!symbol || symbol.length > 80) return;
+	if (/\\?\($/.test(pattern)) return { symbol, tool: "get_blast_radius" };
+	if (/^(?:(?:export|default|async) +)*(?:function|class|def|interface|type|enum)\b/.test(pattern))
+		return { symbol, tool: "search_functions" };
+}
+
 /** Hook entry point: read the payload from stdin, reply with a PreToolUse deny or nothing. */
 function main() {
 	try {

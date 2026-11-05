@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "13aa8128c295a6846e3c8e0044480c55e0424324",
-  "payloadSha256": "43bc930257eb6bb4e7fd6c8fe04dc92ac59329dd062efd055d231ade13940502",
+  "commit": "b02cd8cab753de258880cb31e710a5303039355c",
+  "payloadSha256": "caa7ca4384501a9a876290e18b5cc0fbff5d97d1249a75e88691b98d7ba19df3",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "5c6014d7d1b2cbe18672c6ad7c0f569e0f09fa03c9c03c15c38db468c172ee80",
+      "sha256": "3a0b39984292391a5697d24958a1e6ba0b309fa1f51cab7b690092884f8afb1d",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "82b9debd9b24f449ed83374d748c5272219b67c6da440d8ef3e13a4d135ff717",
+      "sha256": "b8a59e26a2abe3791421d76cb0054f3bc8a82ea60e885ac56eeca466965d3ed3",
       "mode": "100644"
     },
     {
@@ -46,7 +46,7 @@
     },
     {
       "path": "hooks/route-grep.mjs",
-      "sha256": "d6cabcd6f5d503e77e44fb12e10fb327c48e7aca0150b8cd017fa71eca8c93fe",
+      "sha256": "2b4cfa1474a123461a663e671787063e619bd36c889f87c194fa2f9044fd8946",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "65604b647f734ac3781ade67d5a246c6fe90cb89bdf77204b06c58551dea2dfc",
+      "sha256": "6b2b299b1d076cbf47c36696f705a4a7f265823e003f912aea947b7d2160dc64",
       "mode": "100644"
     },
     {
@@ -106,7 +106,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "643318574095bc37feb6d5db03411a130f8aa92a84d2ef621f7bc5a97eae65d9",
+      "sha256": "2f4f6299ab3a65b82d8a04ade6022e2328f093ce42b106ea319bd21b08f226b3",
       "mode": "100644"
     },
     {
@@ -146,7 +146,7 @@
     },
     {
       "path": "project-memory/bundle.mjs",
-      "sha256": "8f13923c08018f00f965308f9416099db4c1e74fa28c8348ef20e169c3b9f52a",
+      "sha256": "632d6e1a6eb9ac3087e3ea2333e0d130f4075c835e252576aff15860c2f7ef22",
       "mode": "100644"
     },
     {
@@ -155,18 +155,23 @@
       "mode": "100644"
     },
     {
+      "path": "project-memory/graph-cues.mjs",
+      "sha256": "0d84514e718eb3abcd8664545eae77530192ec30bb36a7c513fc93a0269035c9",
+      "mode": "100644"
+    },
+    {
       "path": "project-memory/hook-config.mjs",
-      "sha256": "fa93915625257fcc83c6ab2b3dd1cc87a9a11a0b5bf26831a152a81499a33430",
+      "sha256": "cfef2e6d00b2f835193d364ad81f4088de294478355212a5a74abe08f69221b6",
       "mode": "100644"
     },
     {
       "path": "project-memory/hook-events.mjs",
-      "sha256": "ba7ac656b563a8a73090a54a2e0eb09f9fab2342d688c5ea0d9b5156279892d6",
+      "sha256": "8ad536702194b0b423927059e272845f47dd5b211dd2a2bb641ebd13521644af",
       "mode": "100644"
     },
     {
       "path": "project-memory/local.mjs",
-      "sha256": "ecc0e6e03db10d1681f2d69f044a4bb6342d059d81d1425bd888580b594f9d25",
+      "sha256": "0d0248cc2d105560877ec13842835a839ed385eb8a71f779d9fd5914b4b1472b",
       "mode": "100644"
     },
     {
@@ -176,7 +181,7 @@
     },
     {
       "path": "project-memory/pharaoh-memory-hook.mjs",
-      "sha256": "153fb47e7965d673a1a6c3b868eb12e0e1435ecffa64612426a51be5338e6bee",
+      "sha256": "4ec0a84bbfeef93b814929b28c639d70bc99e2c4d47d05864dae4121559d9944",
       "mode": "100644"
     },
     {
@@ -185,13 +190,23 @@
       "mode": "100644"
     },
     {
+      "path": "project-memory/preferences.d.mts",
+      "sha256": "9cb76baa7fca86614535fdcd7855c2ec07f69e8a722324b3107e62ebaf10fcc1",
+      "mode": "100644"
+    },
+    {
+      "path": "project-memory/preferences.mjs",
+      "sha256": "8c84f05793a52f36a5ae24b70561b779b0a1367c3fc30cd209c2950c19b44cc9",
+      "mode": "100644"
+    },
+    {
       "path": "project-memory/setup.d.mts",
-      "sha256": "686097d261760d1980fa715e6a8bc5c0c29edd3ef826b7cf619c1e2c9c9fa1f1",
+      "sha256": "c886cbc057c4d39b219a009b94aa7a6681b7d657521556aed2d52706518c84a8",
       "mode": "100644"
     },
     {
       "path": "project-memory/setup.mjs",
-      "sha256": "e5f6809e0de182691d2f768f65bab88d1d50414dcb8c075c91d10f22dd823017",
+      "sha256": "5f9a7f705f0a1ad074928f1264ef8f898643d43c93a8d4fd055c145e42221467",
       "mode": "100644"
     },
     {
@@ -276,12 +291,12 @@
     },
     {
       "path": "src/helpers.ts",
-      "sha256": "4e7c1216be03bf91e486d0f3650f177de0d67fa95a20414afb3ea3d74d2331e1",
+      "sha256": "0e8c6b90227258f6ab5b66f8b626698c19a19083f0627e52e75e8a8201cfa62d",
       "mode": "100644"
     },
     {
       "path": "src/index.ts",
-      "sha256": "8d8e7582e6e7723b1558633356c76725908b109707fabf06184108e741fd5f5c",
+      "sha256": "730604b5c985c75105b1a50fb88c438b7e17491fdfe4d2bfe149c108365d2ea1",
       "mode": "100644"
     },
     {
@@ -351,7 +366,7 @@
     },
     {
       "path": "tests/install-skills.test.ts",
-      "sha256": "b5c9c12698166039b24e5ccfff1f0e87dc1137a475d7945bf2a86e3cc32071fc",
+      "sha256": "8b00efae43b14f30a552884b8032c7d6a00583ea9f75e77681811a76e3b2174f",
       "mode": "100644"
     },
     {
@@ -361,7 +376,7 @@
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "e15475dde4820e4cd6bc6e7f8b3da48acaf5a4a9c24b00afcb47ea41933fa064",
+      "sha256": "ead4a5ef63ba0c7be3d890db542b096a1d14692ee411f95a9378afc846fa7b04",
       "mode": "100644"
     },
     {
@@ -381,7 +396,7 @@
     },
     {
       "path": "tests/setup.test.ts",
-      "sha256": "d9f67917a135e328ea97113e33b616f87dc7fe14fddb6899245526a0645eef1c",
+      "sha256": "2cf219fa3eac7492b26fffbbed0f6e65881f6905604e097f768f724b197f2f8f",
       "mode": "100644"
     },
     {

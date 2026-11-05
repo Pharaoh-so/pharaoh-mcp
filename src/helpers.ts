@@ -22,7 +22,7 @@ export function printLines(...lines: string[]): void {
 const TYPE_AHEAD_MS = 50;
 
 /**
- * Ask a yes/no question that defaults to yes: Enter, `y` or `yes` is yes; `n`
+ * Ask a yes/no question. Enter uses the default; `y` or `yes` is yes; `n`
  * or `no` is no; anything else asks again. Ctrl-C exits (130). On a terminal,
  * keys pressed before the question showed (an Enter while sign-in waited) are
  * dropped, so only a key pressed after reading it answers.
@@ -30,12 +30,14 @@ const TYPE_AHEAD_MS = 50;
  * @param question - The prompt, ending in something like `[Y/n] `.
  * @param input - Where the answer is read (defaults to stdin).
  * @param output - Where the prompt is written (defaults to stderr, like every other line).
+ * @param defaultAnswer - The answer for Enter (defaults to yes).
  * @returns The answer, or null when input ended before one.
  */
 export async function askYesNo(
 	question: string,
 	input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
 	output: NodeJS.WritableStream = process.stderr,
+	defaultAnswer = true,
 ): Promise<boolean | null> {
 	if (input.isTTY) await dropTypedAhead(input);
 	const rl = createInterface({ input, output });
@@ -49,7 +51,8 @@ export async function askYesNo(
 		// The iterator ends on EOF; rl.question never settles then.
 		for await (const reply of rl) {
 			const answer = reply.trim().toLowerCase();
-			if (answer === "" || answer === "y" || answer === "yes") return true;
+			if (answer === "") return defaultAnswer;
+			if (answer === "y" || answer === "yes") return true;
 			if (answer === "n" || answer === "no") return false;
 			rl.prompt();
 		}
@@ -121,8 +124,8 @@ export function printUsage(): void {
 		"  --server <url>    Pharaoh server URL (default: https://mcp.pharaoh.so)",
 		"  --logout          Clear credentials, MCP config, the Claude Code plugin and the CLAUDE.md line, then exit",
 		"  --clean           Remove Pharaoh setup, including managed local project memory hooks",
-		"  --memory-hooks    Install optional project memory reminders during interactive setup",
-		"  --disable-memory-hooks  Remove Pharaoh's local project memory hooks",
+		"  --memory-hooks    Accept project memory hooks during eligible interactive setup",
+		"  --disable-memory-hooks  Remove Pharaoh's memory hooks and remember the choice",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --version, -v     Print the version",
 		"  --help, -h        Show this help",
