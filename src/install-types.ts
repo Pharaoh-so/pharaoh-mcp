@@ -19,6 +19,8 @@ export type ClientInstallStatus =
 export interface ClientOutcome {
 	client: ClientId;
 	status: ClientInstallStatus;
+	/** The guarded write created a user registration instead of replacing one. */
+	created?: true;
 	path?: string;
 	detail?: string;
 	recovery?: string;

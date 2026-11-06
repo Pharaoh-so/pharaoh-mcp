@@ -3,6 +3,7 @@
  * All user-visible output goes to stderr — stdout is reserved for JSON-RPC.
  */
 import { execFile } from "node:child_process";
+import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/runtime-client.mjs";
 
 /** Response from POST /device. */
 export interface DeviceCodeResponse {
@@ -36,6 +37,8 @@ export interface TokenResponse {
 	project_memory_status?: "unavailable";
 	provisional?: boolean;
 	install_url?: string;
+	/** One-use, installation-scoped tickets returned only on an eligible device grant. */
+	runtime_approvals?: RuntimeDeviceApproval[];
 }
 
 /** Error response from POST /device/token while still waiting. */
@@ -64,11 +67,17 @@ export type PollResult =
  * Request a device code from the Pharaoh server (RFC 8628 §3.1).
  * Returns the device code, user code, and verification URIs.
  */
-export async function requestDeviceCode(baseUrl: string): Promise<DeviceCodeResponse> {
+export async function requestDeviceCode(
+	baseUrl: string,
+	runtimeInstallations: readonly RuntimeEnrollmentIntent[] = [],
+): Promise<DeviceCodeResponse> {
 	const res = await fetch(`${baseUrl}/device`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({}),
+		body: JSON.stringify(
+			runtimeInstallations.length ? { runtime_installations: runtimeInstallations } : {},
+		),
+		redirect: "error",
 	});
 
 	if (!res.ok) {
@@ -101,6 +110,7 @@ export async function pollOnce(baseUrl: string, deviceCode: string): Promise<Pol
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ device_code: deviceCode, grant_type: grantType }),
+			redirect: "error",
 		});
 	} catch (err) {
 		return {

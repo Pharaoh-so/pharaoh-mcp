@@ -8,7 +8,7 @@ import type { TokenResponse } from "./auth.js";
 import type { Credentials } from "./credentials.js";
 import { isExpired } from "./credentials.js";
 
-const DEFAULT_SERVER = "https://mcp.pharaoh.so";
+export const DEFAULT_SERVER = "https://mcp.pharaoh.so";
 
 /** The npx command users run to set up Pharaoh. Single source of truth for all output. */
 export const NPX_COMMAND = "npx @pharaoh-so/mcp";
@@ -133,8 +133,14 @@ export function printUsage(): void {
 		"  --disable-memory-hooks  Remove Pharaoh's memory hooks and remember the choice",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --migrate-legacy  Move plain pinned NPX connections to the managed runtime during install",
+		"  --skip-runtime    Turn off runtime analytics during install and remember the choice",
 		"  --doctor          Report bounded local setup markers offline; changes nothing",
 		"  --client <name>   With --doctor, select claude-code to inspect project markers",
+		"  --runtime-enable --client <name>  Opt in to native runtime observations (claude-code or codex)",
+		"  --runtime-revoke [--client <name>]  Turn off collection and revoke consent",
+		"  --runtime-status [--client <name>] [--json]  Read local runtime status",
+		"  --runtime-profile <id> --client <name> [--json]  Choose a profile for the next episode",
+		"  --runtime-profile-receipt <id> --client <name> [--json]  Read a consumed profile selection",
 		"  --version, -v     Print the version",
 		"  --help, -h        Show this help",
 		"",

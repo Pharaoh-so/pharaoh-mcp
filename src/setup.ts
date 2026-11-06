@@ -11,6 +11,7 @@ export {
 	cleanupManagedClients,
 	configureClients,
 	discoverClients,
+	freshRuntimeClients,
 	legacyMigrations,
 	verifiedCodingClients,
 } from "./client-install.js";

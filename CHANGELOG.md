@@ -26,6 +26,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `pharaoh` skill's connection URL is `https://mcp.pharaoh.so/mcp` instead of `/sse`. The skill also carries the guidance that was only in the server instructions: one Pharaoh call answers what grep and file reads take many turns to piece together, load Pharaoh's tools before the first code search when your client defers them, summarize a block marked "Trace view available" instead of reproducing it, and check related repos when a change touches shared interfaces.
 - The server instructions state facts: what Pharaoh maps, which tool answers which question, what the graph leaves to grep, how repos are mapped and what each account tool does. Asking Pharaoh first, not re-checking its answers with grep, surfacing and crediting its ★ blocks and the rest of that guidance now live in the `pharaoh` skill. Claude Code and OpenClaw list the skill in every session and load its body only when they use it. The Grep hook and the optional `~/.claude/CLAUDE.md` line are unchanged and apply from the start of a session.
 
+## [0.3.75] - 2026-11-06
+
+### Fixed
+- Setup starts with one line: "Run the Pharaoh setup tool." The tool delivers the bounded investigation guidance to the agent, and Pharaoh's in-chat card keeps agent-only instructions out of its visible text.
+
+## [0.3.74] - 2026-11-05
+
+### Added
+- Negotiated, finite model and installation-build metadata for runtime analytics. Claude Code keeps selected-model provenance across ordinary hooks and invalidates ambiguous lifecycle changes; Codex request observations remain explicitly uncorrelated.
+- Registered-hook capability and daily build refresh distinguish recognized models from clients that can support a separately validated exploration estimate. No savings numbers are bundled with the package.
+
+## [0.3.73] - 2026-11-05
+
+### Changed
+- Setup now hands you a complete request for your agent to investigate one useful thing you could build from existing capabilities, with three verified code links and Codebase Health as an ongoing goal. The request bounds the investigation to read-only work; the setup tool returns factual status, and the npx skill supplements the request without assuming setup invokes it.
+
+## [0.3.72] - 2026-11-05
+
+### Changed
+- First-use guidance leads with a detected code dependency and a concrete work offer, then introduces Codebase Health progress and supported project-memory capabilities without claiming unmeasured savings or passive learning. Function references remain distinct from verified calls.
+
+## [0.3.71] - 2026-11-05
+
+### Changed
+- New managed Claude Code and Codex connections can enable runtime analytics during ordinary device sign-in. `install --skip-runtime` and `--runtime-revoke` persist the choice to keep collection off.
+
+## [0.3.70] - 2026-11-05
+
+### Added
+- Separate opt-in runtime analytics for supported local clients. Claude Code can report finite instruction-load and Pharaoh skill events, and Codex can report model-request counts. No instruction or skill text, local paths, prompts, transcripts or tool output is sent.
+- `--runtime-enable`, `--runtime-status` and `--runtime-revoke` control collection without changing project-memory choices. `--doctor` reports local status offline.
+
 ## [0.3.69] - 2026-11-05
 
 ### Fixed

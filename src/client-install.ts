@@ -20,6 +20,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { DEFAULT_SERVER } from "./helpers.js";
 import type {
 	ClientId,
 	ClientInstallOptions,
@@ -28,6 +29,7 @@ import type {
 	LaunchConfig,
 	LegacyMigration,
 } from "./install-types.js";
+import { isNewerVersion, PACKAGE_NAME } from "./version.js";
 
 type Document = Record<string, unknown>;
 interface Snapshot {
@@ -454,6 +456,35 @@ export function legacyMigrations(
 	});
 }
 
+/** Read-only preflight before asking the device grant for enrollment tickets. */
+export function freshRuntimeClients(
+	targets: readonly ClientTarget[],
+	options: ClientInstallOptions = {},
+): Array<"claude-code" | "codex"> {
+	const { platform } = settings(options);
+	if (platform !== "darwin" && platform !== "linux") return [];
+	const records = Object.values(readProvenance(options).data.registrations);
+	return targets.flatMap((target) => {
+		const { client } = target;
+		if (client === "claude-desktop" || target.unavailableReason || target.ambiguousReason)
+			return [];
+		try {
+			const document = parse(target, snapshot(target.path).text);
+			if (
+				entry(document, client) !== undefined ||
+				disabled(document, undefined) ||
+				records.some((record) => record?.client === client && record.path === resolve(target.path))
+			)
+				return [];
+			if (client === "claude-code" && projectOverrides(document)) return [];
+			return [client];
+		} catch {
+			// Unreadable or ambiguous local settings cannot authorize automatic enrollment.
+			return [];
+		}
+	});
+}
+
 function provenancePath(options: ClientInstallOptions): string {
 	return join(settings(options).home, ".pharaoh", "client-installations.json");
 }
@@ -532,11 +563,13 @@ function result(
 	status: ClientOutcome["status"],
 	detail?: string,
 	recovery?: string,
+	created = false,
 ): ClientOutcome {
 	return {
 		client: target.client,
 		path: target.path,
 		status,
+		...(created ? { created: true } : {}),
 		...(detail ? { detail } : {}),
 		...(recovery ? { recovery } : {}),
 	};
@@ -631,7 +664,7 @@ function configureJson(
 		throw new Error("The configuration update changed unrelated settings.");
 	remember(target, servers.pharaoh, options);
 	atomicReplace(target.path, before, next);
-	return result(target, "configured", detail);
+	return result(target, "configured", detail, undefined, current === undefined);
 }
 
 function tomlBlock(launch: LaunchConfig): string {
@@ -710,7 +743,7 @@ function configureCodex(
 		if (!raw || canonical(cliLaunch(raw)) !== canonical(launch) || raw.enabled === false)
 			throw new Error("Codex did not report an enabled matching stdio registration.");
 		remember(target, entry(after, target.client), options);
-		return result(target, "configured");
+		return result(target, "configured", undefined, undefined, current === undefined);
 	}
 	if (current !== undefined && canonical(current) === canonical(launch))
 		return result(target, "already-configured");
@@ -736,7 +769,7 @@ function configureCodex(
 		throw new Error("The Codex table could not be appended without changing unrelated settings.");
 	remember(target, entry(verified, target.client), options, block);
 	atomicReplace(target.path, before, next);
-	return result(target, "configured");
+	return result(target, "configured", undefined, undefined, current === undefined);
 }
 
 /** Independently configure each discovered client, preserving custom and disabled entries. */
@@ -785,13 +818,51 @@ function sameRunningRuntime(configured: LaunchConfig, running: LaunchConfig): bo
 	return realpathSync(configured.command) === realpathSync(running.command);
 }
 
+function supportsRegisteredProxy(
+	launch: LaunchConfig,
+	home: string,
+	required: { minimumVersion: string; server: string },
+): boolean {
+	const [entry, flag, configuredServer, ...rest] = launch.args;
+	if (flag !== undefined && (flag !== "--server" || !configuredServer || rest.length)) return false;
+	if (new URL(configuredServer ?? DEFAULT_SERVER).origin !== new URL(required.server).origin)
+		return false;
+	const packageRoot = dirname(dirname(entry));
+	const pkg = json(snapshot(join(packageRoot, "package.json")).text);
+	const version = pkg.version;
+	return (
+		pkg.name === PACKAGE_NAME &&
+		typeof version === "string" &&
+		/^\d+\.\d+\.\d+$/.test(version) &&
+		(version === required.minimumVersion || isNewerVersion(version, required.minimumVersion)) &&
+		entry ===
+			join(
+				realpathSync(home),
+				".pharaoh",
+				"runtimes",
+				"mcp",
+				version,
+				"node_modules",
+				PACKAGE_NAME,
+				"dist",
+				"index.js",
+			) &&
+		lstatSync(entry).isFile() &&
+		lstatSync(join(packageRoot, "runtime", "runtime-client.mjs")).isFile()
+	);
+}
+
 /**
  * Read-only eligibility for automatic startup asset updates. Historical receipts,
  * mere client directories and another running package version do not authorize
  * changes. This deliberately avoids discoverClients and all executable probes.
  */
 export function verifiedCodingClients(
-	options: ClientInstallOptions & { runningLaunch?: LaunchConfig } = {},
+	options: ClientInstallOptions & {
+		runningLaunch?: LaunchConfig;
+		requiredProxy?: { minimumVersion: string; server: string };
+		rejectProjectOverrides?: boolean;
+	} = {},
 ): Array<"claude-code" | "codex"> {
 	let data: Provenance;
 	try {
@@ -823,9 +894,13 @@ export function verifiedCodingClients(
 			const value = entry(document, target.client);
 			if (
 				disabled(document, value) ||
+				(options.rejectProjectOverrides &&
+					target.client === "claude-code" &&
+					projectOverrides(document)) ||
 				!persistentLaunch(value) ||
 				!owned(target, value, data) ||
-				(options.runningLaunch && !sameRunningRuntime(value, options.runningLaunch))
+				(options.runningLaunch && !sameRunningRuntime(value, options.runningLaunch)) ||
+				(options.requiredProxy && !supportsRegisteredProxy(value, home, options.requiredProxy))
 			)
 				return [];
 			return [target.client];

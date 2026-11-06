@@ -109,6 +109,35 @@ async function wireClientAndServer(
 	};
 }
 
+it("does not forward caller runtime identity or expose an unbound runtime receipt", async () => {
+	let upstream: unknown;
+	const backend: Backend = {
+		name: "sse",
+		async listTools() {
+			return [];
+		},
+		async callTool(_name, args, options) {
+			upstream = { args, runtime: options?.runtime };
+			return {
+				content: [{ type: "text", text: "answer" }],
+				_meta: { other: "preserved", "pharaoh/runtime": { receipt: "fake", expiresAt: "invalid" } },
+			};
+		},
+	};
+	const harness = await wireClientAndServer(backend);
+	try {
+		const result = await harness.client.callTool({
+			name: "get_codebase_map",
+			arguments: { repo: "owner/repo" },
+			_meta: { "pharaoh/runtime": { credential: "caller-supplied" } },
+		});
+		expect(upstream).toEqual({ args: { repo: "owner/repo" }, runtime: undefined });
+		expect(result._meta).toEqual({ other: "preserved" });
+	} finally {
+		await harness.closeAll();
+	}
+});
+
 describe("ProxyServer with AuthRequiredBackend", () => {
 	let harness: Awaited<ReturnType<typeof wireClientAndServer>>;
 	let gatewayCalls: () => number;

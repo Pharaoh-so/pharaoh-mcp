@@ -22,7 +22,7 @@ import {
 	requestDeviceCode,
 	type TokenResponse,
 } from "./auth.js";
-import { type Credentials, readCredentials, writeCredentials } from "./credentials.js";
+import { type Credentials, readCredentials, saveAuthorizedCredentials } from "./credentials.js";
 import { resolveSseUrl, tokenToCredentials } from "./helpers.js";
 import { refreshIfNeeded } from "./refresh.js";
 
@@ -179,10 +179,10 @@ export function createGateway(opts: {
 	 * Persist a new session's credentials. Separated so handleToolCall stays
 	 * simple — see how success is collapsed into `pending = null; return null`.
 	 */
-	function persistAuthorizedToken(token: TokenResponse): void {
+	async function persistAuthorizedToken(token: TokenResponse): Promise<void> {
 		const sseUrl = resolveSseUrl(token.sse_url, opts.server);
 		const creds = tokenToCredentials(token, sseUrl, opts.server);
-		writeCredentials(creds, opts.credentialsPath);
+		await saveAuthorizedCredentials(creds, opts.credentialsPath);
 		lastCreds = creds;
 		pending = null;
 	}
@@ -197,9 +197,12 @@ export function createGateway(opts: {
 	 * side effect and returns the outbound response (or null on authorization).
 	 * Network errors fall through silently (no state change, retry on next call).
 	 */
-	function applyPollResult(state: PendingState, result: PollResult): ToolAuthResponse | null {
+	async function applyPollResult(
+		state: PendingState,
+		result: PollResult,
+	): Promise<ToolAuthResponse | null> {
 		if (result.status === "authorized") {
-			persistAuthorizedToken(result.token);
+			await persistAuthorizedToken(result.token);
 			return null;
 		}
 		if (result.status === "denied") {

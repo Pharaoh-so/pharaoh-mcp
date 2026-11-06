@@ -20,7 +20,7 @@ import {
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
 import { AuthRequiredBackend, createSseBackend } from "./backend.js";
-import { type Credentials, deleteCredentials, readCredentials } from "./credentials.js";
+import { type Credentials, readCredentials, takeCredentialsForLogout } from "./credentials.js";
 import { createGateway } from "./gateway.js";
 import { askYesNo, formatTtl, parseArgs, printLines, printUsage } from "./helpers.js";
 import {
@@ -140,6 +140,18 @@ async function main(): Promise<void> {
 		process.stdout.write(`${renderLocalSetupDiagnosis(diagnoseLocalSetup({ clientName }))}\n`);
 		return;
 	}
+	if (args.some((arg) => arg.startsWith("--runtime-"))) {
+		try {
+			const { runRuntimeCommand } = await import("./runtime-command.js");
+			process.exitCode = await runRuntimeCommand(args);
+		} catch {
+			printLines(
+				"Pharaoh: local runtime setup could not finish. Check the private setup state and retry.",
+			);
+			process.exitCode = 1;
+		}
+		return;
+	}
 
 	// Inspect mode — serve tool schemas over stdio for Glama directory inspection
 	if (args.includes("--inspect")) {
@@ -165,26 +177,31 @@ async function main(): Promise<void> {
 	// disabled states, project-scoped configs). Useful for resetting broken installs.
 	if (args.includes("--clean")) {
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
+		const { clearRuntimeForCleanup } = await import("./runtime-command.js");
+		const runtimeCleaned = await clearRuntimeForCleanup();
 		clearMemoryHookChoices(false);
 		reportMemorySetup();
 		const cleaned = await cleanupClientRegistrations(true);
 		uninstallClaudePlugin();
 		printLines("Pharaoh: local setup cleanup finished.");
-		process.exit(cleaned ? 0 : 1);
+		process.exit(cleaned && runtimeCleaned ? 0 : 1);
 	}
 
 	const { server, logout } = parseArgs(args);
 
 	if (logout) {
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
-		// Credentials first: a cleanup step that fails must never leave the tokens behind.
-		deleteCredentials();
+		// Retain the origin-bound bearer in memory long enough to request revocation.
+		// A cleanup step that fails must never leave credentials on disk.
+		const previousCredentials = await takeCredentialsForLogout();
+		const { clearRuntimeForCleanup } = await import("./runtime-command.js");
+		const runtimeCleaned = await clearRuntimeForCleanup(previousCredentials);
 		clearMemoryHookChoices(false);
 		reportMemorySetup();
 		const cleaned = await cleanupClientRegistrations(false);
 		uninstallClaudePlugin();
 		printLines("Pharaoh: credentials cleared and local setup cleanup finished.");
-		process.exit(cleaned ? 0 : 1);
+		process.exit(cleaned && runtimeCleaned ? 0 : 1);
 	}
 
 	const isInteractive = explicitInstall || Boolean(process.stdin.isTTY);
@@ -204,6 +221,7 @@ async function main(): Promise<void> {
 		process.exitCode = await runInstall({
 			server,
 			migrateLegacy: args.includes("--migrate-legacy"),
+			skipRuntime: args.includes("--skip-runtime"),
 			afterConfigure: async (credentials, clients) => {
 				let extraFailures = false;
 				const codingClients = clients.filter(
