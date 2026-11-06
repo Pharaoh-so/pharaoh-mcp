@@ -11,6 +11,7 @@ import {
 	nativeMemoryCallCurrent,
 	nativeMemoryRuntimeBinding,
 	observeRuntimeGeneration,
+	recordDeliveredLocalWorktreeAnswer,
 	releaseRuntimeGeneration,
 	runtimeConversationBinding,
 	verifyRuntimeSession,
@@ -97,6 +98,21 @@ async function answerLocal(
 				onDelivery(async (written) => {
 					try {
 						if (written) {
+							if (
+								expectedSignIn &&
+								query.entityType === "function" &&
+								result.targets.length === 1 &&
+								result.status !== "missing" &&
+								result.status !== "ambiguous"
+							) {
+								recordDeliveredLocalWorktreeAnswer(
+									checkout,
+									result.targets[0].name,
+									[...result.targets, ...result.callers].map(({ file }) => file),
+									snapshot.sources,
+									snapshot.capturedAt,
+								);
+							}
 							await currentAuthorization.commit(currentPermit, outcome, AbortSignal.timeout(5_000));
 						} else await currentAuthorization.abort(currentPermit, "cancelled");
 					} catch {

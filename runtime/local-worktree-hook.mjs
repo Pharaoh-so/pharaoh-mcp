@@ -2,8 +2,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { nativeEditPaths } from "../project-memory/graph-cues.mjs";
 import {
 	conversationMemoryBinding,
 	markSessionLocal,
@@ -42,9 +43,15 @@ const SHA = /^[a-f0-9]{64}$/;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/;
 const STATE = "grants.json";
 const MEMORY_STATE = "memory-calls.json";
+const RECHECK_STATE = "blast-rechecks.json";
+const RECHECK_LOCK = "blast-rechecks.lock";
 const MAX_GRANTS = 32;
 const MAX_MARKERS = 16;
 const MAX_MEMORY_CALLS = 64;
+const MAX_RECHECK_FILES = 24;
+const MAX_PENDING_EDITS = 4;
+const MAX_EDIT_FILES = 4;
+const MAX_CALL_TOKENS = 2_048;
 const MAX_MEMORY_ARGUMENT_BYTES = 32_768;
 const STATE_BYTES = 262_144;
 const MAX_HOOK_BYTES = 1_048_576;
@@ -63,6 +70,8 @@ const HOSTED_CUE =
 	"Pharaoh's hosted blast radius uses the default branch. Saved worktree scope is unavailable in this turn.";
 const RETRY_CUE =
 	"Verify Pharaoh scope again before sending a local query. Hosted queries use the default-branch map.";
+const RECHECK_CUE =
+	"Saved source changed after the earlier local Pharaoh blast-radius answer. That answer may be stale. When the related edits are saved, rerun the same local query before relying on it.";
 const MEMORY_REFUSAL = "Pharaoh Project Memory is unavailable for this worktree conversation.";
 const deny = (reason = RETRY_CUE) => ({
 	hookSpecificOutput: {
@@ -181,6 +190,311 @@ function mutateGrants(directory, now, update) {
 		if (result) writeRuntimeJSON(directory, STATE, { version: 2, grants }, STATE_BYTES);
 		return result;
 	});
+}
+
+function recheckKey(grant) {
+	return hash(JSON.stringify([grant.session, grant.epoch, grant.attachment?.generation]));
+}
+
+function validCallCount(count) {
+	return Number.isSafeInteger(count) && count >= 0 && count <= MAX_CALL_TOKENS;
+}
+
+function validFingerprints(items, limit, beforeSave = false) {
+	return (
+		Array.isArray(items) &&
+		items.length <= limit &&
+		items.every(
+			(item) =>
+				Array.isArray(item) &&
+				item.length === (beforeSave ? 3 : 2) &&
+				SHA.test(item[0] ?? "") &&
+				((beforeSave && item[1] === null) || SHA.test(item[1] ?? "")) &&
+				(!beforeSave || item[2] === null || validCallCount(item[2])),
+		)
+	);
+}
+
+function readRechecks(directory, now) {
+	const data = readRuntimeJSON(join(directory, RECHECK_STATE), STATE_BYTES);
+	if (data?.version !== 2 || !Array.isArray(data.records) || data.records.length > MAX_GRANTS)
+		return [];
+	return data.records.filter((record) => {
+		if (
+			!record ||
+			!SHA.test(record.key ?? "") ||
+			!Number.isSafeInteger(record.expiresAt) ||
+			record.expiresAt <= now ||
+			record.expiresAt > now + APPROVAL_MS
+		)
+			return false;
+		if (record.cued === true) return true;
+		return (
+			TOKEN.test(record.capture ?? "") &&
+			Number.isSafeInteger(record.capturedAt) &&
+			(record.target === null || SHA.test(record.target ?? "")) &&
+			validFingerprints(record.files, MAX_RECHECK_FILES) &&
+			Array.isArray(record.edits) &&
+			record.edits.length <= MAX_PENDING_EDITS &&
+			record.edits.every(
+				(edit) =>
+					edit && SHA.test(edit.call ?? "") && validFingerprints(edit.before, MAX_EDIT_FILES, true),
+			)
+		);
+	});
+}
+
+function liveRecheckGrants(directory, now) {
+	return readGrants(directory, now).filter(
+		(grant) => attachmentAlive(grant.attachment) && active(directory, grant, now),
+	);
+}
+
+function updateRecheck(directory, grant, now, update) {
+	const key = recheckKey(grant);
+	return runtimeLock(
+		directory,
+		() => {
+			const live = new Set(liveRecheckGrants(directory, now).map(recheckKey));
+			if (!live.has(key)) return;
+			const records = readRechecks(directory, now).filter((record) => live.has(record.key));
+			const previous = records.find((record) => record.key === key);
+			if (previous?.cued) return;
+			const next = update(previous);
+			if (!next) return;
+			writeRuntimeJSON(
+				directory,
+				RECHECK_STATE,
+				{ version: 2, records: [next, ...records.filter((record) => record.key !== key)] },
+				STATE_BYTES,
+			);
+			return next;
+		},
+		now,
+		60_000,
+		RECHECK_LOCK,
+	);
+}
+
+function fingerprintKey(grant, path) {
+	return hash(`${grant.token}\0${path}`);
+}
+
+const CALLABLE = /^[$_\p{ID_Start}][$_\p{ID_Continue}]*$/u;
+const SOURCE_TOKEN =
+	/\/\/[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)|#[^\r\n]*|"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|([$_\p{ID_Start}][$_\p{ID_Continue}]*)(\s*(?:\?\.\s*)?\()?/gu;
+
+function callableKey(grant, name) {
+	return fingerprintKey(grant, `call\0${name}`);
+}
+
+function callEvidence(grant, target, bytes) {
+	// This advisory only needs a new call-shaped reference. The analyzer resolves
+	// actual graph edges if the agent chooses to query again.
+	let candidates = 0;
+	let matches = 0;
+	let previous;
+	for (const [, name, call] of bytes.toString("utf8").matchAll(SOURCE_TOKEN)) {
+		if (call && previous !== "function" && previous !== "def") {
+			if (++candidates > MAX_CALL_TOKENS) return;
+			if (callableKey(grant, name) === target) matches++;
+		}
+		previous = name;
+	}
+	return matches;
+}
+
+/** Arm an optional cue after this exact native local answer is delivered. */
+export function recordDeliveredLocalWorktreeAnswer(
+	checkout,
+	target,
+	paths,
+	sources,
+	capturedAt,
+	now = Date.now(),
+) {
+	try {
+		const claim = consumedClaims.get(checkout);
+		if (!claim || !localWorktreeClaimCurrent(checkout, now)) return "skipped";
+		const directory = privateDirectory(claim.home, false);
+		const runtime = observedRuntimes.get(claim.generation);
+		const grant = readGrants(directory, now).find(
+			(value) =>
+				value.attachment?.generation === runtime?.id &&
+				value.session === claim.session &&
+				value.epoch === claim.epoch &&
+				sameCheckout(value.checkout, checkout),
+		);
+		if (!grant) return "skipped";
+		const fingerprints = [];
+		for (const path of new Set(paths)) {
+			const bytes = sources.get(path);
+			if (!bytes) continue;
+			fingerprints.push([fingerprintKey(grant, path), hash(bytes)]);
+			if (fingerprints.length >= MAX_RECHECK_FILES) break;
+		}
+		if (!fingerprints.length) return "skipped";
+		const written = updateRecheck(directory, grant, now, (previous) => {
+			if (previous && previous.capturedAt > capturedAt) return;
+			return {
+				key: recheckKey(grant),
+				capture: randomToken(),
+				capturedAt,
+				expiresAt: grant.expiresAt,
+				target: CALLABLE.test(target) ? callableKey(grant, target) : null,
+				files: fingerprints,
+				edits: [],
+			};
+		});
+		return written === null ? "unavailable" : written ? "recorded" : "skipped";
+	} catch {
+		return "unavailable";
+	}
+}
+
+function savePaths(input, options, checkout, grant, known, post) {
+	const paths = new Map();
+	for (const { path, mayAdd } of nativeEditPaths(input, options.client, post)) {
+		if (typeof path !== "string" || Buffer.byteLength(path) > 4096 || /[\0\r\n]/.test(path))
+			continue;
+		const source = relative(checkout.root, resolve(input.cwd, path)).split(sep).join("/");
+		if (
+			!source ||
+			isAbsolute(source) ||
+			source === ".." ||
+			source.startsWith("../") ||
+			!options.isSourcePath?.(source)
+		)
+			continue;
+		const key = fingerprintKey(grant, source);
+		paths.set(source, { key, mayAdd, known: known.has(key) });
+	}
+	return paths;
+}
+
+function observeNativeSave(directory, input, options, session, turn) {
+	const {
+		binding,
+		client,
+		home,
+		now,
+		readSourceFingerprints,
+		resolveCheckout,
+		visibleSourcePaths,
+	} = options;
+	const call = nativeIdentifier(input.tool_use_id);
+	if (
+		!directory ||
+		!binding ||
+		!session ||
+		!turn ||
+		!call ||
+		typeof input.cwd !== "string" ||
+		!readSourceFingerprints
+	)
+		return;
+	const grant = liveRecheckGrants(directory, now).find(
+		(value) =>
+			value.client === client &&
+			value.binding === binding &&
+			value.session === session &&
+			value.turn === turn,
+	);
+	if (!grant) return;
+	const record = readRechecks(directory, now).find((value) => value.key === recheckKey(grant));
+	if (!record || record.cued) return;
+	const post = input.hook_event_name === "PostToolUse";
+	const callKey = hash(call);
+	const pending = record.edits.find((entry) => entry.call === callKey);
+	if (post ? !pending : pending) return;
+	const current = (previous) => previous?.capture === record.capture;
+	if (
+		post &&
+		!updateRecheck(directory, grant, now, (previous) =>
+			current(previous) && previous.edits.some((entry) => entry.call === callKey)
+				? { ...previous, edits: previous.edits.filter((entry) => entry.call !== callKey) }
+				: undefined,
+		)
+	)
+		return;
+	const known = new Map(record.files);
+	const paths = savePaths(input, options, grant.checkout, grant, known, post);
+	if (!paths.size) return;
+	const evidence = resolveCheckout(input.cwd);
+	if (
+		evidence?.kind !== "checkout" ||
+		!sameCheckout(evidence.checkout, grant.checkout) ||
+		legacyMemoryHooksMayRun(client, evidence.checkout.root, conversationStorage) ||
+		sessionLocalSensitivity(grant.memoryBinding, { home, storage: conversationStorage }) !== "local"
+	)
+		return;
+	const before = new Map(
+		pending?.before.map(([key, fingerprint, calls]) => [key, { fingerprint, calls }]),
+	);
+	const visible = [...paths.values()].some((entry) => !entry.known)
+		? new Set(visibleSourcePaths?.(evidence.checkout))
+		: undefined;
+	for (const [path, entry] of paths) {
+		if (
+			(post && !before.has(entry.key)) ||
+			(!entry.known && !visible?.has(path) && (post || !entry.mayAdd))
+		)
+			paths.delete(path);
+	}
+	if (!paths.size) return;
+	const bounded = [...paths].sort(([, a], [, b]) => Number(b.known) - Number(a.known));
+	paths.clear();
+	for (const [path, entry] of bounded.slice(0, MAX_EDIT_FILES)) paths.set(path, entry);
+	const calls = new Map();
+	const observed = readSourceFingerprints(evidence.checkout, [...paths.keys()], (path, bytes) => {
+		if (record.target && !paths.get(path)?.known && visible?.has(path)) {
+			const count = callEvidence(grant, record.target, bytes);
+			if (count !== undefined) calls.set(path, count);
+		}
+	});
+	if (!observed) return;
+	if (!post) {
+		const fingerprints = [];
+		for (const [path, { key, mayAdd, known }] of paths) {
+			const fingerprint = observed.get(path);
+			const count = calls.get(path) ?? null;
+			if (
+				(fingerprint === null && (known || mayAdd)) ||
+				((known || count !== null) && SHA.test(fingerprint ?? ""))
+			)
+				fingerprints.push([key, fingerprint, count]);
+		}
+		if (fingerprints.length)
+			updateRecheck(directory, grant, now, (previous) =>
+				current(previous) && !previous.edits.some((entry) => entry.call === callKey)
+					? {
+							...previous,
+							edits: [{ call: callKey, before: fingerprints }, ...previous.edits].slice(
+								0,
+								MAX_PENDING_EDITS,
+							),
+						}
+					: undefined,
+			);
+		return;
+	}
+	const relevant = [...paths].some(([path, { key }]) => {
+		const saved = observed.get(path);
+		const prior = before.get(key);
+		if (!prior || saved === undefined || saved === prior.fingerprint) return false;
+		if (known.has(key)) return saved !== known.get(key);
+		return (
+			SHA.test(saved ?? "") &&
+			(prior.fingerprint === null ||
+				(prior.calls !== null && (calls.get(path) ?? -1) > prior.calls))
+		);
+	});
+	if (!relevant) return;
+	const marked = updateRecheck(directory, grant, now, (previous) =>
+		current(previous) ? { key: record.key, expiresAt: record.expiresAt, cued: true } : undefined,
+	);
+	if (marked && liveRecheckGrants(directory, now).some((value) => recheckKey(value) === record.key))
+		return context("PostToolUse", RECHECK_CUE);
 }
 
 function mutateMemoryCalls(directory, now, update) {
@@ -466,7 +780,8 @@ export function handleLocalWorktreeHook(input, options) {
 	const binding = SHA.test(options.binding ?? "") ? options.binding : undefined;
 	if (!CLIENTS.includes(client) || !input || typeof input !== "object") return;
 	const event = input.hook_event_name;
-	if (event === "PreToolUse" && !claimedTool(input)) return;
+	const claimed = event === "PreToolUse" && claimedTool(input);
+	const save = (event === "PreToolUse" || event === "PostToolUse") && !claimed;
 	const nativeSession = nativeIdentifier(input.session_id);
 	const nativeTurn = nativeIdentifier(client === "codex" ? input.turn_id : input.prompt_id);
 	const session = nativeSession ? hash(JSON.stringify([client, nativeSession])) : undefined;
@@ -481,7 +796,7 @@ export function handleLocalWorktreeHook(input, options) {
 		// Hosted-only installs need no private directory.
 	}
 
-	if (event === "PreToolUse") {
+	if (claimed) {
 		try {
 			return preTool(directory, input, { ...options, binding, home, now }, session, turn);
 		} catch {
@@ -489,6 +804,8 @@ export function handleLocalWorktreeHook(input, options) {
 		}
 	}
 	try {
+		if (save)
+			return observeNativeSave(directory, input, { ...options, binding, home, now }, session, turn);
 		if (session && directory && RESET.includes(event)) {
 			const current = currentEpoch(directory, session);
 			if (
@@ -864,30 +1181,49 @@ async function runHook(client) {
 	if (!CLIENTS.includes(client)) return;
 	const input = await readHookInput();
 	if (!input) return;
-	if (input.hook_event_name === "PreToolUse" && !claimedTool(input)) return;
-	const [{ resolveLocalCheckout }, { verifiedCodingClients }, { installedLocalAnalyzer }] =
-		await Promise.all([
-			import("../dist/local/scope.js"),
-			import("../dist/client-install.js"),
-			import("../dist/local/worker-host.js"),
-		]);
+	const save =
+		(input.hook_event_name === "PreToolUse" || input.hook_event_name === "PostToolUse") &&
+		!claimedTool(input);
+	if (save && !nativeEditPaths(input, client, false).length) return;
+	const [
+		{ resolveLocalCheckout, fingerprintLocalSources, listLocalCheckoutPaths },
+		{ verifiedCodingClients },
+		{ installedLocalAnalyzer },
+	] = await Promise.all([
+		import("../dist/local/scope.js"),
+		import("../dist/client-install.js"),
+		import("../dist/local/worker-host.js"),
+	]);
 	const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 	const home = homedir();
 	const managed = verifiedCodingClients({
 		runningLaunch: { command: process.execPath, args: [entry] },
 		rejectProjectOverrides: true,
 	}).includes(client);
-	const verified = managed && installedLocalAnalyzer() && localWorktreeDiagnosticsReady(home);
+	const analyzer = managed ? installedLocalAnalyzer() : undefined;
+	const verified = analyzer && localWorktreeDiagnosticsReady(home);
 	const credentials = verified
 		? readRuntimeJSON(join(home, ".pharaoh", "credentials.json"), 65_536)
 		: undefined;
 	const binding = localWorktreeBinding(client, entry, credentials);
+	const deadline = performance.now() + 1_500;
+	const saveOptions =
+		save && analyzer && binding
+			? {
+					isSourcePath: (await import("../dist/local/snapshot.js")).isLocalSourcePath,
+					readSourceFingerprints: (checkout, paths, visit) =>
+						fingerprintLocalSources(checkout, analyzer.reader, paths, deadline, visit),
+					visibleSourcePaths: (checkout) =>
+						listLocalCheckoutPaths(checkout, analyzer.reader, deadline),
+				}
+			: undefined;
 	const result = handleLocalWorktreeHook(input, {
 		client,
 		binding,
 		memoryRuntime: managed ? nativeMemoryRuntimeBinding(client, entry) : undefined,
 		resolveCheckout: resolveLocalCheckout,
 		home,
+		...saveOptions,
 	});
 	if (result) process.stdout.write(JSON.stringify(result));
 }

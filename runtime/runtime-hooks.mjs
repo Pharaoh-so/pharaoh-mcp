@@ -283,6 +283,10 @@ export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
 				},
 			];
 		}
+		const editMatcher = client === "claude-code" ? "^(?:Edit|Write|MultiEdit)$" : "^apply_patch$";
+		for (const event of ["PreToolUse", "PostToolUse"]) {
+			hooks[event] = [...(hooks[event] ?? []), { matcher: editMatcher, hooks: [handler] }];
+		}
 		changed = true;
 	}
 	if (!changed) return;

@@ -249,7 +249,7 @@ interface CapturedMetadata {
 	bytes: Buffer;
 }
 
-/** Only fixed Git metadata and enumerated .gitignore paths are passed here. */
+/** Read a bounded batch of repository-relative paths through the native reader. */
 function confinedMetadata(
 	reader: string,
 	root: string,
@@ -257,6 +257,7 @@ function confinedMetadata(
 	paths: readonly string[],
 	deadline: number,
 	maxBuffer = MAX_CONFINED_METADATA,
+	maxStatus = 2,
 ): Map<string, CapturedMetadata> | undefined {
 	const entries = new Map<string, CapturedMetadata>();
 	if (paths.length === 0) return entries;
@@ -289,11 +290,45 @@ function confinedMetadata(
 		const status = result.stdout.readUInt8(offset);
 		const size = result.stdout.readUInt32BE(offset + 1);
 		offset += 5;
-		if (status > 2 || (status !== 0 && size !== 0) || offset + size > result.stdout.length) return;
+		if (status > maxStatus || (status !== 0 && size !== 0) || offset + size > result.stdout.length)
+			return;
 		entries.set(path, { status, bytes: result.stdout.subarray(offset, offset + size) });
 		offset += size;
 	}
 	return offset === result.stdout.length ? entries : undefined;
+}
+
+/**
+ * Fingerprint a small batch of eligible source paths without releasing their bytes.
+ * @public Used by the packaged local-worktree hook through the compiled module.
+ */
+export function fingerprintLocalSources(
+	checkout: VerifiedCheckout,
+	reader: string,
+	paths: readonly string[],
+	deadline: number,
+	visit?: (path: string, bytes: Buffer) => void,
+): Map<string, string | null> | undefined {
+	if (paths.length > 4 || performance.now() >= deadline) return;
+	const entries = confinedMetadata(
+		reader,
+		checkout.root,
+		`${checkout.device} ${checkout.inode}`,
+		paths,
+		deadline,
+		4 * 1_000_005,
+		5,
+	);
+	if (!entries) return;
+	const fingerprints = new Map<string, string | null>();
+	for (const [path, { status, bytes }] of entries) {
+		if (status === 0) {
+			fingerprints.set(path, createHash("sha256").update(bytes).digest("hex"));
+			visit?.(path, bytes);
+		} else if (status === 1) fingerprints.set(path, null);
+		// Other native statuses are individually uncertain, not evidence of absence.
+	}
+	return fingerprints;
 }
 
 interface RepoSettings {
@@ -613,8 +648,11 @@ function untrackedPaths(
 }
 
 /** Run Git only against private projected metadata and an empty worktree scaffold. */
-function windowsInventory(checkout: VerifiedCheckout, reader: string): string[] | undefined {
-	const deadline = performance.now() + INVENTORY_TIMEOUT_MS;
+function windowsInventory(
+	checkout: VerifiedCheckout,
+	reader: string,
+	deadline: number,
+): string[] | undefined {
 	const layout = windowsLayout(checkout.root, reader, deadline);
 	if (!layout || worktreeIdentity(layout) !== checkout.worktreeId) return;
 	const windows = resolveTrustedGitWin(reader, deadline);
@@ -809,10 +847,13 @@ function posixInventoryNames(layout: GitLayout, deadline: number): string[] | un
 	}
 }
 
-function posixInventory(checkout: VerifiedCheckout, reader: string): string[] | undefined {
+function posixInventory(
+	checkout: VerifiedCheckout,
+	reader: string,
+	deadline: number,
+): string[] | undefined {
 	const executable = GIT_LOCATIONS.find(existsSync);
 	if (!executable) return;
-	const deadline = performance.now() + INVENTORY_TIMEOUT_MS;
 	let scratch: string | undefined;
 	try {
 		const layout = posixLayout(checkout.root, reader, deadline);
@@ -877,14 +918,16 @@ function posixInventory(checkout: VerifiedCheckout, reader: string): string[] | 
  * List saved worktree candidates without checking out files or invoking Git filters.
  * @param checkout - Current verified checkout
  * @param reader - Verified packed reader supplied by the snapshot coordinator
+ * @param deadline - Optional tighter limit for best-effort hook checks
  * @returns Repository-relative regular index and nonignored untracked paths, or undefined on failure
  */
 export function listLocalCheckoutPaths(
 	checkout: VerifiedCheckout,
 	reader?: string,
+	deadline = performance.now() + INVENTORY_TIMEOUT_MS,
 ): string[] | undefined {
-	if (!reader) return;
+	if (!reader || performance.now() >= deadline) return;
 	return process.platform === "win32"
-		? windowsInventory(checkout, reader)
-		: posixInventory(checkout, reader);
+		? windowsInventory(checkout, reader, deadline)
+		: posixInventory(checkout, reader, deadline);
 }
