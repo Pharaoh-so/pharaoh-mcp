@@ -22,7 +22,14 @@ import {
 import { AuthRequiredBackend, createSseBackend } from "./backend.js";
 import { type Credentials, readCredentials, takeCredentialsForLogout } from "./credentials.js";
 import { createGateway } from "./gateway.js";
-import { askYesNo, formatTtl, parseArgs, printLines, printUsage } from "./helpers.js";
+import {
+	askYesNo,
+	askYesNoInTerminal,
+	formatTtl,
+	parseArgs,
+	printLines,
+	printUsage,
+} from "./helpers.js";
 import {
 	allowReadTools,
 	describeAgentInstructionOutcome,
@@ -73,10 +80,7 @@ async function setupMemoryHooks(credentials: Credentials, clients: string[], req
 			credentials,
 			clients,
 			requested,
-			ask: (question, defaultAnswer) =>
-				process.stderr.isTTY
-					? askYesNo(question, process.stdin, process.stderr, defaultAnswer)
-					: Promise.resolve(null),
+			ask: askYesNoInTerminal,
 		});
 		const notices = applyMemoryHookChoices(decision, { credentials });
 		if (notices.length) printLines(...notices);
@@ -100,6 +104,21 @@ async function cleanupClientRegistrations(reset: boolean): Promise<boolean> {
 	}
 	if (reset) cleanSlate();
 	cleanCodexSetup();
+	const localCleanupSupported =
+		typeof process.getuid === "function" ||
+		(process.platform === "win32" &&
+			Boolean((await import("./local/worker-host.js")).installedLocalAnalyzer()));
+	if (localCleanupSupported) {
+		const { syncLocalWorktreeHooks } = await import("../runtime/runtime-hooks.mjs");
+		for (const client of ["claude-code", "codex"] as const) {
+			try {
+				syncLocalWorktreeHooks(client, null);
+			} catch {
+				printLines("Pharaoh: saved-worktree hook cleanup needs attention.");
+				provenanceFailed = true;
+			}
+		}
+	}
 	for (const outcome of outcomes) {
 		if (outcome.status === "failed" || outcome.status === "ambiguous") {
 			printLines(

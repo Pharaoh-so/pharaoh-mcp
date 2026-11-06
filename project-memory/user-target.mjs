@@ -1,7 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	constants,
+	fstatSync,
+	lstatSync,
+	openSync,
+	readFileSync,
+	readSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { hasLegacyHooks } from "./hook-config.mjs";
 import { atomicWrite, checkout, gitBefore } from "./local.mjs";
 import { PROJECT_MEMORY_ORIGIN, requestMemoryReadiness } from "./memory-api.mjs";
@@ -140,15 +151,76 @@ export async function cachedMemoryCheckout(cwd, credentials) {
 	if (hint) return resolveMappedCheckout(target, credentials, hint, false);
 }
 
-export function readHookSettings(path) {
+export function readHookSettings(path, storage) {
+	let fd;
 	try {
-		const info = lstatSync(path);
-		if (!info.isFile() || info.uid !== process.getuid?.() || info.size > 512 * 1024)
+		if (storage) storage.privatePath(dirname(path), true);
+		const info = storage ? storage.privatePath(path, false) : lstatSync(path);
+		if (!info.isFile() || (!storage && info.uid !== process.getuid?.()) || info.size > 512 * 1024)
 			throw new Error("Expected a regular owner-controlled hook settings file.");
-		return JSON.parse(readFileSync(path, "utf8"));
+		if (!storage) return JSON.parse(readFileSync(path, "utf8"));
+		fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		const opened = fstatSync(fd);
+		if (opened.dev !== info.dev || opened.ino !== info.ino || opened.size !== info.size)
+			throw new Error("Hook settings changed during inspection.");
+		const bytes = Buffer.alloc(opened.size + 1);
+		const length = readSync(fd, bytes, 0, bytes.length, 0);
+		if (length !== opened.size) throw new Error("Hook settings changed during inspection.");
+		return JSON.parse(bytes.toString("utf8", 0, length));
 	} catch (error) {
 		if (error.code === "ENOENT") return {};
 		throw error;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+function checkoutHookPath(path, directory, storage) {
+	const info = lstatSync(path);
+	if (
+		(directory ? !info.isDirectory() : !info.isFile() || info.nlink !== 1) ||
+		(typeof process.getuid === "function" &&
+			(info.uid !== process.getuid() || (info.mode & 0o022) !== 0))
+	) {
+		throw new Error("Expected an owner-controlled checkout hook path.");
+	}
+	// POSIX project directories can be readable to other users. On Windows,
+	// ask the native reader to check the ACL where the legacy file exists.
+	if (process.platform === "win32" && storage) storage.privatePath(path, directory);
+	return info;
+}
+
+/** Legacy checkout hooks can execute independently of the active managed bundle. */
+export function legacyMemoryHooksMayRun(client, root, storage) {
+	if (!Object.hasOwn(LEGACY_SETTINGS, client) || !isAbsolute(root)) return true;
+	try {
+		const path = legacySettingsPath(client, root);
+		const parent = dirname(path);
+		if (!lstatSync(parent, { throwIfNoEntry: false })) return false;
+		checkoutHookPath(parent, true);
+		if (!lstatSync(path, { throwIfNoEntry: false })) return false;
+		const projectStorage = {
+			privatePath: (target, directory) => checkoutHookPath(target, directory, storage),
+		};
+		const config = readHookSettings(path, projectStorage);
+		if (!config || typeof config !== "object" || Array.isArray(config)) return true;
+		const { hooks } = config;
+		if (
+			hooks !== undefined &&
+			(!hooks ||
+				typeof hooks !== "object" ||
+				Array.isArray(hooks) ||
+				Object.values(hooks).some(
+					(groups) =>
+						!Array.isArray(groups) || groups.some((group) => !Array.isArray(group?.hooks)),
+				))
+		) {
+			return true;
+		}
+		return hasLegacyHooks(config, client, root);
+	} catch {
+		// An unreadable settings file cannot establish that the old hook is absent.
+		return true;
 	}
 }
 
@@ -165,17 +237,8 @@ export async function resolveMemoryHookTarget(
 	const target = checkout(cwd, deadline);
 	const hint = target && matchingMemoryHint(target, hints);
 	if (!hint) return;
-	try {
-		// A checkout enrolled by the original pilot may still have its own hook.
-		// Leave that hook in charge until normal setup migrates the checkout.
-		if (
-			hasLegacyHooks(readHookSettings(legacySettingsPath(client, target.root)), client, target.root)
-		)
-			return;
-	} catch {
-		// A client settings file we cannot inspect is not safe to double-enroll.
-		return;
-	}
+	// Leave a checkout enrolled by the original pilot in charge until setup migrates it.
+	if (legacyMemoryHooksMayRun(client, target.root)) return;
 	return resolveMappedCheckout(target, credentials, hint, probe, deadline);
 }
 

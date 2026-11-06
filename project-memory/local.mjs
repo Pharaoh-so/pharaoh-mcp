@@ -187,6 +187,13 @@ export function sessionKey(client, sessionId) {
 	return createHash("sha256").update(`${client}\0${sessionId}`).digest("hex");
 }
 
+/** Derive the same opaque conversation identifier in independent native hooks. */
+export function conversationMemoryBinding(client, sessionId) {
+	if (client !== "claude-code" && client !== "codex") return;
+	const sessionRef = sessionKey(client, sessionId);
+	if (sessionRef) return { client, sessionRef };
+}
+
 function releaseLock(path, owner) {
 	try {
 		unlinkSync(join(path, owner));
@@ -281,6 +288,255 @@ export function updateWorktreeCueState(directory, update, now = Date.now()) {
 	}
 }
 
+const CONVERSATION_MARKER = "local-v1\n";
+
+const posixConversationStorage = {
+	ensurePrivateDirectory: makePrivateDirectory,
+	privatePath(path, directory) {
+		const info = lstatSync(path);
+		if (
+			(directory ? !info.isDirectory() : !info.isFile() || info.nlink !== 1) ||
+			info.mode & 0o077 ||
+			info.uid !== process.getuid?.()
+		)
+			throw new Error("Worktree conversation state requires a private path.");
+		return info;
+	},
+};
+
+function conversationPath(binding, home) {
+	if (
+		(binding?.client !== "claude-code" && binding?.client !== "codex") ||
+		typeof binding.sessionRef !== "string" ||
+		!TOKEN.test(binding.sessionRef) ||
+		!isAbsolute(home)
+	)
+		return;
+	return join(home, ".pharaoh", "local-worktree", "conversation-v1", `${binding.sessionRef}.local`);
+}
+
+function conversationParents(path) {
+	const directory = dirname(path);
+	return [dirname(dirname(directory)), dirname(directory), directory];
+}
+
+function readConversationMarker(storage, path) {
+	for (const directory of conversationParents(path)) storage.privatePath(directory, true);
+	const file = storage.privatePath(path, false);
+	return (
+		file.nlink === 1 &&
+		file.size === CONVERSATION_MARKER.length &&
+		readFileSync(path, "utf8") === CONVERSATION_MARKER
+	);
+}
+
+/** Mark the native conversation before exposing saved-worktree analysis to it. */
+export function markSessionLocal(binding, { home = homedir(), storage } = {}) {
+	const path = conversationPath(binding, home);
+	storage ??= process.platform === "win32" ? undefined : posixConversationStorage;
+	if (!path || !storage) return false;
+	try {
+		for (const directory of conversationParents(path)) storage.ensurePrivateDirectory(directory);
+		try {
+			writeFileSync(path, CONVERSATION_MARKER, { flag: "wx", mode: 0o600 });
+		} catch (error) {
+			if (error.code !== "EEXIST") throw error;
+		}
+		return readConversationMarker(storage, path);
+	} catch {
+		return false;
+	}
+}
+
+export const DIAGNOSTIC_SHELL_TOOLS = new Set(["Bash", "exec_command", "functions.exec_command"]);
+
+function explicitlyHostedShellBlast(command) {
+	if (/[\r\n]/.test(command)) return false;
+	const source = command.trim();
+	// Exempt only one literal command. Expansion, chaining and wrappers do
+	// not establish which options actually reached the local CLI.
+	const word = /(?:'([^']*)'|"([^"$`\\]*)"|([A-Za-z0-9_@./:+-]+))(?:[ \t]+|$)/gy;
+	const args = [];
+	while (word.lastIndex < source.length) {
+		const match = word.exec(source);
+		if (!match) return false;
+		args.push(match[1] ?? match[2] ?? match[3]);
+	}
+	const runner = args.shift();
+	if (runner === "npx") {
+		if (args[0] === "-y" || args[0] === "--yes") args.shift();
+		if (!/^@pharaoh-so\/mcp(?:@[\w.-]+)?$/.test(args.shift() ?? "")) return false;
+	} else if (!/(?:^|\/)pharaoh-mcp(?:\.cmd|\.exe)?$/.test(runner ?? "")) return false;
+	if (args.shift() !== "get_blast_radius") return false;
+	const scope = args.lastIndexOf("--scope");
+	return scope !== -1 && args[scope + 1] === "hosted";
+}
+
+/** Fence follow-up observations even when an attempted CLI call returned a privacy refusal. */
+export function protectLocalShellAttempt(client, input, { home = homedir() } = {}) {
+	if (input?.hook_event_name !== "PostToolUse" || !DIAGNOSTIC_SHELL_TOOLS.has(input.tool_name))
+		return;
+	const args = input.tool_input ?? input.tool_arguments;
+	const command = args?.command ?? args?.cmd;
+	if (
+		typeof command === "string" &&
+		/(?:^|[^\w-])get_blast_radius(?![\w-])/.test(command) &&
+		/(?:@pharaoh-so\/mcp\b|\bpharaoh-mcp\b)/i.test(command) &&
+		(command.length > 16_384 || !explicitlyHostedShellBlast(command))
+	) {
+		markSessionLocal(conversationMemoryBinding(client, input.session_id), { home });
+	}
+}
+
+/** `null` is positively hosted. Missing identity or unsafe state is uncertain. */
+export function sessionLocalSensitivity(binding, { home = homedir(), storage } = {}) {
+	if (binding === null) return "clear";
+	const path = conversationPath(binding, home);
+	storage ??= process.platform === "win32" ? undefined : posixConversationStorage;
+	if (!path || !storage) return "unknown";
+	try {
+		return readConversationMarker(storage, path) ? "local" : "unknown";
+	} catch (error) {
+		return error.code === "ENOENT" ? "clear" : "unknown";
+	}
+}
+
+/** Protected conversations still send content-free diagnostic events. */
+export function memoryEgressDecision(binding, operation, options) {
+	if (
+		operation === "diagnostics/control" ||
+		operation === "readiness" ||
+		sessionLocalSensitivity(binding, options) === "clear"
+	)
+		return "normal";
+	return operation === "diagnostics" ? "metadata" : "blocked";
+}
+
+const DIAGNOSTIC_UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+const DIAGNOSTIC_OUTCOMES = [
+	"success",
+	"empty",
+	"error",
+	"cancelled",
+	"uncertain",
+	"unknown",
+	"completed",
+	"abandoned",
+];
+
+/** Rebuild a protected event from finite metadata, including when reading an old queue. */
+export function diagnosticEventForEgress(client, event, options = {}) {
+	if (!event || typeof event !== "object") return;
+	const binding = { client, sessionRef: event.sessionRef };
+	// Older queues can contain prompt excerpts. A native turn observation is
+	// content-free even before a sibling hook has decided on worktree scope.
+	const input = event.payload ?? {};
+	const queuedText =
+		(event.kind === "turn_observed" &&
+			(input.taskSummary !== undefined || input.taskClipped !== undefined)) ||
+		(event.kind === "tool_observed" && input.operation === "shell_task");
+	if (
+		!options.metadataOnly &&
+		!queuedText &&
+		memoryEgressDecision(binding, "diagnostics", options) === "normal"
+	)
+		return event;
+	const { eventId, sessionRef, turnRef, identityProvenance, kind, observedAt } = event;
+	if (
+		!DIAGNOSTIC_UUID.test(eventId ?? "") ||
+		!(
+			TOKEN.test(sessionRef ?? "") ||
+			(typeof sessionRef === "string" &&
+				sessionRef.startsWith("unknown-") &&
+				DIAGNOSTIC_UUID.test(sessionRef.slice(8)))
+		) ||
+		!(
+			DIAGNOSTIC_UUID.test(turnRef ?? "") ||
+			(typeof turnRef === "string" && turnRef.startsWith("native-") && TOKEN.test(turnRef.slice(7)))
+		) ||
+		!["native", "local_session", "unknown"].includes(identityProvenance) ||
+		typeof observedAt !== "string" ||
+		!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(observedAt)
+	)
+		return;
+	let payload;
+	switch (kind) {
+		case "turn_observed": {
+			const { eligibility, linkage } = input.coverage ?? {};
+			payload =
+				["eligible", "heuristic_skip"].includes(eligibility) &&
+				["native", "session_only", "unknown"].includes(linkage)
+					? { coverage: { eligibility, linkage } }
+					: {};
+			break;
+		}
+		case "recall_observed":
+		case "tool_observed": {
+			const toolCallId =
+				typeof input.toolCallId === "string" && input.toolCallId.length <= 256
+					? /^h-[a-f0-9]{64}$/.test(input.toolCallId)
+						? input.toolCallId
+						: `h-${createHash("sha256").update(input.toolCallId).digest("hex")}`
+					: undefined;
+			const records = Array.isArray(input.records)
+				? input.records
+						.slice(0, 5)
+						.flatMap((record) =>
+							DIAGNOSTIC_UUID.test(record?.id ?? "") &&
+							Number.isInteger(record?.version) &&
+							record.version >= 1 &&
+							record.version <= 1_000_000
+								? [{ id: record.id, version: record.version }]
+								: [],
+						)
+				: undefined;
+			const common = { ...(toolCallId && { toolCallId }), ...(records && { records }) };
+			payload =
+				kind === "recall_observed"
+					? {
+							...common,
+							...(DIAGNOSTIC_UUID.test(input.recallId ?? "") && { recallId: input.recallId }),
+							...(DIAGNOSTIC_OUTCOMES.includes(input.outcome) && { outcome: input.outcome }),
+						}
+					: {
+							...common,
+							...([
+								"recall",
+								"expand",
+								"capture",
+								"feedback",
+								"readiness",
+								"edit",
+								"shell_task",
+							].includes(input.operation) && { operation: input.operation }),
+							...(DIAGNOSTIC_OUTCOMES.includes(input.status) && { status: input.status }),
+						};
+			break;
+		}
+		case "final_observed":
+			payload = { completion: "stop_observed" };
+			break;
+		case "interruption_observed":
+			payload = ["Interrupt", "StopFailure", "SessionEnd"].includes(input.reason)
+				? { reason: input.reason }
+				: {};
+			break;
+		case "collector_gap":
+			payload = {
+				reason: "local_capacity_or_expiry",
+				...(Number.isSafeInteger(input.count) &&
+					input.count >= 0 &&
+					input.count <= 1_000_000 && {
+						count: input.count,
+					}),
+			};
+			break;
+		default:
+			return;
+	}
+	return { eventId, sessionRef, turnRef, identityProvenance, kind, observedAt, payload };
+}
+
 /** Serialize local state transitions only; network operations never hold this lock. */
 export function turnStore(home = homedir(), now = Date.now) {
 	const directory = join(home, ".pharaoh", "project-memory-turns-v2");
@@ -354,6 +610,9 @@ export function turnStore(home = homedir(), now = Date.now) {
 		);
 	}
 	return {
+		conversation(token, target) {
+			return withTurn(token, target, (sessionRef, state) => ({ client: state.client, sessionRef }));
+		},
 		begin(key, target, client, nativeTurn, { skip, readOnly, memorySession }) {
 			return lock(
 				key,

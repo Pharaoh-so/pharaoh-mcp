@@ -1,4 +1,5 @@
 /** Owner-private, bounded storage shared by the opt-in runtime observer. */
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
 	closeSync,
@@ -13,7 +14,31 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+
+let windowsPrivatePathHelper;
+
+/** Use only the native helper found by the pinned analyzer loader. */
+export function setWindowsPrivatePathHelper(reader) {
+	if (process.platform === "win32" && typeof reader === "string" && isAbsolute(reader))
+		windowsPrivatePathHelper = reader;
+}
+
+function windowsPrivatePath(kind, path) {
+	if (!windowsPrivatePathHelper || !isAbsolute(path))
+		throw new Error("Private Windows runtime state is unavailable.");
+	const result = spawnSync(windowsPrivatePathHelper, ["private-path", kind, path], {
+		cwd: dirname(windowsPrivatePathHelper),
+		env: {},
+		stdio: "ignore",
+		timeout: 750,
+		windowsHide: true,
+	});
+	if (result.status === 0 && !result.error) return;
+	if (result.status === 2 && !result.error)
+		throw Object.assign(new Error("Private runtime path is absent."), { code: "ENOENT" });
+	throw new Error("Private Windows runtime state is unavailable.");
+}
 
 /** Resolve the observer's private directory without creating it. */
 export function runtimeRoot(home = homedir()) {
@@ -23,6 +48,12 @@ export function runtimeRoot(home = homedir()) {
 /** Require a regular owner-controlled file/directory, without following links. */
 export function privatePath(path, directory = false) {
 	const stat = lstatSync(path);
+	if (process.platform === "win32") {
+		if (directory ? !stat.isDirectory() : !stat.isFile())
+			throw new Error("Runtime observations require an owner-private regular path.");
+		windowsPrivatePath(directory ? "directory" : "file", path);
+		return stat;
+	}
 	if (
 		typeof process.getuid !== "function" ||
 		stat.uid !== process.getuid() ||
@@ -32,6 +63,25 @@ export function privatePath(path, directory = false) {
 		throw new Error("Runtime observations require an owner-private regular path.");
 	}
 	return stat;
+}
+
+/** Ensure a single directory exists with an owner-private ACL or mode. */
+export function ensurePrivateDirectory(path) {
+	if (process.platform === "win32") {
+		windowsPrivatePath("ensure-directory", path);
+		return;
+	}
+	try {
+		privatePath(path, true);
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+		try {
+			mkdirSync(path, { mode: 0o700 });
+		} catch (race) {
+			if (race.code !== "EEXIST") throw race;
+		}
+		privatePath(path, true);
+	}
 }
 
 /** Create the fixed private hierarchy; existing links and permissive directories are refused. */
@@ -67,6 +117,7 @@ export function readRuntimeJSON(path, limit = 16_384) {
 		const buffer = Buffer.alloc(limit + 1);
 		const length = readSync(fd, buffer, 0, buffer.length, 0);
 		if (length > limit) return null;
+		if (process.platform === "win32") privatePath(path);
 		return JSON.parse(buffer.subarray(0, length).toString("utf8"));
 	} catch {
 		return null;

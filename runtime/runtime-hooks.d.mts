@@ -9,3 +9,10 @@ export function updateRuntimeHooks(
 	selectionId?: string,
 	metadataVersion?: 1 | 2,
 ): Record<string, unknown>;
+
+/** Install or remove the managed local-worktree hooks without changing client trust. */
+export function syncLocalWorktreeHooks(
+	client: "claude-code" | "codex",
+	hookPath: string | null,
+	options?: { node?: string; settingsPath?: string },
+): void;

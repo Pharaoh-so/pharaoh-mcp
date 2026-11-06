@@ -52,7 +52,12 @@ export type DownstreamClient = {
 	};
 };
 
-type RequestOptions = { signal?: AbortSignal; timeout?: number; runtime?: RuntimeRequestMetadata };
+type RequestOptions = {
+	signal?: AbortSignal;
+	timeout?: number;
+	runtime?: RuntimeRequestMetadata;
+	beforeSend?: () => CallToolResult | undefined;
+};
 
 /** The contract ProxyServer uses to delegate tool handling. */
 export interface Backend {
@@ -461,7 +466,9 @@ export class SseProxyBackend implements Backend {
 		const client = await this.readyClient(options?.signal);
 		// Dispatch exactly once. An interrupted write has an uncertain outcome;
 		// recovery is for subsequent requests, never an implicit replay.
-		const { runtime, ...requestOptions } = options ?? {};
+		const { runtime, beforeSend, ...requestOptions } = options ?? {};
+		const refused = beforeSend?.();
+		if (refused) return refused;
 		const bound =
 			runtime && runtime.server === new URL(this.sseUrl).origin ? runtime.metadata : undefined;
 		const res = await client.callTool(

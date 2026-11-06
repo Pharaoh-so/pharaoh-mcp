@@ -4,12 +4,20 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync 
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { atomicWrite } from "./local.mjs";
+import {
+	atomicWrite,
+	conversationMemoryBinding,
+	DIAGNOSTIC_SHELL_TOOLS,
+	diagnosticEventForEgress,
+	protectLocalShellAttempt,
+} from "./local.mjs";
 import { requestMemory, requestMemoryPolicy } from "./memory-api.mjs";
 import { readHookPreferences } from "./preferences.mjs";
 import {
 	activeMemoryRuntime,
+	matchingMemoryHint,
 	memoryClientRoot,
+	projectMemoryHint,
 	projectMemorySession,
 	readMemoryCredentials,
 	resolveMemoryHookTarget,
@@ -197,9 +205,7 @@ function toolPayload(input, target) {
 		};
 	}
 	const args = input.tool_input ?? input.tool_arguments;
-	if (["Bash", "exec_command", "functions.exec_command"].includes(name)) {
-		const action = bounded(args?.description, 2048);
-		if (!action?.text) return;
+	if (DIAGNOSTIC_SHELL_TOOLS.has(name)) {
 		const response = input.tool_response ?? input.tool_result;
 		const status =
 			response?.isError === true ||
@@ -212,8 +218,6 @@ function toolPayload(input, target) {
 			kind: "tool_observed",
 			payload: {
 				operation: "shell_task",
-				actionExcerpt: action.text,
-				actionClipped: action.clipped,
 				status,
 				...(call && { toolCallId: call }),
 			},
@@ -356,6 +360,7 @@ function queueScopeKey(item) {
 		item.binding,
 		item.collectionGeneration,
 		item.collectionPolicyVersion,
+		item.metadataOnly === true,
 	]);
 }
 function revokedPolicy(policy, queued) {
@@ -397,17 +402,19 @@ export function collectDiagnosticEvent(
 		!activeMemoryRuntime(client, runtime, home)
 	)
 		return;
+	protectLocalShellAttempt(client, input, { home });
 	const binding = projectMemorySession(credentials);
 	if (!binding) return;
 	const promptClass = diagnosticPromptClass(input.prompt);
-
+	const optsOut = input.hook_event_name === "UserPromptSubmit" && promptClass === "opt_out";
 	const path = directory(client, home, true);
 	const release = lock(path, "collection.lock", now);
 	if (!release) return;
 	try {
 		const inventory = entries(path, now);
 		const session = identifier(input.session_id);
-		const sessionRef = session ? hash(`${client}\0${session}`) : `unknown-${randomUUID()}`;
+		const conversation = conversationMemoryBinding(client, session);
+		const sessionRef = conversation?.sessionRef ?? `unknown-${randomUUID()}`;
 		const statePath = join(path, `session-${sessionRef}.json`);
 		const previous = read(statePath, 4096);
 		const rawNativeTurn = identifier(input.turn_id ?? input.turnId);
@@ -424,7 +431,7 @@ export function collectDiagnosticEvent(
 		const state = same
 			? previous
 			: { binding, repo: target.repo, turnRef, nativeTurn, count: 0, size: 0 };
-		if (input.hook_event_name === "UserPromptSubmit" && promptClass === "opt_out") {
+		if (optsOut) {
 			state.optOut = true;
 			atomicWrite(statePath, JSON.stringify(state));
 			for (const item of inventory.events)
@@ -434,11 +441,11 @@ export function collectDiagnosticEvent(
 		}
 		let observation;
 		if (input.hook_event_name === "UserPromptSubmit") {
-			const task = bounded(input.prompt, 1024);
+			// A sibling native hook may still be establishing local scope. Retain
+			// turn coverage without spooling the prompt text in either hook order.
 			observation = {
 				kind: "turn_observed",
 				payload: {
-					...(task?.text?.trim() && { taskSummary: task.text, taskClipped: task.clipped }),
 					coverage: {
 						eligibility: promptClass,
 						linkage: identityProvenance === "native" ? "native" : "unknown",
@@ -462,7 +469,7 @@ export function collectDiagnosticEvent(
 		} else if (["Interrupt", "StopFailure", "SessionEnd"].includes(input.hook_event_name))
 			observation = { kind: "interruption_observed", payload: { reason: input.hook_event_name } };
 		if (!observation) return;
-		const event = {
+		const observed = {
 			eventId: randomUUID(),
 			sessionRef,
 			turnRef,
@@ -471,11 +478,12 @@ export function collectDiagnosticEvent(
 			observedAt: new Date(now).toISOString(),
 			payload: observation.payload,
 		};
+		const event = diagnosticEventForEgress(client, observed, { home });
+		if (!event) return;
 		const queued = {
 			repo: target.repo,
-			root: target.root,
+			...(event === observed ? { root: target.root } : { metadataOnly: true }),
 			binding,
-			runtime,
 			collectionGeneration: policy.generation,
 			collectionPolicyVersion: policy.policyVersion,
 			event,
@@ -506,18 +514,31 @@ export function collectDiagnosticEvent(
 					payload: { reason: "local_capacity_or_expiry", count: gapCount },
 				},
 			};
+			const safeGap = diagnosticEventForEgress(client, gap.event, { home });
+			if (safeGap && safeGap !== gap.event) {
+				delete gap.root;
+				gap.metadataOnly = true;
+				gap.event = safeGap;
+			}
 			atomicWrite(join(path, `event-${gap.event.eventId}.json`), JSON.stringify(gap));
 			rmSync(join(path, "gaps.json"), { force: true });
 			state.count++;
 			state.size += bytes(gap);
 		}
+		const finalEvent = diagnosticEventForEgress(client, event, { home });
+		if (!finalEvent) return;
+		if (finalEvent !== event) {
+			delete queued.root;
+			queued.metadataOnly = true;
+		}
+		queued.event = finalEvent;
 		atomicWrite(join(path, `event-${event.eventId}.json`), JSON.stringify(queued));
 		if (["final_observed", "interruption_observed"].includes(event.kind))
 			atomicWrite(join(path, "terminal-wake.json"), JSON.stringify({ eventId: event.eventId }));
 		state.count++;
 		state.size += size;
 		atomicWrite(statePath, JSON.stringify(state));
-		return event;
+		return finalEvent;
 	} finally {
 		release();
 		if (spawnSender) launchDiagnosticSender(client, { home, runtime });
@@ -604,7 +625,13 @@ export async function flushDiagnosticQueue(
 			)?.event;
 			if (!first) return;
 			const scope = queueScopeKey(first);
-			if (!(await resolveMemoryHookTarget(client, first.root, credentials, false, deadline))) {
+			// Content-free events do not retain checkout paths. They still require
+			// the live sign-in's repo hint and the scoped server policy below.
+			const metadataOnly = first.metadataOnly === true;
+			const target = metadataOnly
+				? matchingMemoryHint(first, projectMemoryHint(credentials))
+				: await resolveMemoryHookTarget(client, first.root, credentials, false, deadline);
+			if (!target) {
 				blocked.add(scope);
 				continue;
 			}
@@ -653,10 +680,16 @@ export async function flushDiagnosticQueue(
 					item.event.repo !== first.repo ||
 					item.event.binding !== first.binding ||
 					item.event.collectionGeneration !== first.collectionGeneration ||
-					item.event.collectionPolicyVersion !== first.collectionPolicyVersion
+					item.event.collectionPolicyVersion !== first.collectionPolicyVersion ||
+					(item.event.metadataOnly === true) !== metadataOnly
 				)
 					continue;
-				payload.events.push(item.event.event);
+				const event = diagnosticEventForEgress(client, item.event.event, { home, metadataOnly });
+				if (!event) {
+					rmSync(item.location, { force: true });
+					continue;
+				}
+				payload.events.push(event);
 				if (bytes(payload) >= MAX_BATCH) {
 					payload.events.pop();
 					break;
@@ -678,6 +711,7 @@ export async function flushDiagnosticQueue(
 			try {
 				response = await request("diagnostics", payload, {
 					credentials,
+					home,
 					timeoutMs: Math.max(1, Math.floor(deadline - performance.now())),
 				});
 			} catch {

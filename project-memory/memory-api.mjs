@@ -1,3 +1,5 @@
+import { diagnosticEventForEgress, memoryEgressDecision } from "./local.mjs";
+
 export const PROJECT_MEMORY_ORIGIN = "https://mcp.pharaoh.so";
 const READY_TIMEOUT_MS = 1_200;
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -98,10 +100,27 @@ function diagnosticResponseFields(result) {
 	};
 }
 
+export function requireMemoryEgress(binding, operation, options) {
+	if (memoryEgressDecision(binding, operation, options) === "blocked") {
+		throw new PilotError(
+			"Project Memory is paused for this conversation's local worktree context.",
+			true,
+		);
+	}
+}
+
 export async function requestMemory(
 	operation,
 	payload,
-	{ fetcher = fetch, helper, credentials, client, timeoutMs = REQUEST_TIMEOUT_MS } = {},
+	{
+		fetcher = fetch,
+		helper,
+		credentials,
+		client,
+		binding,
+		home,
+		timeoutMs = REQUEST_TIMEOUT_MS,
+	} = {},
 ) {
 	if (
 		!["recall", "capture", "expand", "diagnostics", "diagnostics/control", "feedback"].includes(
@@ -109,6 +128,8 @@ export async function requestMemory(
 		)
 	)
 		throw new PilotError("Unknown memory request.");
+	const privacy = { home };
+	requireMemoryEgress(binding, operation, privacy);
 	// Capture supplies its session snapshot so dispatch cannot adopt a different sign-in.
 	if (!credentials) {
 		const { originBoundRefresh } = helper ?? (await refreshHelper());
@@ -121,7 +142,7 @@ export async function requestMemory(
 		);
 	if (["recall", "expand", "capture"].includes(operation) && (client || payload.client)) {
 		const { memoryDiagnosticsForClient } = await import("./preferences.mjs");
-		const diagnostic = memoryDiagnosticsForClient({ name: client ?? payload.client });
+		const diagnostic = memoryDiagnosticsForClient({ name: client ?? payload.client }, home);
 		if (diagnostic || payload.diagnostics) {
 			const claimed = payload.diagnostics;
 			const baseline = Object.fromEntries(
@@ -131,6 +152,15 @@ export async function requestMemory(
 			);
 			payload = { ...payload, diagnostics: { ...baseline, ...diagnostic } };
 		}
+	}
+	requireMemoryEgress(binding, operation, privacy);
+	if (operation === "diagnostics") {
+		const events = (Array.isArray(payload.events) ? payload.events : []).flatMap((event) => {
+			const safe = diagnosticEventForEgress(payload.client, event, privacy);
+			return safe ? [safe] : [];
+		});
+		if (!events.length) return { acceptedEventIds: [], rejectedEventIds: [] };
+		payload = { ...payload, events };
 	}
 	let response;
 	try {
@@ -192,6 +222,13 @@ export async function requestMemory(
 		throw error;
 	}
 	if (["diagnostics", "diagnostics/control", "feedback"].includes(operation)) return result;
+	if (
+		result &&
+		typeof result === "object" &&
+		memoryEgressDecision(binding, operation, privacy) === "blocked"
+	) {
+		delete result.feedbackRequest;
+	}
 	if (
 		operation === "recall" &&
 		Array.isArray(result?.records) &&

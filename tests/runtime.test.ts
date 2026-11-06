@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as workerHost from "../src/local/worker-host.js";
 import {
 	ensureRuntime,
 	resolveLaunchNode,
@@ -255,6 +256,47 @@ describe("managed exact-version runtime", () => {
 		const quarantined = readdirSync(runtimes(home)).find((name) => name.startsWith(".invalid-"));
 		expect(quarantined).toBeDefined();
 		expect(readFileSync(join(runtimes(home), quarantined!, "node_modules", "@pharaoh-so", "mcp", "package.json"), "utf8")).toBe('{"name":"different"}');
+	});
+
+	it("repairs an omitted optional analyzer on a later install and retains hosted fallback", async () => {
+		const analyzerFile = (proxy: string) => join(proxy, "dist", "analyzer-fixture");
+		const probe = vi.spyOn(workerHost, "localAnalyzerInstallStatus").mockImplementation((proxy) =>
+			existsSync(analyzerFile(proxy)) ? "ready" : "repair-needed",
+		);
+		let fetchFails = false;
+		let includeAnalyzer = false;
+		options.run = (file, args, settings) => {
+			if (args[1] === "install" && fetchFails) {
+				installs++;
+				throw new Error("Optional registry fetch failed");
+			}
+			const output = run(file, args, settings);
+			if (args[1] === "install" && includeAnalyzer) {
+				const prefix = args[args.indexOf("--prefix") + 1];
+				write(analyzerFile(join(prefix, "node_modules", "@pharaoh-so", "mcp")));
+			}
+			return output;
+		};
+		try {
+			const launch = await ensureRuntime(options);
+			write(launch.args[0], "Original hosted entry");
+			expect(await ensureRuntime(options)).toEqual(launch);
+			expect(readFileSync(launch.args[0], "utf8")).toBe("Original hosted entry");
+			fetchFails = true;
+			expect(await ensureRuntime(options)).toEqual(launch);
+			expect(readFileSync(launch.args[0], "utf8")).toBe("Original hosted entry");
+			expect(readdirSync(runtimes(home))).toEqual([VERSION]);
+
+			fetchFails = false;
+			includeAnalyzer = true;
+			expect(await ensureRuntime(options)).toEqual(launch);
+			expect(existsSync(analyzerFile(dirname(dirname(launch.args[0]))))).toBe(true);
+			expect(installs).toBe(4);
+			expect(await ensureRuntime(options)).toEqual(launch);
+			expect(installs).toBe(4);
+		} finally {
+			probe.mockRestore();
+		}
 	});
 
 	it("keeps a damaged runtime in place when its replacement cannot be installed", async () => {

@@ -24,19 +24,25 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
 	CallToolRequestSchema,
 	type CallToolResult,
 	type ClientCapabilities,
+	type JSONRPCMessage,
 	ListToolsRequestSchema,
+	type RequestId,
+	type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { memoryEgressDecision } from "../project-memory/local.mjs";
 import {
 	memoryDiagnosticsForClient,
 	memoryHookStateForClient,
 } from "../project-memory/preferences.mjs";
 import { runtimeRequestMetadata } from "../runtime/runtime-client.mjs";
 import { RUNTIME_TOOL_NAMES, sanitizeRuntimeResult } from "../runtime/runtime-native.mjs";
+import { ensurePrivateDirectory, privatePath } from "../runtime/runtime-storage.mjs";
 import {
 	AuthRequiredBackend,
 	type Backend,
@@ -47,9 +53,137 @@ import { loadBundledCatalog } from "./catalog.js";
 import type { Credentials } from "./credentials.js";
 import { createGateway, type DeviceFlowGateway } from "./gateway.js";
 import { claudePluginState, instructionStates } from "./install-skills.js";
+import { type LocalBlastRuntime, type LocalDelivery, localRefusal } from "./local/contracts.js";
+import { selectBlastRoute } from "./local/dispatch.js";
+import { createLocalBlastRuntime } from "./local/runtime.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { registerTraceResource } from "./trace-resource.js";
 import { getPackageVersion } from "./version.js";
+
+const MEMORY_OPERATIONS = new Map<string, "recall" | "expand" | "capture" | "feedback">([
+	["pharaoh_memory_recall", "recall"],
+	["pharaoh_memory_expand", "expand"],
+	["pharaoh_memory_capture", "capture"],
+	["pharaoh_memory_feedback", "feedback"],
+]);
+const MEMORY_PROTECTED: CallToolResult = {
+	isError: true,
+	content: [
+		{
+			type: "text",
+			text: "Pharaoh withheld this automatic project memory request to protect saved-worktree details.",
+		},
+	],
+};
+const WORKTREE_STORAGE = { ensurePrivateDirectory, privatePath };
+const LOCAL_READINESS: Tool = {
+	name: "pharaoh_local_worktree_status",
+	_meta: { "anthropic/alwaysLoad": true },
+	annotations: { readOnlyHint: true },
+	description:
+		"Verify the active local worktree connection using only the opaque challenge from the current Pharaoh hook. Returns whether saved files are available before you submit a caller or blast-radius selector.",
+	inputSchema: {
+		type: "object",
+		properties: { challenge: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$" } },
+		required: ["challenge"],
+		additionalProperties: false,
+	},
+};
+
+function writeLocalStdioReply(message: JSONRPCMessage): Promise<void> {
+	return new Promise((resolve, reject) => {
+		process.stdout.write(serializeMessage(message), (error) => (error ? reject(error) : resolve()));
+	});
+}
+
+function withoutMemoryFeedback(result: CallToolResult): CallToolResult {
+	const content = result.content.map((block) => {
+		if (block.type !== "text") return block;
+		try {
+			const packet = JSON.parse(block.text);
+			if (!packet || typeof packet !== "object" || !Object.hasOwn(packet, "feedbackRequest"))
+				return block;
+			delete packet.feedbackRequest;
+			return { ...block, text: JSON.stringify(packet) };
+		} catch {
+			return block;
+		}
+	});
+	if (!result._meta) return { ...result, content };
+	const { feedbackRequest: _feedbackRequest, ...metadata } = result._meta;
+	return { ...result, content, _meta: metadata };
+}
+
+const deferredBackends = new WeakSet<Backend>();
+
+/** Only a hosted operation starts SSE; its availability cannot block local dispatch. */
+function deferHostedBackend(backend: Backend): Backend {
+	if (backend.name !== "sse" || deferredBackends.has(backend)) return backend;
+	let started: Promise<void> | undefined;
+	let stopped = false;
+	let finish!: () => void;
+	let fail!: (error: unknown) => void;
+	const exit = new Promise<void>((resolve, reject) => {
+		finish = resolve;
+		fail = reject;
+	});
+	// The supervisor attaches when stdio is ready.
+	void exit.catch(() => {});
+
+	const ensureStarted = () => {
+		if (stopped) return Promise.reject(new Error("Hosted connection has closed"));
+		started ??= Promise.resolve()
+			.then(() => backend.start?.())
+			.then(
+				() => {
+					if (stopped) return backend.stop?.();
+					const lifetime = backend.waitForExit?.();
+					if (lifetime) void lifetime.then(finish, fail);
+				},
+				(error: unknown) => {
+					started = undefined;
+					if (error instanceof TokenExpiredError || error instanceof TenantSuspendedError)
+						fail(error);
+					throw error;
+				},
+			);
+		return started;
+	};
+
+	const deferred: Backend = {
+		name: "sse",
+		async listTools(options) {
+			try {
+				await ensureStarted();
+				return await backend.listTools(options);
+			} catch {
+				options?.signal?.throwIfAborted();
+				return loadBundledCatalog().tools;
+			}
+		},
+		async callTool(name, args, options) {
+			await ensureStarted();
+			options?.signal?.throwIfAborted();
+			return backend.callTool(name, args, options);
+		},
+		identifyClient: (client) => backend.identifyClient?.(client),
+		withClientCapabilities(capabilities) {
+			const next = backend.withClientCapabilities?.(capabilities) ?? backend;
+			return next === backend ? deferred : deferHostedBackend(next);
+		},
+		waitForExit: () => exit,
+		async stop() {
+			stopped = true;
+			try {
+				await backend.stop?.();
+			} finally {
+				finish();
+			}
+		},
+	};
+	deferredBackends.add(deferred);
+	return deferred;
+}
 
 /**
  * Stdio MCP server with a swappable backend. The Server instance is
@@ -65,14 +199,20 @@ export class ProxyServer {
 	private clientInitialized = false;
 	private downstream: DownstreamClient | null = null;
 	private capabilityUpdate: Promise<void> = Promise.resolve();
+	private localDeliveries = new Map<RequestId, { settle: LocalDelivery; detach: () => void }>();
+	private deliverySettlements = new Set<Promise<void>>();
 	private transportClosed: Promise<void>;
 	private transportClosedResolve!: () => void;
+	private readonly deferHosted: boolean;
 
 	constructor(
 		initialBackend: Backend,
 		private readonly requestTimeout?: number,
+		private readonly localBlast?: LocalBlastRuntime,
 	) {
-		this.backend = initialBackend;
+		this.deferHosted =
+			localBlast?.invocation.kind === "checkout" || localBlast?.canDeferHostedStartup?.() === true;
+		this.backend = this.deferHosted ? deferHostedBackend(initialBackend) : initialBackend;
 		this.server = new Server(
 			{ name: "pharaoh-proxy", version: getPackageVersion() },
 			{
@@ -100,6 +240,7 @@ export class ProxyServer {
 				instructions: instructionStates(info?.name),
 			};
 			this.downstream = downstream;
+			if (this.transport instanceof StdioServerTransport) this.localBlast?.connect?.(info?.name);
 			this.clientCapabilities = this.server.getClientCapabilities() ?? {};
 			const next = this.backend.withClientCapabilities?.(this.clientCapabilities) ?? this.backend;
 			// Only the backend that serves this client is told about it: a warm
@@ -139,16 +280,52 @@ export class ProxyServer {
 		this.server.setRequestHandler(ListToolsRequestSchema, async (_req, extra) => {
 			await this.capabilityUpdate;
 			extra.signal.throwIfAborted();
-			return { tools: await this.backend.listTools({ signal: extra.signal }) };
+			const tools = await this.backend.listTools({ signal: extra.signal });
+			return {
+				tools: this.localBlast?.canCheckReadiness?.() ? [...tools, LOCAL_READINESS] : tools,
+			};
 		});
 		this.server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
-			await this.capabilityUpdate;
 			extra.signal.throwIfAborted();
 			const { name } = req.params;
 			let args = req.params.arguments ?? {};
-			if (
-				["pharaoh_memory_recall", "pharaoh_memory_expand", "pharaoh_memory_capture"].includes(name)
-			) {
+			if (name === LOCAL_READINESS.name)
+				return this.localBlast?.checkReadiness?.(args) ?? localRefusal("unverified_worktree");
+			const route = selectBlastRoute(
+				name,
+				args,
+				this.localBlast?.invocation ?? { kind: "hosted-only" },
+				(token, input) => this.localBlast?.consume(this.downstream?.client.name, token, input),
+			);
+			if (route.kind === "refused") return localRefusal(route.code);
+			if (route.kind === "local")
+				return (
+					this.localBlast?.answer(route, extra.signal, (settle) =>
+						this.trackLocalDelivery(extra.requestId, extra.signal, settle),
+					) ?? localRefusal("local_unavailable")
+				);
+
+			// Hosted-only below here, including post-sign-in replay.
+			await this.capabilityUpdate;
+			extra.signal.throwIfAborted();
+			const operation = MEMORY_OPERATIONS.get(name);
+			const nativeProof =
+				operation && this.localBlast?.memoryBinding && this.localBlast.memoryBinding() === undefined
+					? this.localBlast.authorizeMemory?.(name, args)
+					: undefined;
+			const allowMemory = () => {
+				if (!operation || !this.localBlast?.memoryBinding) return true;
+				const binding = this.localBlast.memoryBinding();
+				if (binding === undefined && nativeProof) return nativeProof();
+				return (
+					memoryEgressDecision(binding, operation, {
+						storage: WORKTREE_STORAGE,
+					}) === "normal"
+				);
+			};
+			if (!allowMemory()) return MEMORY_PROTECTED;
+			const memoryTool = operation && operation !== "feedback";
+			if (memoryTool) {
 				const diagnostics = memoryDiagnosticsForClient(this.downstream?.client ?? {});
 				const claimed =
 					args.diagnostics &&
@@ -177,22 +354,92 @@ export class ProxyServer {
 				? runtimeRequestMetadata(this.downstream?.client.name)
 				: undefined;
 			// The CLI's longer deadline must reach the upstream SDK request too.
-			const options = { signal: extra.signal, timeout: this.requestTimeout, runtime };
-			const result = await backend.callTool(name, args, options);
+			const beforeSend = operation
+				? () => (allowMemory() ? undefined : MEMORY_PROTECTED)
+				: undefined;
+			const options = { signal: extra.signal, timeout: this.requestTimeout, runtime, beforeSend };
+			const hostedCall = (target: Backend) =>
+				allowMemory() ? target.callTool(name, args, options) : Promise.resolve(MEMORY_PROTECTED);
+			const cleanMemoryResult = (result: CallToolResult) =>
+				memoryTool && !allowMemory() ? withoutMemoryFeedback(result) : result;
+			const result = await hostedCall(backend);
 			// The call that completed sign-in swapped in the real backend — answer
 			// it from there instead of asking the agent to call again.
 			if (backend.name === "auth-required" && this.backend !== backend && !result.isError) {
 				extra.signal.throwIfAborted();
 				return sanitizeRuntimeResult(
-					await this.backend.callTool(name, args, options),
+					cleanMemoryResult(await hostedCall(this.backend)),
 					Boolean(runtime),
 				);
 			}
 			return sanitizeRuntimeResult(
-				result,
+				cleanMemoryResult(result),
 				backend.name === "sse" && Boolean(runtime),
 			) as CallToolResult;
 		});
+	}
+
+	private takeLocalDelivery(id: RequestId): LocalDelivery | undefined {
+		const delivery = this.localDeliveries.get(id);
+		if (!delivery) return;
+		this.localDeliveries.delete(id);
+		delivery.detach();
+		return delivery.settle;
+	}
+
+	private trackLocalDelivery(id: RequestId, signal: AbortSignal, settle: LocalDelivery): void {
+		void this.takeLocalDelivery(id)?.(false);
+		if (signal.aborted) {
+			void settle(false);
+			return;
+		}
+		const cancel = () => {
+			void this.takeLocalDelivery(id)?.(false);
+		};
+		signal.addEventListener("abort", cancel, { once: true });
+		this.localDeliveries.set(id, {
+			settle,
+			detach: () => signal.removeEventListener("abort", cancel),
+		});
+	}
+
+	private wireLocalDelivery(
+		transport: Transport,
+		writeLocal?: (message: JSONRPCMessage) => Promise<void>,
+	): void {
+		const write = transport.send.bind(transport);
+		transport.send = async (message, options) => {
+			const isReply = "result" in message || "error" in message;
+			const id = isReply ? message.id : undefined;
+			const settle =
+				typeof id === "string" || typeof id === "number" ? this.takeLocalDelivery(id) : undefined;
+			let written = false;
+			try {
+				if (settle && writeLocal) await writeLocal(message);
+				else await write(message, options);
+				written = "result" in message;
+			} finally {
+				if (settle) {
+					const completion = settle(written);
+					this.deliverySettlements.add(completion);
+					try {
+						await completion;
+					} finally {
+						this.deliverySettlements.delete(completion);
+					}
+				}
+			}
+		};
+	}
+
+	private watchTransport(): void {
+		// Use the protocol-level hook so the SDK transport chain remains intact.
+		this.server.onclose = () => {
+			this.localBlast?.disconnect?.();
+			for (const id of this.localDeliveries.keys()) void this.takeLocalDelivery(id)?.(false);
+			this.transportClosedResolve();
+		};
+		this.started = true;
 	}
 
 	/**
@@ -203,13 +450,9 @@ export class ProxyServer {
 		if (this.started) return;
 		if (this.backend.start) await this.backend.start();
 		this.transport = new StdioServerTransport();
+		this.wireLocalDelivery(this.transport, writeLocalStdioReply);
 		await this.server.connect(this.transport);
-		// Server.connect() wraps transport.onclose; use the Protocol-level hook
-		// instead so we don't clobber the SDK's chain. Fires when the transport
-		// closes cleanly (client disconnect) — not on error paths, which surface
-		// through backend.waitForExit() and the server's own onerror plumbing.
-		this.server.onclose = () => this.transportClosedResolve();
-		this.started = true;
+		this.watchTransport();
 	}
 
 	/**
@@ -221,9 +464,9 @@ export class ProxyServer {
 		if (this.started) return;
 		if (this.backend.start) await this.backend.start();
 		this.transport = transport;
+		this.wireLocalDelivery(transport);
 		await this.server.connect(transport);
-		this.server.onclose = () => this.transportClosedResolve();
-		this.started = true;
+		this.watchTransport();
 	}
 
 	/**
@@ -272,6 +515,7 @@ export class ProxyServer {
 	 */
 	async setBackend(next: Backend): Promise<void> {
 		next = next.withClientCapabilities?.(this.clientCapabilities) ?? next;
+		if (this.deferHosted) next = deferHostedBackend(next);
 		const prev = this.backend;
 		// Start the new backend BEFORE swapping the reference. If start() rejects
 		// (e.g. SSE connect fails), `prev` stays active — otherwise the proxy
@@ -308,6 +552,7 @@ export class ProxyServer {
 
 	async stop(): Promise<void> {
 		this.stopping = true;
+		this.localBlast?.disconnect?.();
 		if (this.backend.stop) {
 			await this.backend.stop().catch((err) => {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -318,6 +563,7 @@ export class ProxyServer {
 			await this.server.close().catch(() => {});
 			this.transport = null;
 		}
+		await Promise.allSettled(this.deliverySettlements);
 		this.started = false;
 	}
 
@@ -356,7 +602,7 @@ export async function startInAuthRequiredMode(
 		}
 		await opts.onAuthorized(creds);
 	});
-	const proxy = new ProxyServer(backend);
+	const proxy = new ProxyServer(backend, undefined, createLocalBlastRuntime(server));
 	await proxy.start();
 	return { proxy, gateway };
 }
@@ -366,7 +612,11 @@ export async function startInAuthRequiredMode(
  * SSE backend. Returned proxy is running and ready for tool calls.
  */
 export async function startInSseMode(creds: Credentials): Promise<ProxyServer> {
-	const proxy = createSseProxyServer(creds);
+	const proxy = new ProxyServer(
+		createSseBackend(creds.sse_url, creds.access_token),
+		undefined,
+		createLocalBlastRuntime(new URL(creds.sse_url).origin),
+	);
 	await proxy.start();
 	return proxy;
 }

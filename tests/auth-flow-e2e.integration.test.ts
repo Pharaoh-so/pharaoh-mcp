@@ -575,7 +575,18 @@ describe("auth-flow E2E", () => {
 		isError: false,
 		_meta: { trace: "preserved" },
 	};
-	const blast = ["get_blast_radius", "--repo", "r", "--entity", "f", "--entity-type", "function"];
+	// These cases exercise the hosted connection even in a Git checkout.
+	const blast = [
+		"get_blast_radius",
+		"--repo",
+		"r",
+		"--entity",
+		"f",
+		"--entity-type",
+		"function",
+		"--scope",
+		"hosted",
+	];
 	const refusal = {
 		type: "text" as const,
 		text: "This needs Pro: acme is limited. https://pharaoh.so/plans",
@@ -612,7 +623,7 @@ describe("auth-flow E2E", () => {
 			code: 0,
 			result: answer,
 			stdout: "- src/a.ts: caller\n\n---\n_Freshness: {}_\nshared\n",
-			received: { repo: "r", entity: "f", entity_type: "function" },
+			received: { repo: "r", entity: "f", entity_type: "function", scope: "hosted" },
 		},
 		{
 			name: "complete JSON result",
@@ -651,7 +662,7 @@ describe("auth-flow E2E", () => {
 			name: "integer flag",
 			args: [...blast, "--depth", "2"],
 			code: 0,
-			received: { repo: "r", entity: "f", entity_type: "function", depth: 2 },
+			received: { repo: "r", entity: "f", entity_type: "function", depth: 2, scope: "hosted" },
 		},
 		{
 			name: "implicit true boolean",
