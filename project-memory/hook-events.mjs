@@ -1,6 +1,13 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { checkout, REPO, sessionKey, shellWord, turnStore } from "./local.mjs";
+import {
+	checkout,
+	conversationMemoryBinding,
+	memoryEgressDecision,
+	REPO,
+	shellWord,
+	turnStore,
+} from "./local.mjs";
 import { projectMemorySession } from "./user-target.mjs";
 
 const CLI = fileURLToPath(new URL("pharaoh-memory.mjs", import.meta.url));
@@ -47,8 +54,8 @@ export function skipMemoryPrompt(value) {
 	);
 }
 
-export function memoryReminder(repo) {
-	if (!REPO.test(repo)) return;
+export function memoryReminder(repo, binding) {
+	if (!REPO.test(repo) || memoryEgressDecision(binding, "recall") !== "normal") return;
 	return {
 		hookSpecificOutput: {
 			hookEventName: "UserPromptSubmit",
@@ -75,7 +82,8 @@ export function handleEvent(
 	if (!input || !CLIENTS.has(client) || !REPO.test(repo)) return;
 	const event = input.hook_event_name;
 	if (event !== "UserPromptSubmit" && event !== "Stop" && !CANCEL_EVENTS.has(event)) return;
-	const key = sessionKey(client, input.session_id);
+	const binding = conversationMemoryBinding(client, input.session_id);
+	const key = binding?.sessionRef;
 	if (!key) return;
 	const checkoutTarget = runtime ? { root, repo } : checkout(input.cwd, deadline);
 	if (checkoutTarget?.root !== root || checkoutTarget.repo.toLowerCase() !== repo.toLowerCase())
@@ -100,7 +108,9 @@ export function handleEvent(
 				input.prompt,
 			);
 		const opened = store.begin(key, target, client, nativeTurn, {
-			skip: skipMemoryPrompt(input.prompt),
+			skip:
+				skipMemoryPrompt(input.prompt) ||
+				memoryEgressDecision(binding, "recall", { home }) !== "normal",
 			readOnly: noCapture,
 			memorySession,
 		});

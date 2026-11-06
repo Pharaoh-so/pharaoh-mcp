@@ -65,6 +65,8 @@ function windowsOptions(
 		env: { APPDATA: join(home, "roaming"), LOCALAPPDATA: local, SystemRoot: systemRoot },
 		execute: (command, args) => {
 			if (!command.endsWith("powershell.exe")) return unavailable();
+			if (args[4]?.includes("Get-AppxPackage -Name OpenAI.Codex -PackageTypeFilter Main"))
+				return "[]";
 			onQuery?.(command, args);
 			return JSON.stringify(packages);
 		},
@@ -103,6 +105,23 @@ describe("independent client discovery", () => {
 		expect(
 			configureClients(targets, launch, options).every(({ status }) => status === "configured"),
 		).toBe(true);
+	});
+
+	it("configures a fresh Codex installation bundled with ChatGPT Desktop", () => {
+		const chatgpt = join(home, "Applications", "ChatGPT.app");
+		mkdirSync(chatgpt, { recursive: true });
+		expect(discoverClients(options)).toEqual([]);
+		write(
+			join(chatgpt, "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"),
+			"bundled client fixture",
+		);
+
+		const targets = discoverClients(options);
+		expect(targets).toEqual([codex()]);
+		expect(configureClients(targets, launch, options)[0].status).toBe("configured");
+		expect(parseToml(readFileSync(codex().path, "utf8"))).toMatchObject({
+			mcp_servers: { pharaoh: launch },
+		});
 	});
 
 	it("does not create configurations for absent clients", () => {
@@ -192,6 +211,36 @@ describe("independent client discovery", () => {
 });
 
 describe("Windows Desktop package configuration", () => {
+	it("configures the registered ChatGPT Store app before Codex creates its home", () => {
+		const base = windowsOptions([]);
+		let signature = "Developer";
+		const config: ClientInstallOptions = {
+			...base,
+			execute: (command, args, context) => {
+				if (!args[4]?.includes("Get-AppxPackage -Name OpenAI.Codex -PackageTypeFilter Main"))
+					return base.execute?.(command, args, context) ?? unavailable();
+				expect(command).toBe(
+					join(home, "Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+				);
+				return JSON.stringify([
+					{
+						Name: "OpenAI.Codex",
+						PackageFamilyName: "OpenAI.Codex_2p2nqsd0c76g0",
+						SignatureKind: signature,
+					},
+				]);
+			},
+		};
+		expect(configureClients(discoverClients(config), launch, config)[0].status).toBe("ambiguous");
+		signature = "Store";
+		const targets = discoverClients(config);
+		expect(targets).toEqual([codex()]);
+		expect(configureClients(targets, launch, config)[0].status).toBe("configured");
+		expect(parseToml(readFileSync(codex().path, "utf8"))).toMatchObject({
+			mcp_servers: { pharaoh: launch },
+		});
+	});
+
 	it("uses a fixed trusted PowerShell query and the registered package's private config", () => {
 		const config = windowsOptions([WINDOWS_CLAUDE_PACKAGE], (command, args) => {
 			expect(command).toBe(

@@ -126,7 +126,7 @@ function writeActivation(path, active) {
 	else rmSync(path, { force: true });
 }
 
-/** Resolve explicit choices only after a supported client's MCP registration. */
+/** Resolve memory defaults and explicit choices after a supported client's MCP registration. */
 export async function chooseMemoryHooks({
 	credentials,
 	clients,
@@ -189,24 +189,14 @@ export async function chooseMemoryHooks({
 		}
 		if (client === "claude-code" && config?.disableAllHooks === true) continue;
 		const choice = { ...previous[client] };
-		const memoryHook =
-			active[client] &&
-			hasUserHooks({ hooks: { UserPromptSubmit: config?.hooks?.UserPromptSubmit } }, client);
-		if (requested) choice.memory = true;
-		else if (choice.memory !== false && (choice.memory !== true || !memoryHook)) {
-			const answer = await ask(
-				`Enable Pharaoh project memory hooks in ${label} (recommended)? [Y/n] `,
-				true,
-			);
-			if (answer === null) continue;
-			choice.memory = answer;
-			if (!answer && choice.graph === true) delete choice.graph;
-			if (!answer) {
-				choice.diagnostics = false;
-				clearDiagnosticQueue(client, home);
-			}
-		}
+		if (requested || choice.memory !== false) choice.memory = true;
 		if (choice.memory === true) {
+			// A reminder reinstall must not restore diagnostic handlers from an old choice.
+			if (
+				choice.diagnostics === true &&
+				(!active[client] || !hasUserHooks({ hooks: { Stop: config?.hooks?.Stop } }, client))
+			)
+				delete choice.diagnostics;
 			let graphEnabled =
 				choice.graph === true &&
 				["PreToolUse", "PostToolUse"].every((event) =>

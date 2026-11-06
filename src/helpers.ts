@@ -65,6 +65,18 @@ export async function askYesNo(
 	}
 }
 
+/** Optional installer choices require a terminal on both sides of the prompt. */
+export function askYesNoInTerminal(
+	question: string,
+	defaultAnswer: boolean,
+	input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
+	output: NodeJS.WritableStream & { isTTY?: boolean } = process.stderr,
+): Promise<boolean | null> {
+	return input.isTTY && output.isTTY
+		? askYesNo(question, input, output, defaultAnswer)
+		: Promise.resolve(null);
+}
+
 /** Read and drop the input already waiting, in raw mode so a half-typed line goes too. */
 async function dropTypedAhead(input: NodeJS.ReadableStream): Promise<void> {
 	(input as Partial<NodeJS.ReadStream>).setRawMode?.(true);
@@ -129,7 +141,7 @@ export function printUsage(): void {
 		"  --server <url>    Pharaoh server URL (default: https://mcp.pharaoh.so)",
 		"  --logout          Clear credentials, MCP config, the Claude Code plugin and the CLAUDE.md line, then exit",
 		"  --clean           Remove Pharaoh setup, including managed local project memory hooks",
-		"  --memory-hooks    Accept project memory hooks during eligible interactive setup",
+		"  --memory-hooks    Re-enable eligible memory reminders and offer optional settings",
 		"  --disable-memory-hooks  Remove Pharaoh's memory hooks and remember the choice",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --migrate-legacy  Move plain pinned NPX connections to the managed runtime during install",

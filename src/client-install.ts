@@ -80,6 +80,19 @@ $result = @(Get-AppxPackage -Name Claude -PackageTypeFilter Main | ForEach-Objec
 ConvertTo-Json -InputObject $result -Compress -Depth 3
 `.trim();
 
+// Both official ChatGPT Desktop Store packages retain this Codex package identity.
+// The Windows app and native CLI share %USERPROFILE%\.codex.
+// https://learn.chatgpt.com/docs/enterprise/windows-deployment
+// https://learn.chatgpt.com/docs/windows/windows-app#share-config-auth-and-sessions-with-wsl
+const WINDOWS_CODEX_PACKAGE = "OpenAI.Codex_2p2nqsd0c76g0";
+const WINDOWS_CODEX_QUERY = `
+$ErrorActionPreference = 'Stop'
+$result = @(Get-AppxPackage -Name OpenAI.Codex -PackageTypeFilter Main | ForEach-Object {
+  [pscustomobject]@{ Name = $_.Name; PackageFamilyName = $_.PackageFamilyName; SignatureKind = [string]$_.SignatureKind }
+})
+ConvertTo-Json -InputObject $result -Compress -Depth 3
+`.trim();
+
 class MissingRegistration extends Error {}
 
 function object(value: unknown): value is Document {
@@ -162,6 +175,23 @@ function safeDirectoryChain(root: string, names: readonly string[]): boolean {
 	return true;
 }
 
+function windowsAppPackages(options: ClientInstallOptions, query: string): unknown[] {
+	const { env } = settings(options);
+	const systemRoot = env.SystemRoot || env.SYSTEMROOT;
+	if (!systemRoot || !isAbsolute(systemRoot)) throw new Error("Windows PowerShell is unavailable.");
+	const powershell = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+	if (!safeDirectoryChain(systemRoot, ["System32", "WindowsPowerShell", "v1.0"]))
+		throw new Error("Windows PowerShell is unavailable.");
+	const executable = lstatSync(powershell, { throwIfNoEntry: false });
+	if (!executable?.isFile() || executable.isSymbolicLink())
+		throw new Error("Windows PowerShell is unavailable.");
+	const raw: unknown = JSON.parse(
+		execute(options, powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", query]),
+	);
+	if (!Array.isArray(raw)) throw new Error("The package result is malformed.");
+	return raw;
+}
+
 function windowsClaudePath(
 	options: ClientInstallOptions,
 	fallback: string | null,
@@ -176,26 +206,7 @@ function windowsClaudePath(
 	};
 	let installed = packageEvidence;
 	try {
-		const systemRoot = env.SystemRoot || env.SYSTEMROOT;
-		if (!systemRoot || !isAbsolute(systemRoot)) {
-			return packageEvidence ? unknown : { path: fallback, installed: false };
-		}
-		const powershell = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-		if (!safeDirectoryChain(systemRoot, ["System32", "WindowsPowerShell", "v1.0"]))
-			throw new Error("Windows PowerShell is unavailable.");
-		const executable = lstatSync(powershell, { throwIfNoEntry: false });
-		if (!executable?.isFile() || executable.isSymbolicLink())
-			throw new Error("Windows PowerShell is unavailable.");
-		const raw: unknown = JSON.parse(
-			execute(options, powershell, [
-				"-NoLogo",
-				"-NoProfile",
-				"-NonInteractive",
-				"-Command",
-				WINDOWS_CLAUDE_QUERY,
-			]),
-		);
-		if (!Array.isArray(raw)) throw new Error("The package result is malformed.");
+		const raw = windowsAppPackages(options, WINDOWS_CLAUDE_QUERY);
 		if (!raw.length) return { path: fallback, installed: false };
 		installed = true;
 		if (raw.length !== 1) return { ...unknown, installed: true };
@@ -232,22 +243,46 @@ function windowsClaudePath(
 	}
 }
 
-function packagedApp(options: ClientInstallOptions, name: RegExp): boolean {
+function packagedApp(options: ClientInstallOptions, matches: (entry: string) => boolean): boolean {
 	const { env, platform } = settings(options);
 	if (platform !== "win32" || !env.LOCALAPPDATA) return false;
 	const packages = join(env.LOCALAPPDATA, "Packages");
 	if (!existsSync(packages)) return false;
 	try {
-		return readdirSync(packages).some((entry) => name.test(entry));
+		return readdirSync(packages).some(matches);
 	} catch {
 		return true;
 	}
 }
 
-function macApp(home: string, name: string): boolean {
+function windowsCodexPackage(options: ClientInstallOptions): "verified" | "ambiguous" | undefined {
+	try {
+		const registrations = windowsAppPackages(options, WINDOWS_CODEX_QUERY);
+		if (!registrations.length) return;
+		const record = registrations[0];
+		return registrations.length === 1 &&
+			object(record) &&
+			record.Name === "OpenAI.Codex" &&
+			record.PackageFamilyName === WINDOWS_CODEX_PACKAGE &&
+			record.SignatureKind === "Store"
+			? "verified"
+			: "ambiguous";
+	} catch {
+		// A package data directory alone does not establish an active installation.
+		return packagedApp(
+			options,
+			(entry) => entry.toLowerCase() === WINDOWS_CODEX_PACKAGE.toLowerCase(),
+		)
+			? "ambiguous"
+			: undefined;
+	}
+}
+
+function macApp(home: string, name: string, contents = ""): boolean {
+	const location = join(`${name}.app`, contents);
 	return (
-		(home === homedir() && existsSync(join("/Applications", `${name}.app`))) ||
-		existsSync(join(home, "Applications", `${name}.app`))
+		(home === homedir() && existsSync(join("/Applications", location))) ||
+		existsSync(join(home, "Applications", location))
 	);
 }
 
@@ -263,7 +298,7 @@ export function discoverClients(options: ClientInstallOptions = {}): ClientTarge
 	const targets: ClientTarget[] = [];
 	const claudeCli = availableCli(options, "claude");
 	const codexCli = availableCli(options, "codex");
-	const packagedClaudeEvidence = packagedApp(options, /claude|anthropic/i);
+	const packagedClaudeEvidence = packagedApp(options, (entry) => /claude|anthropic/i.test(entry));
 	const windowsClaude =
 		platform === "win32"
 			? windowsClaudePath(options, desktopPath(options), packagedClaudeEvidence)
@@ -288,12 +323,18 @@ export function discoverClients(options: ClientInstallOptions = {}): ClientTarge
 			: platform === "win32"
 				? windowsApp(env, "Claude") || windowsClaude?.installed === true
 				: platform === "linux" && Boolean(chatPath && existsSync(dirname(chatPath)));
+	// Current ChatGPT Desktop bundles the Codex host and uses the shared Codex config.
 	const codexDesktop =
 		platform === "darwin"
-			? macApp(home, "Codex")
+			? macApp(home, "Codex") ||
+				macApp(home, "ChatGPT", "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 			: platform === "win32" && windowsApp(env, "Codex");
 	const packagedClaude = windowsClaude?.installed === true;
-	const packagedCodex = packagedApp(options, /openai.*codex|codex.*openai/i);
+	const existingCodex = codexCli || existsSync(codexRoot) || codexDesktop;
+	const packagedCodex =
+		platform === "win32" && !existingCodex && !invalidCodexRoot
+			? windowsCodexPackage(options)
+			: undefined;
 
 	if (chatPath && (claudeDesktop || packagedClaude || existsSync(dirname(chatPath)))) {
 		targets.push({
@@ -325,14 +366,14 @@ export function discoverClients(options: ClientInstallOptions = {}): ClientTarge
 				: {}),
 		});
 	}
-	if (codexCli || existsSync(codexRoot) || codexDesktop || packagedCodex || invalidCodexRoot) {
+	if (existingCodex || packagedCodex || invalidCodexRoot) {
 		targets.push({
 			client: "codex",
 			path: join(codexRoot, "config.toml"),
 			...(codexCli ? { cli: "codex" } : {}),
 			...(invalidCodexRoot
 				? { ambiguousReason: "CODEX_HOME must identify an absolute configuration directory." }
-				: packagedCodex && !env.CODEX_HOME && !existsSync(codexRoot)
+				: packagedCodex === "ambiguous"
 					? {
 							ambiguousReason:
 								"The packaged Codex app's configuration directory could not be verified.",

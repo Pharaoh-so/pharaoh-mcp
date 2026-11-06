@@ -18,6 +18,7 @@ import {
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -26,7 +27,16 @@ import {
 	collectDiagnosticEvent,
 	flushDiagnosticQueue,
 } from "../project-memory/diagnostics-collector.mjs";
+import { executeTurn } from "../project-memory/execute-turn.mjs";
 import { worktreeCue } from "../project-memory/graph-cues.mjs";
+import {
+	conversationMemoryBinding,
+	markSessionLocal,
+	memoryEgressDecision,
+	sessionLocalSensitivity,
+	turnStore,
+} from "../project-memory/local.mjs";
+import { requestMemory } from "../project-memory/memory-api.mjs";
 import {
 	memoryDiagnosticsForClient,
 	memoryHookStateForClient,
@@ -39,9 +49,10 @@ import {
 	chooseMemoryHooks,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
+import { legacyMemoryHooksMayRun } from "../project-memory/user-target.mjs";
 import type { Backend, DownstreamClient } from "../src/backend.js";
 import { type Credentials, writeCredentials } from "../src/credentials.js";
-import { tokenToCredentials } from "../src/helpers.js";
+import { askYesNoInTerminal, tokenToCredentials } from "../src/helpers.js";
 import { ProxyServer } from "../src/proxy-server.js";
 
 const repo = "fixture/project";
@@ -216,17 +227,44 @@ it("preserves daily feedback invitation metadata and exact record versions in th
 		fields: ["helpfulness", "suggestion"],
 	};
 	const records = [{ id: randomUUID(), version: 3, status: "candidate" }];
-	const fetcher = vi.fn(async () =>
+	const fetcher = vi.fn(async (_url: string, _request: RequestInit) =>
 		Response.json({ records, recallId, collection: "unrecorded", feedbackRequest }),
 	);
+	const binding = conversationMemoryBinding("codex", "local-conversation");
+	const unrelated = conversationMemoryBinding("codex", "unrelated-conversation");
 	const response = await installed.requestMemory(
 		"recall",
 		{ repo, terms: ["upgrade"] },
-		{ credentials, client: "codex", fetcher },
+		{ credentials, client: "codex", fetcher, binding },
 	);
 	expect(response.records).toEqual(records);
 	expect(response.feedbackRequest).toEqual(feedbackRequest);
 	expect(fetcher).toHaveBeenCalledTimes(1);
+	expect(markSessionLocal(binding, { home })).toBe(true);
+	for (const operation of ["recall", "expand", "capture", "feedback"]) {
+		await expect(
+			installed.requestMemory(
+				operation,
+				{
+					repo,
+					terms: ["PRIVATE_LOCAL_CALLER"],
+					diagnostics: { taskSummary: "PRIVATE_LOCAL_CALLER" },
+				},
+				{ credentials, fetcher, binding },
+			),
+		).rejects.toThrow("paused for this conversation");
+	}
+	await expect(
+		installed.requestMemory("recall", { repo, terms: ["unknown"] }, { credentials, fetcher }),
+	).rejects.toThrow("paused for this conversation");
+	expect(fetcher).toHaveBeenCalledTimes(1);
+	const hosted = await installed.requestMemory(
+		"recall",
+		{ repo, terms: ["unrelated"] },
+		{ credentials, client: "codex", fetcher, binding: unrelated },
+	);
+	expect(hosted.feedbackRequest).toEqual(feedbackRequest);
+	expect(fetcher).toHaveBeenCalledTimes(2);
 });
 
 it("reports actual native identity and configured adoption without granting diagnostic consent", async () => {
@@ -471,7 +509,7 @@ function choose(options: Partial<Parameters<typeof chooseMemoryHooks>[0]> = {}) 
 	});
 }
 
-it("remembers the recommended memory choice and offers independent default-no worktree cues", async () => {
+it("enables memory by default and offers independent default-no worktree cues", async () => {
 	const defaults: boolean[] = [];
 	const decision = await choose({
 		ask: async (_, defaultAnswer) => {
@@ -479,9 +517,11 @@ it("remembers the recommended memory choice and offers independent default-no wo
 			return defaultAnswer;
 		},
 	});
-	expect(defaults).toEqual([true, false]);
+	expect(defaults).toEqual([false]);
 	expect(decision).toMatchObject({ accepted: ["codex"], declined: [], graphClients: [] });
-	configure({ enable: true, clients: decision.accepted, graphClients: decision.graphClients });
+	applyChoice(decision);
+	const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
+	expect(hooks.UserPromptSubmit).toHaveLength(1);
 	expect(await choose()).toEqual(decision);
 });
 
@@ -532,20 +572,21 @@ it("preserves setup after a temporary eligibility failure and deactivates both c
 });
 
 it("preserves declines through cleanup", async () => {
-	const answers = [false, true, true];
-	await choose({ clients: ["claude-code", "codex"], ask: async () => answers.shift() ?? null });
+	writeHookPreferences({ "claude-code": { memory: false, diagnostics: false } }, home);
+	await choose({ clients: ["claude-code", "codex"], ask: async () => true });
 	resetHookPreferences(false, home);
 	expect(readHookPreferences(home)).toEqual({
 		"claude-code": { memory: false, diagnostics: false },
 	});
 });
 
-it("requires consent for legacy or missing hooks and respects native disable", async () => {
+it("restores missing memory hooks during setup and respects native disable", async () => {
 	configure({ enable: true });
-	expect((await choose({ ask: async () => null })).accepted).toEqual([]);
-	await choose({ requested: true, ask: async () => false });
-	writeFileSync(join(home, ".codex/hooks.json"), '{"hooks":{"Notification":[]}}');
-	expect((await choose({ ask: async () => null })).accepted).toEqual([]);
+	expect((await choose({ ask: async () => false })).accepted).toEqual(["codex"]);
+	const path = join(home, ".codex/hooks.json");
+	writeFileSync(path, '{"hooks":{"Notification":[]}}');
+	applyChoice(await choose());
+	expect(JSON.parse(readFileSync(path, "utf8")).hooks.UserPromptSubmit).toHaveLength(1);
 	writeFileSync(join(home, ".claude/settings.json"), '{"disableAllHooks":true}');
 	expect((await choose({ clients: ["claude-code"], requested: true })).accepted).toEqual([]);
 });
@@ -881,9 +922,9 @@ it("offers diagnostics separately after policy eligibility and retains explicit 
 			return true;
 		},
 	});
-	expect(prompts.map((entry) => entry.defaultAnswer)).toEqual([true, false, false]);
-	expect(prompts[2].question).toContain("1 MB/24 h");
-	expect(prompts[2].question).toContain("90 days");
+	expect(prompts.map((entry) => entry.defaultAnswer)).toEqual([false, false]);
+	expect(prompts[1].question).toContain("1 MB/24 h");
+	expect(prompts[1].question).toContain("90 days");
 	expect(requests.find((entry) => entry.url.endsWith("/control"))?.body).toMatchObject({
 		repo,
 		clientName: "codex",
@@ -944,6 +985,33 @@ function diagnosticFixture() {
 	return { options, input, runtime, directory };
 }
 
+it("restores the reminder after cleanup without accepting piped input for optional hooks", async () => {
+	diagnosticFixture();
+	const savedGeneration = readHookPreferences(home).codex?.diagnosticsGeneration;
+	resetHookPreferences(false, home);
+	configure({ credentials: undefined });
+	expect(readHookPreferences(home).codex?.diagnosticsGeneration).toBe(savedGeneration);
+	const request = vi.fn(
+		async () => new Response(JSON.stringify({ diagnosticsPolicy: diagnosticPolicy })),
+	);
+	vi.stubGlobal("fetch", request);
+	const input = new PassThrough();
+	input.end("y\ny\n");
+	const output = Object.assign(new PassThrough(), { isTTY: true });
+	const decision = await choose({
+		ask: (question, defaultAnswer) => askYesNoInTerminal(question, defaultAnswer, input, output),
+	});
+	applyChoice(decision);
+	const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
+	expect(hooks.UserPromptSubmit).toHaveLength(1);
+	expect(hooks.PreToolUse).toBeUndefined();
+	expect(hooks.Stop).toBeUndefined();
+	expect(readHookPreferences(home).codex?.diagnostics).toBeUndefined();
+	expect(String(input.read())).toBe("y\ny\n");
+	expect(output.read()).toBeNull();
+	expect(request).toHaveBeenCalledTimes(1);
+});
+
 it("links actual native recall results, bounds excerpts and excludes file/patch/shell bodies", async () => {
 	const fixture = diagnosticFixture();
 	const collect = (event: object) =>
@@ -988,7 +1056,7 @@ it("links actual native recall results, bounds excerpts and excludes file/patch/
 	});
 	expect(recall?.turnRef).toBe(prompt?.turnRef);
 	expect(recall?.payload).toMatchObject({ recallId, records: [record] });
-	expect(prompt?.payload.taskClipped).toBe(true);
+	expect(prompt?.payload).toEqual({ coverage: { eligibility: "eligible", linkage: "native" } });
 	const files = readdirSync(fixture.directory).filter((name) => name.startsWith("event-"));
 	const spool = files.map((name) => readFileSync(join(fixture.directory, name), "utf8")).join("\n");
 	expect(spool).not.toMatch(/RAW_(?:PATCH|FILE|COMMAND|OUTPUT)_SECRET|agent-forged-turn/);
@@ -1007,9 +1075,273 @@ it("links actual native recall results, bounds excerpts and excludes file/patch/
 			return { acceptedEventIds: payload.events.map((event) => event.eventId) };
 		},
 	});
-	expect(sent).toHaveLength(1);
-	expect(Buffer.byteLength(JSON.stringify(sent[0]))).toBeLessThan(12_000);
+	expect(sent.flatMap((batch) => batch.events)).toHaveLength(5);
+	for (const batch of sent) expect(Buffer.byteLength(JSON.stringify(batch))).toBeLessThan(12_000);
 	expect(readdirSync(fixture.directory).filter((name) => name.startsWith("event-"))).toEqual([]);
+});
+
+it("keeps first-prompt diagnostics content-free before the local scope hook runs", async () => {
+	const fixture = diagnosticFixture();
+	const secret = "PRIVATE_SAVED_SELECTOR";
+	const prompt = collectDiagnosticEvent(
+		{ ...fixture.input, hook_event_name: "UserPromptSubmit", prompt: secret },
+		fixture.options,
+	);
+	const file = join(fixture.directory, `event-${prompt?.eventId}.json`);
+	const before = readFileSync(file, "utf8");
+	expect(before).not.toContain(secret);
+	expect(
+		sessionLocalSensitivity(conversationMemoryBinding("codex", fixture.input.session_id), { home }),
+	).toBe("clear");
+	// Simulate a queued prompt observation from the previous collector format.
+	const queued = JSON.parse(before);
+	queued.event.payload.taskSummary = secret;
+	writeFileSync(file, JSON.stringify(queued));
+	const fetcher = vi.fn(async (_url: string, request: RequestInit) => {
+		const { events } = JSON.parse(request.body as string) as { events: Array<{ eventId: string }> };
+		return Response.json({ acceptedEventIds: events.map((event) => event.eventId) });
+	});
+	await flushDiagnosticQueue("codex", {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async () => fixture.options.policy,
+		request: (operation: string, payload: unknown, options: Record<string, unknown>) =>
+			requestMemory(operation, payload, { ...options, fetcher }),
+	});
+	expect(fetcher).toHaveBeenCalledOnce();
+	const wire = fetcher.mock.calls[0][1].body as string;
+	expect(wire).toContain("turn_observed");
+	expect(wire).not.toContain(secret);
+});
+
+it("redacts shell action excerpts and fences finals after a local-capable CLI attempt", async () => {
+	const fixture = diagnosticFixture();
+	const privateName = "PRIVATE_SAVED_SELECTOR";
+	const collect = (session_id: string, event: object) =>
+		collectDiagnosticEvent({ ...fixture.input, session_id, ...event }, fixture.options);
+	const shell = (session: string, cmd: string) =>
+		collect(session, {
+			hook_event_name: "PostToolUse",
+			tool_name: "functions.exec_command",
+			tool_input: { cmd, description: privateName },
+			tool_response: { exit_code: 1 },
+		});
+	const local = shell(
+		fixture.input.session_id,
+		`npx -y @pharaoh-so/mcp@latest get_blast_radius --entity ${privateName}`,
+	);
+	expect(local?.payload).toEqual({ operation: "shell_task", status: "error" });
+	const binding = conversationMemoryBinding("codex", fixture.input.session_id);
+	expect(sessionLocalSensitivity(binding, { home })).toBe("local");
+	expect(
+		collect(fixture.input.session_id, {
+			hook_event_name: "Stop",
+			last_assistant_message: `The query for ${privateName} was refused.`,
+		})?.payload,
+	).toEqual({ completion: "stop_observed" });
+
+	const hostedSession = "explicit-hosted-shell";
+	const hosted = shell(
+		hostedSession,
+		"npx -y @pharaoh-so/mcp@latest get_blast_radius --scope hosted --entity defaultBranch",
+	);
+	expect(sessionLocalSensitivity(conversationMemoryBinding("codex", hostedSession), { home })).toBe(
+		"clear",
+	);
+	const file = join(fixture.directory, `event-${hosted?.eventId}.json`);
+	const queued = JSON.parse(readFileSync(file, "utf8"));
+	// Earlier queues did not include command provenance with a shell excerpt.
+	delete queued.metadataOnly;
+	queued.root = checkout;
+	queued.event.payload.actionExcerpt = privateName;
+	writeFileSync(file, JSON.stringify(queued));
+	collect(hostedSession, { hook_event_name: "Stop", last_assistant_message: "Hosted graph answer." });
+	const sent: Array<{ events: Array<{ eventId: string }> }> = [];
+	await flushDiagnosticQueue("codex", {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async () => fixture.options.policy,
+		request: async (_operation: string, payload: { events: Array<{ eventId: string }> }) => {
+			sent.push(payload);
+			return { acceptedEventIds: payload.events.map((event) => event.eventId) };
+		},
+	});
+	const wire = JSON.stringify(sent);
+	expect(wire).toContain("shell_task");
+	expect(wire).toContain("Hosted graph answer.");
+	expect(wire).not.toContain(privateName);
+});
+
+it("redacts one opted-in conversation across queued delivery, restart and resume", async () => {
+	const fixture = diagnosticFixture();
+	const binding = conversationMemoryBinding("codex", fixture.input.session_id);
+	expect(binding).toBeDefined();
+	const now = Date.now();
+	const collect = (event: object, at = now) =>
+		collectDiagnosticEvent({ ...fixture.input, ...event }, { ...fixture.options, now: at });
+	expect(
+		collect({
+			hook_event_name: "Stop",
+			last_assistant_message: "QUEUED_PRIVATE_LOCAL_CALLER",
+		})?.payload,
+	).toMatchObject({ finalExcerpt: "QUEUED_PRIVATE_LOCAL_CALLER" });
+	expect(
+		collect({
+			session_id: "unrelated-native-session",
+			hook_event_name: "Stop",
+			last_assistant_message: "An unrelated hosted answer",
+		})?.payload,
+	).toMatchObject({ finalExcerpt: "An unrelated hosted answer" });
+	const fetcher = vi.fn(async (_url: string, request: RequestInit) => {
+		const { events } = JSON.parse(request.body as string) as { events: Array<{ eventId: string }> };
+		return Response.json({ acceptedEventIds: events.map((event) => event.eventId) });
+	});
+	const sender = {
+		home,
+		runtime: fixture.runtime,
+		now: () => now,
+		readCredentials: async () => credentials,
+		policyRequest: async () => {
+			// A local claim races an already-awaiting sender.
+			expect(markSessionLocal(binding, { home })).toBe(true);
+			return fixture.options.policy;
+		},
+		request: (operation: string, payload: unknown, options: Record<string, unknown>) =>
+			requestMemory(operation, payload, { ...options, fetcher }),
+	};
+	await flushDiagnosticQueue("codex", sender);
+	expect(fetcher).toHaveBeenCalledOnce();
+	const sent = fetcher.mock.calls[0][1].body as string;
+	expect(sent).not.toContain("QUEUED_PRIVATE_LOCAL_CALLER");
+	expect(sent).toContain("An unrelated hosted answer");
+	expect(sent).toContain(binding?.sessionRef);
+
+	for (const event of [
+		{ hook_event_name: "Stop", last_assistant_message: "PRIVATE_LOCAL_CALLER" },
+		{
+			hook_event_name: "PostToolUse",
+			tool_name: "Bash",
+			tool_input: { description: "PRIVATE_LOCAL_CALLER" },
+			tool_use_id: "PRIVATE_LOCAL_CALLER",
+		},
+		{
+			hook_event_name: "PostToolUse",
+			tool_name: "apply_patch",
+			tool_input: { patch: "*** Update File: PRIVATE_LOCAL_CALLER.ts" },
+		},
+	])
+		expect(collect(event)).toBeDefined();
+	const spooled = readdirSync(fixture.directory)
+		.filter((name) => name.startsWith("event-"))
+		.map((name) => readFileSync(join(fixture.directory, name), "utf8"))
+		.join("\n");
+	expect(spooled).not.toContain("PRIVATE_LOCAL_CALLER");
+	expect(spooled).not.toContain(checkout);
+	expect(spooled).toContain('"metadataOnly":true');
+	expect(spooled).toContain("stop_observed");
+	expect(spooled).toContain("shell_task");
+	expect(readHookPreferences(home).codex?.diagnostics).toBe(true);
+
+	const marker = join(
+		home,
+		".pharaoh",
+		"local-worktree",
+		"conversation-v1",
+		`${binding?.sessionRef}.local`,
+	);
+	expect(lstatSync(marker).mode & 0o777).toBe(0o600);
+	expect(readFileSync(marker, "utf8")).toBe("local-v1\n");
+	collect({ hook_event_name: "SessionEnd" });
+	const resumed = collect(
+		{
+			hook_event_name: "UserPromptSubmit",
+			turn_id: "resumed-turn",
+			prompt: "PRIVATE_LOCAL_CALLER_FROM_PREVIOUS_TURN",
+		},
+		now + 13 * 60 * 60_000,
+	);
+	expect(resumed?.payload).not.toHaveProperty("taskSummary");
+	expect(sessionLocalSensitivity(binding, { home })).toBe("local");
+	await flushDiagnosticQueue("codex", { ...sender, now: () => now + 13 * 60 * 60_000 });
+	expect(fetcher).toHaveBeenCalledTimes(2);
+	const resumedWire = fetcher.mock.calls[1][1].body as string;
+	expect(resumedWire).toContain("stop_observed");
+	expect(resumedWire).not.toContain("PRIVATE_LOCAL_CALLER");
+	expect(resumedWire).not.toContain(checkout);
+});
+
+it("fences uncertain or damaged conversation state without disabling unrelated diagnostics", () => {
+	const binding = conversationMemoryBinding("codex", "local-session");
+	const unrelated = conversationMemoryBinding("claude-code", "local-session");
+	expect(sessionLocalSensitivity(binding, { home })).toBe("clear");
+	expect(markSessionLocal(binding, { home })).toBe(true);
+	expect(markSessionLocal(binding, { home })).toBe(true);
+	expect(sessionLocalSensitivity(unrelated, { home })).toBe("clear");
+	expect(memoryEgressDecision(undefined, "recall", { home })).toBe("blocked");
+	expect(memoryEgressDecision(undefined, "diagnostics", { home })).toBe("metadata");
+	expect(memoryEgressDecision(null, "recall", { home })).toBe("normal");
+	const marker = join(
+		home,
+		".pharaoh",
+		"local-worktree",
+		"conversation-v1",
+		`${binding?.sessionRef}.local`,
+	);
+	writeFileSync(marker, "damaged");
+	expect(sessionLocalSensitivity(binding, { home })).toBe("unknown");
+	expect(markSessionLocal(binding, { home })).toBe(false);
+	expect(memoryEgressDecision(binding, "capture", { home })).toBe("blocked");
+	expect(memoryEgressDecision(unrelated, "diagnostics", { home })).toBe("normal");
+});
+
+it("distinguishes the earlier checkout memory hook from clean settings", () => {
+	expect(legacyMemoryHooksMayRun("codex", checkout)).toBe(false);
+	const path = legacySettings();
+	expect(legacyMemoryHooksMayRun("codex", checkout)).toBe(true);
+	expect(legacyMemoryHooksMayRun("claude-code", checkout)).toBe(false);
+	writeFileSync(path, "{invalid JSON");
+	expect(legacyMemoryHooksMayRun("codex", checkout)).toBe(true);
+});
+
+it("rechecks legacy shell turns and HTTP memory egress after asynchronous sign-in", async () => {
+	const binding = conversationMemoryBinding("codex", "active-memory-conversation");
+	const target = { root: checkout, repo };
+	const store = turnStore(home);
+	const opened = store.begin(binding?.sessionRef, target, "codex", "native-turn", {
+		skip: false,
+		readOnly: false,
+		memorySession: randomUUID(),
+	});
+	const fetcher = vi.fn();
+	await expect(
+		requestMemory(
+			"recall",
+			{ repo, terms: ["PRIVATE_LOCAL_CALLER"] },
+			{
+				binding,
+				home,
+				fetcher,
+				helper: {
+					originBoundRefresh: () => ({
+						load: async () => {
+							expect(markSessionLocal(binding, { home })).toBe(true);
+							return { ok: true, creds: credentials };
+						},
+					}),
+				},
+			},
+		),
+	).rejects.toThrow("paused for this conversation");
+	expect(fetcher).not.toHaveBeenCalled();
+	const read = vi.fn();
+	const request = vi.fn();
+	await expect(
+		executeTurn("recall", opened?.token, { target, store, home, read, request }),
+	).rejects.toThrow("paused for this conversation");
+	expect(read).not.toHaveBeenCalled();
+	expect(request).not.toHaveBeenCalled();
 });
 
 it("records observed heuristic skips, suppresses opted-out turns and rechecks consent before sending", async () => {
@@ -1193,7 +1525,7 @@ it("bounds the spool and turn, reports expiry gaps, and retries stable event IDs
 	expect(queued()).toEqual([]);
 });
 
-it("injects only actual native consent into MCP dispatch and strips claimed consent after opt-out", async () => {
+it("fences a local or unverified MCP conversation before dispatch and preserves other diagnostic consent", async () => {
 	const fixture = diagnosticFixture();
 	vi.stubEnv("HOME", home);
 	const calls: Array<Record<string, unknown>> = [];
@@ -1205,7 +1537,14 @@ it("injects only actual native consent into MCP dispatch and strips claimed cons
 			return { content: [] };
 		},
 	};
-	const proxy = new ProxyServer(backend);
+	const localBinding = conversationMemoryBinding("codex", "bound-conversation");
+	let binding = localBinding;
+	const proxy = new ProxyServer(backend, undefined, {
+		invocation: { kind: "hosted-only" },
+		consume: () => undefined,
+		answer: async () => ({ content: [] }),
+		memoryBinding: () => binding,
+	});
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	await proxy.startWithTransport(serverTransport);
 	const client = new Client({ name: "codex", version: "1.2.3" });
@@ -1234,6 +1573,29 @@ it("injects only actual native consent into MCP dispatch and strips claimed cons
 			arguments: { repo, terms: ["delivery"], diagnostics: claimed },
 		});
 		expect(calls[1].diagnostics).toEqual({ taskSummary: claimed.taskSummary });
+		expect(markSessionLocal(localBinding, { home })).toBe(true);
+		for (const operation of ["recall", "expand", "capture", "feedback"]) {
+			await client.callTool({
+				name: `pharaoh_memory_${operation}`,
+				arguments: {
+					repo,
+					terms: ["PRIVATE_LOCAL_CALLER"],
+					diagnostics: { taskSummary: "PRIVATE_LOCAL_CALLER" },
+				},
+			});
+		}
+		binding = undefined;
+		await client.callTool({
+			name: "pharaoh_memory_recall",
+			arguments: { repo, terms: ["UNATTRIBUTED_LOCAL_CALLER"] },
+		});
+		expect(calls).toHaveLength(2);
+		binding = conversationMemoryBinding("codex", "unrelated-conversation");
+		await client.callTool({
+			name: "pharaoh_memory_recall",
+			arguments: { repo, terms: ["unrelated"] },
+		});
+		expect(calls[2]).toMatchObject({ repo, terms: ["unrelated"] });
 	} finally {
 		await client.close();
 		await proxy.stop();

@@ -1,11 +1,13 @@
 /** One-command developer setup. Registration is separate from an answered tool call. */
 import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import {
 	automaticRuntimeIntent,
 	disableRuntime,
 	type RuntimeDeviceApproval,
 	type RuntimeEnrollmentIntent,
 } from "../runtime/runtime-client.mjs";
+import { syncLocalWorktreeHooks } from "../runtime/runtime-hooks.mjs";
 import { RUNTIME_CLIENTS } from "../runtime/runtime-native.mjs";
 import {
 	pollForToken,
@@ -24,6 +26,7 @@ import {
 	tokenToCredentials,
 } from "./helpers.js";
 import type { ClientId, ClientOutcome, LaunchConfig } from "./install-types.js";
+import { installedLocalAnalyzer } from "./local/worker-host.js";
 import { loadAndRefresh } from "./refresh.js";
 import { ensureRuntime, RuntimeSetupError } from "./runtime.js";
 import { describeRuntimeDisable, enableInstalledRuntime } from "./runtime-command.js";
@@ -261,6 +264,24 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		} catch {
 			extrasFailed = true;
 			write(`Pharaoh: optional client setup could not finish. Retry ${INSTALL_COMMAND}.`);
+		}
+		const managedProxyRoot = dirname(dirname(launch.args[0]));
+		if (options.server === DEFAULT_SERVER && installedLocalAnalyzer(managedProxyRoot)) {
+			const hookPath = join(managedProxyRoot, "runtime", "local-worktree-hook.mjs");
+			const verified = dependencies.verifiedRuntimeClients({
+				runningLaunch: configuredLaunch,
+				rejectProjectOverrides: true,
+			});
+			for (const client of verified) {
+				if (!codingClients.includes(client)) continue;
+				try {
+					syncLocalWorktreeHooks(client, hookPath, { node: configuredLaunch.command });
+				} catch {
+					write(
+						`${LABELS[client]}: saved-worktree hooks could not be configured. Hosted queries remain available.`,
+					);
+				}
+			}
 		}
 		// Existing setup decides Claude tool permissions before runtime hooks can create settings.json.
 		// Both clients publish through the same private runtime lock.

@@ -1,7 +1,7 @@
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleEvent, memoryReminder, skipMemoryPrompt } from "./hook-events.mjs";
-import { readStdin } from "./local.mjs";
+import { conversationMemoryBinding, protectLocalShellAttempt, readStdin } from "./local.mjs";
 import {
 	activeMemoryRuntime,
 	memoryClientRoot,
@@ -46,6 +46,7 @@ try {
 			(diagnosticOnly ? choice?.diagnostics !== true : !reminder && choice?.graph === false)
 		)
 			process.exit(0);
+		if (diagnosticOnly) protectLocalShellAttempt(client, input);
 		const credentials = await readMemoryCredentials();
 		const eligible = await resolveMemoryHookTarget(
 			client,
@@ -65,7 +66,7 @@ try {
 		if (diagnosticOnly) process.exit(0);
 		if (reminder) {
 			if (skipMemoryPrompt(input.prompt)) process.exit(0);
-			result = memoryReminder(eligible.repo);
+			result = memoryReminder(eligible.repo, conversationMemoryBinding(client, input.session_id));
 		} else {
 			const { worktreeCue } = await import("./graph-cues.mjs");
 			result = worktreeCue(input, {

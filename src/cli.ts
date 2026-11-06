@@ -5,9 +5,15 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { localWorktreeShellReady } from "../runtime/local-worktree-hook.mjs";
 import { loadBundledCatalog } from "./catalog.js";
 import { type Credentials, readCredentials } from "./credentials.js";
 import { NPX_COMMAND, parseArgs, printLines } from "./helpers.js";
+import { type LocalDelivery, localRefusal } from "./local/contracts.js";
+import { selectBlastRoute } from "./local/dispatch.js";
+import { createLocalBlastRuntime } from "./local/runtime.js";
+import { resolveLocalCheckout } from "./local/scope.js";
+import { localAnalyzerExpected } from "./local/worker-host.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { createSseProxyServer } from "./proxy-server.js";
 import { originBoundRefresh, type RefreshFailureAction } from "./refresh.js";
@@ -27,6 +33,13 @@ const SIGN_IN = `Pharaoh: not signed in. Run ${NPX_COMMAND} in a terminal to sig
 const PLAN_WALL_ERROR_CODE = "plan_wall:map_only";
 const LEGACY_PLAN_WALL_PREFIX = "This needs Pro: ";
 const EXIT = { answer: 0, failure: 1, usage: 2, signIn: 3, plan: 4 };
+
+function localShellRefusal(): CallToolResult {
+	return localRefusal(
+		"local_conversation_unverified",
+		"Pharaoh could not verify Project Memory privacy for this shell query. Use the connected Pharaoh MCP tool and its worktree readiness check for a saved-worktree answer.",
+	);
+}
 
 function authFailure(action: RefreshFailureAction = "reauth"): void {
 	const needsSignIn = action === "reauth";
@@ -195,8 +208,9 @@ async function call(creds: Credentials, name: string, args: Record<string, unkno
 }
 
 function resultExitCode(name: string, result: CallToolResult): number {
-	if (result.isError) return EXIT.failure;
 	const { errorCode, guidance } = result._meta ?? {};
+	if (errorCode === "sign_in_required") return EXIT.signIn;
+	if (result.isError) return EXIT.failure;
 	if (errorCode === PLAN_WALL_ERROR_CODE) return EXIT.plan;
 	if ((typeof errorCode === "string" && errorCode.length > 0) || guidance === true)
 		return EXIT.failure;
@@ -214,6 +228,7 @@ function resultExitCode(name: string, result: CallToolResult): number {
  */
 export async function runCli(argv: string[]): Promise<void> {
 	const mask = maskOutput();
+	const pending: { settle?: LocalDelivery } = {};
 	const onOutputError = (error: NodeJS.ErrnoException) => {
 		if (error.code === "EPIPE") process.exit(EXIT.answer);
 		printLines("Pharaoh: could not write the answer.");
@@ -228,27 +243,57 @@ export async function runCli(argv: string[]): Promise<void> {
 		const schema = tool.inputSchema as Schema;
 		if (argv.includes("--help") || argv.includes("-h")) return help(name, schema);
 		const { args, server, asJson } = parse(argv, schema);
-		const credentials = originBoundRefresh(server);
-		const auth = await credentials.load();
-		if (!auth || !auth.ok) {
-			return authFailure(auth ? auth.action : "reauth");
-		}
-		mask.remember(auth.creds);
+		const localCapable =
+			name === "get_blast_radius" && args.scope !== "hosted" && localAnalyzerExpected();
+		const runtime = localCapable ? createLocalBlastRuntime(server) : undefined;
+		const route = selectBlastRoute(
+			name,
+			args,
+			localCapable ? resolveLocalCheckout(process.cwd()) : { kind: "hosted-only" },
+			() => undefined,
+		);
 		let result: CallToolResult;
-		try {
-			result = await call(auth.creds, name, args);
-		} catch (error) {
-			if (!(error instanceof TokenExpiredError)) throw error;
-			const refreshed = await credentials.renew(auth.creds);
-			if (!refreshed.ok) {
-				return authFailure(refreshed.action);
+		if (route.kind === "refused") {
+			if (route.code === "invalid_local_request")
+				throw new UsageError("Invalid local blast-radius arguments.");
+			result = localRefusal(route.code);
+		} else if (route.kind === "local") {
+			if (!localWorktreeShellReady(route.checkout.root)) {
+				result = localShellRefusal();
+			} else {
+				result =
+					(await runtime?.answer(route, AbortSignal.timeout(CALL_TIMEOUT_MS), (settle) => {
+						pending.settle = settle;
+					})) ?? localRefusal("local_unavailable");
+				if (!localWorktreeShellReady(route.checkout.root)) {
+					const settle = pending.settle;
+					delete pending.settle;
+					await settle?.(false);
+					result = localShellRefusal();
+				}
 			}
-			mask.remember(refreshed.creds);
+		} else {
+			const credentials = originBoundRefresh(server);
+			const auth = await credentials.load();
+			if (!auth || !auth.ok) {
+				return authFailure(auth ? auth.action : "reauth");
+			}
+			mask.remember(auth.creds);
 			try {
-				result = await call(refreshed.creds, name, args);
-			} catch (retryError) {
-				if (!(retryError instanceof TokenExpiredError)) throw retryError;
-				return authFailure();
+				result = await call(auth.creds, name, args);
+			} catch (error) {
+				if (!(error instanceof TokenExpiredError)) throw error;
+				const refreshed = await credentials.renew(auth.creds);
+				if (!refreshed.ok) {
+					return authFailure(refreshed.action);
+				}
+				mask.remember(refreshed.creds);
+				try {
+					result = await call(refreshed.creds, name, args);
+				} catch (retryError) {
+					if (!(retryError instanceof TokenExpiredError)) throw retryError;
+					return authFailure();
+				}
 			}
 		}
 		process.exitCode = resultExitCode(name, result);
@@ -268,6 +313,9 @@ export async function runCli(argv: string[]): Promise<void> {
 		await new Promise<void>((resolve, reject) => {
 			process.stdout.write(`${output}\n`, (error) => (error ? reject(error) : resolve()));
 		});
+		const delivered = pending.settle;
+		delete pending.settle;
+		await delivered?.(true);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException)?.code === "EPIPE") {
 			process.exitCode = EXIT.answer;
@@ -282,6 +330,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		);
 		process.exitCode = error instanceof UsageError ? EXIT.usage : EXIT.failure;
 	} finally {
+		await pending.settle?.(false);
 		// Backend telemetry is fire-and-forget; mask late diagnostics until it drains.
 		process.once("beforeExit", () => {
 			mask.restore();

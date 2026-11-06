@@ -20,6 +20,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { LaunchConfig } from "./install-types.js";
+import { localAnalyzerInstallStatus } from "./local/worker-host.js";
 import { getPackageVersion, PACKAGE_NAME } from "./version.js";
 
 const RECOVERY = "npx @pharaoh-so/mcp@latest install";
@@ -446,12 +447,17 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 	const command = resolveLaunchNode(options);
 	const lock = await acquireLock(root, options.lockTimeoutMs ?? LOCK_TIMEOUT_MS);
 	let staging: string | undefined;
+	let hostedFallback: LaunchConfig | undefined;
 	try {
 		removeAbandonedStages(root);
 		const destination = join(root, version);
 		if (entryExists(destination)) {
 			try {
-				return { command, args: [validateRuntime(destination, version)] };
+				const entry = validateRuntime(destination, version);
+				const launch = { command, args: [entry] };
+				if (localAnalyzerInstallStatus(dirname(dirname(entry))) !== "repair-needed") return launch;
+				// An optional fetch can fail without invalidating the hosted runtime.
+				hostedFallback = launch;
 			} catch (error) {
 				if (!(error instanceof RuntimeSetupError)) throw error;
 				// Build a complete replacement before moving the damaged runtime aside.
@@ -504,7 +510,9 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 			JSON.stringify({ package: PACKAGE_NAME, version }),
 			{ mode: 0o600 },
 		);
-		validateRuntime(staging, version);
+		const stagedEntry = validateRuntime(staging, version);
+		if (hostedFallback && localAnalyzerInstallStatus(dirname(dirname(stagedEntry))) !== "ready")
+			return hostedFallback;
 		lock.assertHeld();
 		const rename = options.rename ?? renameSync;
 		const backup = entryExists(destination)
@@ -523,6 +531,7 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 			args: [join(destination, "node_modules", "@pharaoh-so", "mcp", "dist", "index.js")],
 		};
 	} catch (error) {
+		if (hostedFallback && isFile(hostedFallback.args[0])) return hostedFallback;
 		if (error instanceof RuntimeSetupError) throw error;
 		return fail("Pharaoh could not prepare its runtime safely.");
 	} finally {
@@ -531,7 +540,7 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 	}
 }
 
-/** Install once under a private staging prefix, then atomically publish the verified runtime. */
+/** Stage a fresh install or repair privately, then atomically publish the verified runtime. */
 export function ensureRuntime(options: RuntimeOptions = {}): Promise<LaunchConfig> {
 	const version = options.version ?? getPackageVersion();
 	if (!SEMVER.test(version) || version === "0.0.0") {

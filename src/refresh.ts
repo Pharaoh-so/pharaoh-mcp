@@ -103,6 +103,7 @@ const REFRESH_TIMEOUT_MS = 10_000;
  * @param path    optional custom credentials path (for tests)
  * @param timeoutMs how long the refresh request may take (for tests)
  * @param strictOrigin require credentials from this origin and refuse refresh redirects
+ * @param sameSignIn refuse to adopt credentials changed since the caller's snapshot
  * @returns New or adopted credentials, or a classified failure. A lock held by
  *   another proxy for too long is `transient` (credentials untouched).
  */
@@ -112,6 +113,7 @@ export async function refreshIfNeeded(
 	path?: string,
 	timeoutMs = REFRESH_TIMEOUT_MS,
 	strictOrigin = false,
+	sameSignIn = false,
 ): Promise<RefreshOutcome> {
 	let release: () => void;
 	try {
@@ -125,6 +127,9 @@ export async function refreshIfNeeded(
 	}
 	try {
 		const current = readCredentials(path);
+		if (sameSignIn && !sameCredentialSnapshot(current, creds)) {
+			return { ok: false, action: "reauth", message: "Sign-in changed." };
+		}
 		if (!current && !existsSync(path ?? CREDENTIALS_PATH))
 			return { ok: false, action: "reauth", message: "Sign-in credentials were cleared." };
 		const source = current ?? creds;
@@ -140,6 +145,7 @@ export async function refreshIfNeeded(
 			deleteCredentials(path);
 			return outcome;
 		}
+		if (sameSignIn) return outcome;
 		if (strictOrigin && !matchesOrigin(after, server)) return originMismatch();
 		return isExpired(after) ? outcome : { ok: true, creds: after };
 	} finally {
@@ -305,10 +311,31 @@ function originMismatch(): RefreshOutcome {
 	return { ok: false, action: "transient", message: "Credentials belong to a different server" };
 }
 
+/**
+ * Exact credential identity across a local operation. An unrelated refresh
+ * safely invalidates the snapshot just like a different sign-in.
+ */
+export function sameCredentialSnapshot(
+	current: Credentials | null,
+	original: Credentials,
+): boolean {
+	return (
+		current !== null &&
+		current.access_token === original.access_token &&
+		current.refresh_token === original.refresh_token &&
+		current.sse_url === original.sse_url
+	);
+}
+
 /** Refresh for a client that accepts credentials only from its configured origin. */
 export function originBoundRefresh(server: string, path?: string) {
 	return {
 		load: () => loadAndRefresh(server, path, true),
 		renew: (creds: Credentials) => refreshIfNeeded(creds, server, path, undefined, true),
 	};
+}
+
+/** Renew only if the credential file still belongs to this local invocation. */
+export function renewOriginBoundSignIn(creds: Credentials, server: string, path?: string) {
+	return refreshIfNeeded(creds, server, path, undefined, true, true);
 }

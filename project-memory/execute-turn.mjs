@@ -1,5 +1,5 @@
 import { git, visibleGitIndex } from "./local.mjs";
-import { PilotError, requestMemory } from "./memory-api.mjs";
+import { PilotError, requestMemory, requireMemoryEgress } from "./memory-api.mjs";
 import { projectMemorySession } from "./user-target.mjs";
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -166,7 +166,7 @@ function validPair(id, version) {
 export async function executeTurn(
 	operation,
 	token,
-	{ target, store, read, request = requestMemory, compact = true, loadCaptureCredentials },
+	{ target, store, read, request = requestMemory, compact = true, loadCaptureCredentials, home },
 ) {
 	const change = (from, to) => {
 		const state = store.transition(token, target, from, to);
@@ -180,6 +180,13 @@ export async function executeTurn(
 				"No confirmed capture receipt is available for this turn. Check Project Memory before retrying.",
 			);
 		return receipt;
+	}
+	const binding = store.conversation(token, target);
+	if (!binding) throw new PilotError("This project memory turn is stale or not eligible.");
+	requireMemoryEgress(binding, operation, { home });
+	function send(payload, credentials) {
+		requireMemoryEgress(binding, operation, { home });
+		return request(operation, payload, { binding, credentials, home });
 	}
 	let input;
 	try {
@@ -197,7 +204,7 @@ export async function executeTurn(
 			);
 		let result;
 		try {
-			result = await request(operation, {
+			result = await send({
 				repo: expanding.repo,
 				id: input.id,
 				version: input.version,
@@ -224,7 +231,7 @@ export async function executeTurn(
 		if (!session || !(Date.parse(credentials.expires_at) > Date.now()))
 			throw new PilotError("Reconnect to Pharaoh to save project memory.");
 		const dispatched = store.startCapture(token, target, session, (identity) =>
-			request("capture", { ...draft, gitRev, refs, ...identity }, { credentials }),
+			send({ ...draft, gitRev, refs, ...identity }, credentials),
 		);
 		if (!dispatched)
 			throw new PilotError("This turn is stale, read-only, or has already attempted a capture.");
@@ -251,7 +258,7 @@ export async function executeTurn(
 	};
 	let result;
 	try {
-		result = await request(operation, payload);
+		result = await send(payload);
 	} catch (error) {
 		store.transition(token, target, ["recalling"], "failed");
 		throw error;
