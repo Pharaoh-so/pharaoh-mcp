@@ -46,6 +46,26 @@ const MEMORY_DIAGNOSTIC_PACK_PATHS = [
 	"project-memory/diagnostics-collector.mjs",
 	"project-memory/diagnostics-sender.mjs",
 ];
+const SETUP_PROMPT_PACK_PATHS = [
+	"dist/setup-prompt.generated.js",
+	"dist/setup-prompt.generated.d.ts",
+];
+const NATIVE_RUNTIME_PACK_PATHS = [
+	"runtime/runtime-bundle.d.mts",
+	"runtime/runtime-bundle.mjs",
+	"runtime/runtime-client.d.mts",
+	"runtime/runtime-client.mjs",
+	"runtime/runtime-contract.d.mts",
+	"runtime/runtime-contract.mjs",
+	"runtime/runtime-hook.mjs",
+	"runtime/runtime-hooks.d.mts",
+	"runtime/runtime-hooks.mjs",
+	"runtime/runtime-metadata.d.mts",
+	"runtime/runtime-metadata.mjs",
+	"runtime/runtime-native.d.mts",
+	"runtime/runtime-native.mjs",
+	"runtime/runtime-storage.mjs",
+];
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 export const hash = (bytes, algorithm = "sha256") =>
 	createHash(algorithm).update(bytes).digest("hex");
@@ -106,6 +126,8 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		// skills/ is the pre-npx-skills layout; drop it once main's package.json no longer ships it.
 		assert.ok(
 			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
+				SETUP_PROMPT_PACK_PATHS.includes(path) ||
+				NATIVE_RUNTIME_PACK_PATHS.includes(path) ||
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
@@ -114,9 +136,29 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 			`Unexpected npm file: ${path}`,
 		);
 	}
+	for (const [name, packed, sources] of [
+		["Setup prompt", SETUP_PROMPT_PACK_PATHS, ["src/setup-prompt.generated.ts"]],
+		["Native runtime", NATIVE_RUNTIME_PACK_PATHS, NATIVE_RUNTIME_PACK_PATHS],
+	]) {
+		if (
+			!packed.some((path) => paths.includes(path)) &&
+			!sources.some((path) => sourcePaths?.includes(path))
+		)
+			continue;
+		assert.ok(
+			sourcePaths && sources.every((path) => sourcePaths.includes(path)),
+			`${name} is absent or incomplete in the verified source`,
+		);
+		assert.ok(
+			packed.every((path) => paths.includes(path)),
+			`Missing ${name} npm assets`,
+		);
+	}
 	const hasMemory = packageFiles.includes("project-memory");
 	const diagnosticInPack = MEMORY_DIAGNOSTIC_PACK_PATHS.some((path) => paths.includes(path));
-	const diagnosticInSource = sourcePaths?.some((path) => MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path));
+	const diagnosticInSource = sourcePaths?.some((path) =>
+		MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path),
+	);
 	if (sourcePaths && diagnosticInPack) {
 		assert.ok(diagnosticInSource, "Memory diagnostics are absent from the verified source");
 	}
@@ -238,6 +280,18 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 		pkg.files,
 		source?.files.map((file) => file.path),
 	);
+	const sourceHashes = new Map(source?.files.map((file) => [file.path, file.sha256]));
+	for (const path of NATIVE_RUNTIME_PACK_PATHS) {
+		if (!names.includes(`package/${path}`)) continue;
+		const archived = execFileSync("tar", ["-xOzf", tarball, `package/${path}`], {
+			maxBuffer: 32 * 1024 * 1024,
+		});
+		assert.equal(
+			hash(archived),
+			sourceHashes.get(path),
+			`Native runtime source hash mismatch: ${path}`,
+		);
+	}
 	return manifest;
 }
 

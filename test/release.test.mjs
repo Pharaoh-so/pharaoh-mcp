@@ -241,16 +241,123 @@ test("reads actual npm 12 pack JSON and rejects multiple or misidentified packag
 });
 
 test("diagnostic runtime is an exact complete pair bound to verified source", () => {
-	const diagnostics = ["project-memory/diagnostics-collector.mjs", "project-memory/diagnostics-sender.mjs"];
+	const diagnostics = [
+		"project-memory/diagnostics-collector.mjs",
+		"project-memory/diagnostics-sender.mjs",
+	];
 	const complete = [...paths, ...diagnostics];
 	verifyPackPaths(paths, [], paths);
 	verifyPackPaths(complete, [], complete);
 	for (const omitted of diagnostics) {
-		assert.throws(() => verifyPackPaths(complete.filter((path) => path !== omitted), [], complete));
-		assert.throws(() => verifyPackPaths(complete, [], complete.filter((path) => path !== omitted)));
+		assert.throws(() =>
+			verifyPackPaths(
+				complete.filter((path) => path !== omitted),
+				[],
+				complete,
+			),
+		);
+		assert.throws(() =>
+			verifyPackPaths(
+				complete,
+				[],
+				complete.filter((path) => path !== omitted),
+			),
+		);
 	}
 	assert.throws(() => verifyPackPaths(complete, [], paths), /absent from the verified source/);
-	assert.throws(() => verifyPackPaths([...complete, "project-memory/diagnostics-credentials.json"]));
+	assert.throws(() =>
+		verifyPackPaths([...complete, "project-memory/diagnostics-credentials.json"]),
+	);
+});
+
+test("setup output and native runtime require complete verified source and reject extra assets", () => {
+	const setup = ["dist/setup-prompt.generated.js", "dist/setup-prompt.generated.d.ts"];
+	const runtime = [
+		"runtime/runtime-bundle.d.mts",
+		"runtime/runtime-bundle.mjs",
+		"runtime/runtime-client.d.mts",
+		"runtime/runtime-client.mjs",
+		"runtime/runtime-contract.d.mts",
+		"runtime/runtime-contract.mjs",
+		"runtime/runtime-hook.mjs",
+		"runtime/runtime-hooks.d.mts",
+		"runtime/runtime-hooks.mjs",
+		"runtime/runtime-metadata.d.mts",
+		"runtime/runtime-metadata.mjs",
+		"runtime/runtime-native.d.mts",
+		"runtime/runtime-native.mjs",
+		"runtime/runtime-storage.mjs",
+	];
+	for (const [packed, source] of [
+		[setup, ["src/setup-prompt.generated.ts"]],
+		[runtime, runtime],
+	]) {
+		verifyPackPaths([...paths, ...packed], [], [...paths, ...source]);
+		for (const omitted of packed)
+			assert.throws(
+				() =>
+					verifyPackPaths(
+						[...paths, ...packed.filter((path) => path !== omitted)],
+						[],
+						[...paths, ...source],
+					),
+				/Missing/,
+			);
+		for (const omitted of source)
+			assert.throws(
+				() =>
+					verifyPackPaths(
+						[...paths, ...packed],
+						[],
+						[...paths, ...source.filter((path) => path !== omitted)],
+					),
+				/verified source/,
+			);
+		assert.throws(() => verifyPackPaths([...paths, ...packed]), /verified source/);
+	}
+	const complete = [...paths, ...setup, ...runtime];
+	const source = [...paths, "src/setup-prompt.generated.ts", ...runtime];
+	verifyPackPaths(complete, ["runtime"], source);
+	for (const unexpected of [
+		"runtime/credentials.json",
+		"runtime/unreviewed.mjs",
+		"dist/unreviewed.generated.js",
+		"src/setup-prompt.generated.ts",
+	])
+		assert.throws(
+			() => verifyPackPaths([...complete, unexpected], ["runtime"], [...source, unexpected]),
+			/Unexpected npm file/,
+		);
+	const item = fixture([...paths, ...runtime], ["runtime"]);
+	const verified = {
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: "c".repeat(64),
+		files: runtime.map((path) => ({ path, sha256: hash(Buffer.from(`public ${path}`)) })),
+	};
+	try {
+		assert.equal(validateArtifact(item.directory, commit, item.save(), verified).version, version);
+		for (const path of runtime) {
+			const original = readFileSync(join(item.root, "package", path));
+			writeFileSync(join(item.root, "package", path), Buffer.from([0xff, 0x00, 0x41]));
+			const tarball = join(item.directory, item.manifest.tarballFile);
+			execFileSync(
+				"tar",
+				["-czf", tarball, ...[...paths, ...runtime].map((name) => `package/${name}`)],
+				{ cwd: item.root },
+			);
+			const bytes = readFileSync(tarball);
+			item.manifest.tarballSha256 = hash(bytes);
+			item.manifest.integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+			assert.throws(
+				() => validateArtifact(item.directory, commit, item.save(), verified),
+				/Native runtime source hash mismatch/,
+			);
+			writeFileSync(join(item.root, "package", path), original);
+		}
+	} finally {
+		item.clean();
+	}
 });
 
 test("release intent uses immutable previous package versions and skips maintenance/PR publication", () => {
