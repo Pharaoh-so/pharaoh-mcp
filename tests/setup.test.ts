@@ -150,7 +150,8 @@ describe("Claude CLI detection for optional plugin installation", () => {
 		expect(branch('if (args.includes("--clean")) {')).toContain("uninstallClaudePlugin();");
 		const logout = branch("if (logout) {");
 		expect(logout).toContain("uninstallClaudePlugin();");
-		expect(logout.indexOf("deleteCredentials();")).toBeLessThan(
+		expect(logout).toContain("await takeCredentialsForLogout();");
+		expect(logout.indexOf("await takeCredentialsForLogout();")).toBeLessThan(
 			logout.indexOf("uninstallClaudePlugin();"),
 		);
 	});
@@ -233,6 +234,36 @@ it("explicit reset continues independent cleanup when the private installation r
 			mcpServers: { other: { command: "keep-this-server" } },
 			projects: { fixture: { disabledMcpServers: ["other"] } },
 		});
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+it.each([
+	"--clean",
+	"--logout",
+])("%s ignores unrelated malformed hooks without runtime enrollment", (flag) => {
+	const home = mkdtempSync(join(tmpdir(), "pharaoh-clean-without-runtime-"));
+	try {
+		const codex = join(home, ".codex");
+		mkdirSync(codex);
+		mkdirSync(join(home, "empty-path"));
+		const hooks = join(codex, "hooks.json");
+		writeFileSync(hooks, "{unrelated malformed configuration");
+		const tsx = createRequire(import.meta.url).resolve("tsx/cli");
+		const result = spawnSync(process.execPath, [tsx, join(PKG_ROOT, "src/index.ts"), flag], {
+			encoding: "utf8",
+			timeout: 20_000,
+			env: {
+				HOME: home,
+				USERPROFILE: home,
+				PATH: join(home, "empty-path"),
+				PHARAOH_MCP_DISABLE_BROWSER: "1",
+			},
+		});
+		expect(result.status, result.stderr).toBe(0);
+		expect(result.stderr).not.toContain("runtime revocation");
+		expect(readFileSync(hooks, "utf8")).toBe("{unrelated malformed configuration");
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

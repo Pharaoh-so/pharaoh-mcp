@@ -35,7 +35,12 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type Credentials, readCredentials, writeCredentials } from "../src/credentials.js";
+import {
+	type Credentials,
+	readCredentials,
+	takeCredentialsForLogout,
+	writeCredentials,
+} from "../src/credentials.js";
 import { loadAndRefresh, originBoundRefresh, refreshIfNeeded } from "../src/refresh.js";
 
 interface TestServer {
@@ -668,6 +673,23 @@ describe("refreshIfNeeded with several proxies sharing one credentials file", ()
 		const outcome = await refreshIfNeeded(dead, server.url, path);
 
 		expect(outcome.ok ? "ok" : outcome.action).toBe("reauth");
+		expect(existsSync(path)).toBe(false);
+	});
+
+	it("logout takes the refresh lock and stale refreshes cannot restore deleted credentials", async () => {
+		server = await startRotatingServer({ access: "phat_0", refresh: "phrt_0" });
+		const stale = creds("phat_0", "phrt_0", true);
+		writeCredentials(stale, path);
+		let logout: ReturnType<typeof takeCredentialsForLogout> | undefined;
+		server.onRequest(() => {
+			logout = takeCredentialsForLogout(path);
+		});
+		expect((await refreshIfNeeded(stale, server.url, path)).ok).toBe(true);
+		expect((await logout)?.access_token).toBe("phat_1");
+		expect(existsSync(path)).toBe(false);
+		const restarted = await refreshIfNeeded(stale, server.url, path);
+		expect(restarted.ok ? "ok" : restarted.action).toBe("reauth");
+		expect(server.refreshCalls()).toBe(1);
 		expect(existsSync(path)).toBe(false);
 	});
 

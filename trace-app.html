@@ -281,6 +281,8 @@
         let omitted = result.content.length > 64;
         for (const block of result.content.slice(0,64)) {
           if (!record(block) || block.type !== "text" || typeof block.text !== "string") continue;
+          const audience = block.annotations?.audience;
+          if (Array.isArray(audience) && audience.includes("assistant") && !audience.includes("user")) continue;
           const remaining = MAX_TEXT - text.length;
           const separator = text ? 2 : 0;
           if (remaining <= separator) { omitted = true; break; }

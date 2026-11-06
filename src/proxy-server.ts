@@ -35,6 +35,8 @@ import {
 	memoryDiagnosticsForClient,
 	memoryHookStateForClient,
 } from "../project-memory/preferences.mjs";
+import { runtimeRequestMetadata } from "../runtime/runtime-client.mjs";
+import { RUNTIME_TOOL_NAMES, sanitizeRuntimeResult } from "../runtime/runtime-native.mjs";
 import {
 	AuthRequiredBackend,
 	type Backend,
@@ -165,16 +167,31 @@ export class ProxyServer {
 				}
 			}
 			const backend = this.backend;
+			if (RUNTIME_TOOL_NAMES.includes(name)) {
+				const { refreshManagedRuntimeBuild } = await import("./runtime-command.js");
+				refreshManagedRuntimeBuild(this.downstream?.client.name);
+			}
+			// Caller _meta never supplies installation identity; only the private
+			// consent record for this negotiated local client can add it upstream.
+			const runtime = RUNTIME_TOOL_NAMES.includes(name)
+				? runtimeRequestMetadata(this.downstream?.client.name)
+				: undefined;
 			// The CLI's longer deadline must reach the upstream SDK request too.
-			const options = { signal: extra.signal, timeout: this.requestTimeout };
+			const options = { signal: extra.signal, timeout: this.requestTimeout, runtime };
 			const result = await backend.callTool(name, args, options);
 			// The call that completed sign-in swapped in the real backend — answer
 			// it from there instead of asking the agent to call again.
 			if (backend.name === "auth-required" && this.backend !== backend && !result.isError) {
 				extra.signal.throwIfAborted();
-				return (await this.backend.callTool(name, args, options)) as CallToolResult;
+				return sanitizeRuntimeResult(
+					await this.backend.callTool(name, args, options),
+					Boolean(runtime),
+				);
 			}
-			return result as CallToolResult;
+			return sanitizeRuntimeResult(
+				result,
+				backend.name === "sse" && Boolean(runtime),
+			) as CallToolResult;
 		});
 	}
 

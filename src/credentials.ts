@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
+	existsSync,
 	mkdirSync,
 	readFileSync,
 	renameSync,
@@ -61,6 +62,8 @@ export interface Credentials {
 	project_memory_status?: "unavailable";
 	/** Local readiness binding, stable only across refreshes of this sign-in. */
 	project_memory_session?: string;
+	/** Private installation binding, preserved across refresh and replaced on a new sign-in. */
+	runtime_session?: string;
 }
 
 /** Default credential file path (route-grep-hook.ts checks the same file to know Pharaoh is signed in). */
@@ -96,6 +99,19 @@ export function writeCredentials(creds: Credentials, path = CREDENTIALS_PATH): v
 	} catch (err) {
 		rmSync(tmp, { force: true });
 		throw err;
+	}
+}
+
+/** Publish a newly authorized sign-in without racing a refresh from the previous one. */
+export async function saveAuthorizedCredentials(
+	credentials: Credentials,
+	path = CREDENTIALS_PATH,
+): Promise<void> {
+	const release = await acquireCredentialsLock(path);
+	try {
+		writeCredentials(credentials, path);
+	} finally {
+		release();
 	}
 }
 
@@ -207,6 +223,21 @@ export function deleteCredentials(path = CREDENTIALS_PATH): void {
 		unlinkSync(path);
 	} catch {
 		// File doesn't exist — nothing to delete
+	}
+}
+
+/** Snapshot credentials for same-origin revocation and delete them under the refresh lock. */
+export async function takeCredentialsForLogout(
+	path = CREDENTIALS_PATH,
+): Promise<Credentials | null> {
+	if (!existsSync(path) && !existsSync(`${path}.lock`)) return null;
+	const release = await acquireCredentialsLock(path);
+	try {
+		const previous = readCredentials(path);
+		deleteCredentials(path);
+		return previous;
+	} finally {
+		release();
 	}
 }
 

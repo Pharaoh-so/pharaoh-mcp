@@ -3,6 +3,8 @@
  * bounded files only; it cannot establish what a running agent loaded or used.
  */
 import { homedir } from "node:os";
+import { runtimeStatus } from "../runtime/runtime-client.mjs";
+import { RUNTIME_CLIENTS } from "../runtime/runtime-native.mjs";
 import { claudePluginState, instructionStates } from "./install-skills.js";
 import { getPackageVersion } from "./version.js";
 
@@ -16,6 +18,8 @@ interface LocalSetupDiagnosis {
 	plugin: ReturnType<typeof claudePluginState>;
 	/** Pharaoh marker states in the bounded user/project instruction files. */
 	instructions: ReturnType<typeof instructionStates>;
+	/** Offline consent and receipt coverage, without reading credential records. */
+	runtime: Array<{ client: string; status: ReturnType<typeof runtimeStatus> }>;
 }
 
 /**
@@ -44,6 +48,10 @@ export function diagnoseLocalSetup(
 			home,
 			env,
 		),
+		runtime: RUNTIME_CLIENTS.map((name) => ({
+			client: name,
+			status: runtimeStatus(name, { home }),
+		})),
 	};
 }
 
@@ -61,6 +69,10 @@ export function renderLocalSetupDiagnosis(diagnosis: LocalSetupDiagnosis): strin
 		`Claude Code user instruction marker: ${diagnosis.instructions.user}`,
 		`Pharaoh managed instruction block: ${diagnosis.instructions.managed}`,
 		`Project instruction marker: ${diagnosis.instructions.project}`,
+		...diagnosis.runtime.map(
+			({ client, status }) =>
+				`Runtime observations (${client}): ${status.consent}; receipt coverage ${status.receiptCoverage}; token coverage ${status.tokenCoverage}.`,
+		),
 		"File presence does not establish instruction loading, skill use or compliance.",
 		"The configured package pin is not inspected. For a general instruction audit, use Claude Code's /doctor prompt-audit.",
 		"To inspect project markers for Claude Code, run npx @pharaoh-so/mcp@latest --doctor --client claude-code from the repository root.",

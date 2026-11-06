@@ -26,6 +26,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
 import { ensurePharaohHome } from "./credentials.js";
 import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
 import { getPackageVersion, PACKAGE_NAME, pinnedPackageSpec } from "./version.js";
@@ -950,7 +951,13 @@ interface ClaudeSettings {
 }
 
 /** What `allowReadTools` did to ~/.claude/settings.json. */
-export type AllowReadToolsResult = "added" | "migrated" | "current" | "no-settings" | "error";
+export type AllowReadToolsResult =
+	| "added"
+	| "migrated"
+	| "current"
+	| "no-settings"
+	| "runtime-hooks-only"
+	| "error";
 
 /**
  * Add `PHARAOH_ALLOW_RULES` to `permissions.allow` in ~/.claude/settings.json,
@@ -971,8 +978,13 @@ export function allowReadTools(home = homedir()): AllowReadToolsResult {
 	let settings: ClaudeSettings;
 	try {
 		settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as ClaudeSettings;
+		if (settings.hooks && Object.keys(settings).length === 1) {
+			const remainingHooks = updateRuntimeHooks(settings, "claude-code", null).hooks;
+			// A runtime-generated settings file does not opt a person into tool permissions.
+			if (remainingHooks && Object.keys(remainingHooks).length === 0) return "runtime-hooks-only";
+		}
 	} catch {
-		// ALLOWED-CATCH: a file we cannot parse is a file we must not rewrite
+		// ALLOWED-CATCH: a file we cannot safely interpret is a file we must not rewrite
 		return "error";
 	}
 
@@ -1004,8 +1016,10 @@ export function describeAllowReadTools(result: AllowReadToolsResult): string {
 			return `Pharaoh: ~/.claude/settings.json already allows the ${count} read-only tools by name.`;
 		case "no-settings":
 			return "Pharaoh: no ~/.claude/settings.json yet, so Pharaoh's tools ask before they run. The rules to allow the read-only tools are in the README (Security).";
+		case "runtime-hooks-only":
+			return "Pharaoh: the settings file only has runtime hook configuration. Pharaoh's tools ask before they run.";
 		case "error":
-			return "Pharaoh: ~/.claude/settings.json is not valid JSON; left as is. Pharaoh's tools ask before they run.";
+			return "Pharaoh: ~/.claude/settings.json could not be read safely. Pharaoh's tools ask before they run.";
 	}
 }
 

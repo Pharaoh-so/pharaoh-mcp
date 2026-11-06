@@ -20,6 +20,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { CallToolResult, ClientCapabilities, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { MemoryHookState } from "../project-memory/preferences.mjs";
+import type { RuntimeRequestMetadata } from "../runtime/runtime-client.mjs";
+import { RUNTIME_META } from "../runtime/runtime-native.mjs";
 import { loadBundledCatalog } from "./catalog.js";
 import type { DeviceFlowGateway } from "./gateway.js";
 import type { InstructionState, ManagedBlockState } from "./install-skills.js";
@@ -50,7 +52,7 @@ export type DownstreamClient = {
 	};
 };
 
-type RequestOptions = { signal?: AbortSignal };
+type RequestOptions = { signal?: AbortSignal; timeout?: number; runtime?: RuntimeRequestMetadata };
 
 /** The contract ProxyServer uses to delegate tool handling. */
 export interface Backend {
@@ -459,7 +461,14 @@ export class SseProxyBackend implements Backend {
 		const client = await this.readyClient(options?.signal);
 		// Dispatch exactly once. An interrupted write has an uncertain outcome;
 		// recovery is for subsequent requests, never an implicit replay.
-		const res = await client.callTool({ name, arguments: args }, undefined, options);
+		const { runtime, ...requestOptions } = options ?? {};
+		const bound =
+			runtime && runtime.server === new URL(this.sseUrl).origin ? runtime.metadata : undefined;
+		const res = await client.callTool(
+			{ name, arguments: args, ...(bound && { _meta: { [RUNTIME_META]: bound } }) },
+			undefined,
+			requestOptions,
+		);
 		return res as CallToolResult;
 	}
 

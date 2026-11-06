@@ -1,5 +1,13 @@
 /** Installation fixtures use private homes and fake CLIs, never the operator's settings. */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -8,6 +16,7 @@ import {
 	cleanupManagedClients,
 	configureClients,
 	discoverClients,
+	freshRuntimeClients,
 	legacyMigrations,
 	verifiedCodingClients,
 } from "../src/client-install.js";
@@ -98,6 +107,24 @@ describe("independent client discovery", () => {
 
 	it("does not create configurations for absent clients", () => {
 		expect(discoverClients(options)).toEqual([]);
+	});
+
+	it("offers automatic runtime enrollment only before a first guarded registration", () => {
+		const target = code();
+		expect(freshRuntimeClients([target], options)).toEqual(["claude-code"]);
+		expect(freshRuntimeClients([target], { ...options, platform: "win32" })).toEqual([]);
+		write(target.path, '{"disabledMcpServers":["pharaoh"]}');
+		expect(freshRuntimeClients([target], options)).toEqual([]);
+		write(target.path, '{"projects":{"/repo":{"mcpServers":{"pharaoh":{"url":"custom"}}}}}');
+		expect(freshRuntimeClients([target], options)).toEqual([]);
+		write(target.path, "{}");
+		expect(configureClients([target], launch, options)[0]).toMatchObject({
+			status: "configured",
+			created: true,
+		});
+		expect(freshRuntimeClients([target], options)).toEqual([]);
+		write(target.path, "{}");
+		expect(freshRuntimeClients([target], options)).toEqual([]);
 	});
 
 	it("discovers Linux Desktop Chat and Code from the documented config directory", () => {
@@ -541,6 +568,40 @@ describe("verified coding clients for automatic startup assets", () => {
 		write(otherNode, "another-fixture-node");
 		expect(
 			verifiedCodingClients({ ...options, runningLaunch: { ...next, command: otherNode } }),
+		).toEqual([]);
+	});
+
+	it("requires the managed proxy release and server to support runtime receipts", () => {
+		const server = "https://self-hosted.example";
+		const managedLaunch = (version: string) => {
+			const pkg = join(
+				realpathSync(home),
+				".pharaoh",
+				"runtimes",
+				"mcp",
+				version,
+				"node_modules",
+				"@pharaoh-so",
+				"mcp",
+			);
+			const entry = join(pkg, "dist", "index.js");
+			write(entry, "fixture entry");
+			write(join(pkg, "package.json"), JSON.stringify({ name: "@pharaoh-so/mcp", version }));
+			return { pkg, config: { command: launch.command, args: [entry, "--server", server] } };
+		};
+		configureClients([code()], managedLaunch("0.3.69").config, options);
+		const requiredProxy = { minimumVersion: "0.3.70", server };
+		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual([]);
+		const next = managedLaunch("0.3.70");
+		configureClients([code()], next.config, options);
+		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual([]);
+		write(join(next.pkg, "runtime", "runtime-client.mjs"), "fixture capability");
+		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual(["claude-code"]);
+		expect(
+			verifiedCodingClients({
+				...options,
+				requiredProxy: { ...requiredProxy, server: "https://other.example" },
+			}),
 		).toEqual([]);
 	});
 

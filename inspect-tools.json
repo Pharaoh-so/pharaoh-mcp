@@ -79,7 +79,7 @@
               "properties": {
                 "entity": {
                   "type": "string",
-                  "description": "Function, file or module name"
+                  "description": "Function name or file:qualifiedName (e.g. src/auth.ts:Auth.check), file path, or module name"
                 },
                 "entity_type": {
                   "description": "Default: function",
@@ -189,7 +189,7 @@
           },
           "entity": {
             "type": "string",
-            "description": "Function name, file path, or module name"
+            "description": "Function name or file:qualifiedName (e.g. src/auth.ts:Auth.check), file path, or module name"
           },
           "entity_type": {
             "type": "string",
@@ -340,7 +340,7 @@
     {
       "name": "pharaoh_setup",
       "title": "Setup",
-      "description": "Pharaoh's setup for the repo you're working in, and the first questions to ask it. Writes nothing.\n\nCALL THIS WHEN:\n• The user asks to set up Pharaoh, or to check its setup\n• Pharaoh was just connected and the user asks what to try first\n\nRETURNS: Who is signed in, whether the repo is mapped, whether the Pharaoh-first instructions line is in use (with the line when it isn't), and up to three questions about this repo that Pharaoh answers from the map and its module cycles.",
+      "description": "Pharaoh's connection and setup status for the repo you're working in. Writes no files.\n\nCALL THIS WHEN:\n• The user asks to set up Pharaoh, or to check its setup\n• Pharaoh was just connected and the user asks what to try first\n\nRETURNS: Connection, mapped-repo and access status, a Codebase Health link, bounded first-use investigation guidance for the agent, and the Pharaoh-first instructions line only when needed.",
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",

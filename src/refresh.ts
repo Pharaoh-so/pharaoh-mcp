@@ -12,9 +12,11 @@
  * credentials lock, and a proxy whose token was replaced by another proxy's
  * refresh adopts the new credentials instead of refreshing again.
  */
+import { existsSync } from "node:fs";
 import type { Credentials } from "./credentials.js";
 import {
 	acquireCredentialsLock,
+	CREDENTIALS_PATH,
 	deleteCredentials,
 	isExpired,
 	isRefreshExpired,
@@ -123,6 +125,8 @@ export async function refreshIfNeeded(
 	}
 	try {
 		const current = readCredentials(path);
+		if (!current && !existsSync(path ?? CREDENTIALS_PATH))
+			return { ok: false, action: "reauth", message: "Sign-in credentials were cleared." };
 		const source = current ?? creds;
 		if (strictOrigin && !matchesOrigin(source, server)) return originMismatch();
 		if (current && current.access_token !== creds.access_token && !isExpired(current)) {
