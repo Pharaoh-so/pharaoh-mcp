@@ -72,14 +72,26 @@ function eligibleName(path: string): string | undefined {
 	return segments.at(-1);
 }
 
+function isSourceName(name: string): boolean {
+	return SOURCE_EXTENSIONS.has(posix.extname(name)) && !MINIFIED_NAME.test(name);
+}
+
+/**
+ * Use the snapshot's same source eligibility rules for native save evidence.
+ * @public Used by the packaged local-worktree hook through the compiled module.
+ */
+export function isLocalSourcePath(path: string): boolean {
+	const name = eligibleName(path);
+	return Boolean(name && !CONFIG_NAME.test(name) && isSourceName(name));
+}
+
 function candidates(paths: readonly string[]): Candidate[] {
 	const selected: Candidate[] = [];
 	for (const path of paths) {
 		const name = eligibleName(path);
 		if (!name) continue;
 		if (CONFIG_NAME.test(name)) selected.push({ path, kind: "config" });
-		else if (SOURCE_EXTENSIONS.has(posix.extname(name)) && !MINIFIED_NAME.test(name))
-			selected.push({ path, kind: "source" });
+		else if (isSourceName(name)) selected.push({ path, kind: "source" });
 	}
 	return selected;
 }

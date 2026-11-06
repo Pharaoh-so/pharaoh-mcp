@@ -20,11 +20,13 @@ import {
 	nativeMemoryCallCurrent,
 	nativeMemoryRuntimeBinding,
 	observeRuntimeGeneration,
+	recordDeliveredLocalWorktreeAnswer,
 	releaseRuntimeGeneration,
 	runtimeConversationBinding,
 	verifiedSessionRuntime,
 	verifyRuntimeSession,
 } from "../runtime/local-worktree-hook.mjs";
+import { runtimeLock } from "../runtime/runtime-storage.mjs";
 import type { CheckoutEvidence } from "../src/local/dispatch.js";
 
 const START = Date.now();
@@ -101,6 +103,102 @@ describe.skipIf(process.platform === "win32")("native local-worktree proof", () 
 		return ready;
 	}
 
+	function recheckFixture(client: "claude-code" | "codex") {
+		const before = createHash("sha256").update("before").digest("hex");
+		const after = createHash("sha256").update("after").digest("hex");
+		const path = "src/private-caller.ts";
+		const fingerprints = new Map<string, string | null>([[path, before]]);
+		const sourceTexts = new Map<string, string>();
+		const reads: string[] = [];
+		const visible = new Set([path]);
+		const identity = { ...turn, turn_id: "codex-turn" };
+		const current = {
+			...options(),
+			client,
+			binding: localWorktreeBinding(client, launch, credentials),
+			isSourcePath: (path: string) => path.endsWith(".ts"),
+			readSourceFingerprints: (
+				_checkout: unknown,
+				paths: readonly string[],
+				visit?: (path: string, bytes: Buffer) => void,
+			) =>
+				new Map(
+					paths.flatMap((path) => {
+						reads.push(path);
+						const fingerprint = fingerprints.get(path);
+						const text = sourceTexts.get(path);
+						if (fingerprint && text !== undefined) visit?.(path, Buffer.from(text));
+						return fingerprint === undefined ? [] : [[path, fingerprint] as const];
+					}),
+				),
+			visibleSourcePaths: () => [...visible],
+		};
+		releaseRuntimeGeneration(generation);
+		generation = observeRuntimeGeneration(client, current.binding, checkout, current);
+		const handle = (input: object, now = START) =>
+			handleLocalWorktreeHook({ ...identity, ...input }, { ...current, now });
+		const challenge = getChallenge(
+			handle({ hook_event_name: "UserPromptSubmit" })?.hookSpecificOutput.additionalContext ?? "",
+		);
+		approveProbe(challenge, identity, current);
+		const ready = verifyRuntimeSession(generation, challenge, { now: START });
+		if (!ready) throw new Error("Missing local scope");
+		const args = { ...query, local_context: ready.token };
+		expect(handle({ ...tool, tool_input: args })).toBeUndefined();
+		const claim = consumeLocalWorktreeContext(ready.token, args, { ...current, generation });
+		if (!claim) throw new Error("Missing local claim");
+		const deliver = (fingerprint = before, now = START) =>
+			recordDeliveredLocalWorktreeAnswer(
+				claim,
+				"localOnly",
+				[path],
+				new Map([[path, Buffer.from(fingerprint === before ? "before" : "after")]]),
+				now,
+				now,
+			);
+		const edit = (
+			id: string,
+			file = path,
+			{ post = false, add = false, fail = false, cwd = checkout.root } = {},
+		) =>
+			handle({
+				cwd,
+				hook_event_name: post ? "PostToolUse" : "PreToolUse",
+				tool_use_id: id,
+				...(client === "claude-code"
+					? {
+							tool_name: add ? "Write" : "Edit",
+							tool_input: { file_path: file },
+							tool_response: { success: !fail },
+						}
+					: {
+							tool_name: "apply_patch",
+							tool_input: {
+								command: `*** Begin Patch\n*** ${add ? "Add" : "Update"} File: ${file}\n*** End Patch\n`,
+							},
+							tool_response: fail ? "Patch failed" : "Success. Updated the following files:",
+						}),
+			});
+		const claimAgain = () => {
+			const approval = handle({ ...tool, tool_use_id: "another-native-call", tool_input: args });
+			expect(approval).toBeUndefined();
+			return consumeLocalWorktreeContext(ready.token, args, { ...current, generation });
+		};
+		return {
+			after,
+			before,
+			path,
+			fingerprints,
+			sourceTexts,
+			reads,
+			visible,
+			handle,
+			deliver,
+			edit,
+			claimAgain,
+		};
+	}
+
 	beforeEach(() => {
 		home = mkdtempSync(join(tmpdir(), "pharaoh-local-proof-"));
 		evidence = { kind: "checkout", checkout };
@@ -110,6 +208,129 @@ describe.skipIf(process.platform === "win32")("native local-worktree proof", () 
 	afterEach(() => {
 		releaseRuntimeGeneration(generation);
 		rmSync(home, { recursive: true, force: true });
+	});
+
+	it.each([
+		"claude-code",
+		"codex",
+	] as const)("cues once after a real relevant save in %s", (client) => {
+		const fixture = recheckFixture(client);
+		const { after, before, path, fingerprints, deliver, edit } = fixture;
+		edit("undelivered");
+		fingerprints.set(path, after);
+		expect(edit("undelivered", path, { post: true })).toBeUndefined();
+		fingerprints.set(path, before);
+		deliver();
+		edit("noop");
+		expect(edit("noop", path, { post: true })).toBeUndefined();
+		edit("failed");
+		fingerprints.set(path, after);
+		expect(edit("failed", path, { post: true, fail: true })).toBeUndefined();
+		fingerprints.set(path, before);
+		edit("changed");
+		fingerprints.set(path, after);
+		expect(edit("changed", path, { post: true })).toEqual({
+			hookSpecificOutput: {
+				hookEventName: "PostToolUse",
+				additionalContext:
+					"Saved source changed after the earlier local Pharaoh blast-radius answer. That answer may be stale. When the related edits are saved, rerun the same local query before relying on it.",
+			},
+		});
+		expect(edit("changed", path, { post: true })).toBeUndefined();
+		deliver(after);
+		edit("changed-again");
+		fingerprints.set(path, before);
+		expect(edit("changed-again", path, { post: true })).toBeUndefined();
+	});
+
+	it.each([
+		"claude-code",
+		"codex",
+	] as const)("requires a proven visible addition for an unknown file in %s", (client) => {
+		const { after, before, fingerprints, reads, visible, deliver, edit } = recheckFixture(client);
+		deliver();
+		const unrelated = "src/unrelated.ts";
+		fingerprints.set(unrelated, before);
+		visible.add(unrelated);
+		edit("unrelated-existing", unrelated, { add: true });
+		fingerprints.set(unrelated, after);
+		expect(edit("unrelated-existing", unrelated, { add: true, post: true })).toBeUndefined();
+		const added = "src/new-caller.ts";
+		fingerprints.set(added, null);
+		edit("new-but-ignored", added, { add: true });
+		reads.length = 0;
+		fingerprints.set(added, after);
+		expect(edit("new-but-ignored", added, { add: true, post: true })).toBeUndefined();
+		expect(reads).not.toContain(added);
+		fingerprints.set(added, null);
+		edit("new", added, { add: true });
+		fingerprints.set(added, after);
+		visible.add(added);
+		expect(
+			edit("new", added, { add: true, post: true })?.hookSpecificOutput.additionalContext,
+		).toContain("Saved source changed");
+	});
+
+	it.each([
+		"claude-code",
+		"codex",
+	] as const)("cues after an existing visible file gains a call to a valid-empty target in %s", (client) => {
+		const { after, before, fingerprints, sourceTexts, visible, deliver, edit } =
+			recheckFixture(client);
+		expect(deliver()).toBe("recorded");
+		const file = "src/existing.ts";
+		visible.add(file);
+		fingerprints.set(file, before);
+		sourceTexts.set(file, 'import { localOnly } from "./edited";');
+		edit("unrelated", file);
+		fingerprints.set(file, after);
+		sourceTexts.set(file, 'import { localOnly } from "./edited";\n// localOnly()\n"localOnly()"');
+		expect(edit("unrelated", file, { post: true })).toBeUndefined();
+		edit("new-call", file);
+		fingerprints.set(file, before);
+		sourceTexts.set(
+			file,
+			'import { localOnly } from "./edited";\nexport const use = () => localOnly();',
+		);
+		expect(edit("new-call", file, { post: true })?.hookSpecificOutput.additionalContext).toContain(
+			"Saved source changed",
+		);
+	});
+
+	it("separates cue writes from live grants and reports a busy recorder without private details", () => {
+		const { after, path, fingerprints, deliver, edit, claimAgain } = recheckFixture("claude-code");
+		const directory = join(home, ".pharaoh", "local-worktree");
+		runtimeLock(
+			directory,
+			() => {
+				expect(deliver()).toBe("unavailable");
+				expect(claimAgain()).toEqual(checkout);
+			},
+			START,
+			60_000,
+			"blast-rechecks.lock",
+		);
+		expect(deliver()).toBe("recorded");
+		runtimeLock(
+			directory,
+			() => {
+				edit("live-edit");
+				fingerprints.set(path, after);
+				expect(
+					edit("live-edit", path, { post: true })?.hookSpecificOutput.additionalContext,
+				).toContain("Saved source changed");
+			},
+			START,
+		);
+	});
+
+	it("never cues from a save completed after the grant was revoked", () => {
+		const { after, path, fingerprints, deliver, edit, handle } = recheckFixture("claude-code");
+		deliver();
+		edit("stale");
+		handle({ hook_event_name: "Stop" });
+		fingerprints.set(path, after);
+		expect(edit("stale", path, { post: true })).toBeUndefined();
 	});
 
 	it("requires inactive and readable project memory state for a shell answer", () => {
@@ -150,31 +371,31 @@ describe.skipIf(process.platform === "win32")("native local-worktree proof", () 
 		expect(localWorktreeShellReady(root, home)).toBe(false);
 	});
 
-	it.each(["claude-code", "codex"] as const)(
-		"accepts ordinary %s checkout settings and refuses a linked legacy file",
-		(client) => {
-			const root = join(home, "repo");
-			const codex = client === "codex";
-			const directory = join(root, codex ? ".codex" : ".claude");
-			const settings = join(directory, codex ? "hooks.json" : "settings.local.json");
-			const native = { ...options(), client };
-			evidence = { kind: "checkout", checkout: { ...checkout, root } };
-			mkdirSync(directory, { recursive: true, mode: 0o755 });
-			const submit = () =>
-				handleLocalWorktreeHook(
-					{ ...turn, turn_id: "native-turn", cwd: root, hook_event_name: "UserPromptSubmit" },
-					native,
-				)?.hookSpecificOutput.additionalContext;
-			expect(submit()).toContain("pharaoh_local_worktree_status");
-			writeFileSync(settings, "{}", { mode: 0o644 });
-			expect(submit()).toContain("pharaoh_local_worktree_status");
-			rmSync(settings);
-			const other = join(home, "settings.json");
-			writeFileSync(other, "{}", { mode: 0o600 });
-			symlinkSync(other, settings);
-			expect(submit()).toContain("Saved worktree scope is unavailable");
-		},
-	);
+	it.each([
+		"claude-code",
+		"codex",
+	] as const)("accepts ordinary %s checkout settings and refuses a linked legacy file", (client) => {
+		const root = join(home, "repo");
+		const codex = client === "codex";
+		const directory = join(root, codex ? ".codex" : ".claude");
+		const settings = join(directory, codex ? "hooks.json" : "settings.local.json");
+		const native = { ...options(), client };
+		evidence = { kind: "checkout", checkout: { ...checkout, root } };
+		mkdirSync(directory, { recursive: true, mode: 0o755 });
+		const submit = () =>
+			handleLocalWorktreeHook(
+				{ ...turn, turn_id: "native-turn", cwd: root, hook_event_name: "UserPromptSubmit" },
+				native,
+			)?.hookSpecificOutput.additionalContext;
+		expect(submit()).toContain("pharaoh_local_worktree_status");
+		writeFileSync(settings, "{}", { mode: 0o644 });
+		expect(submit()).toContain("pharaoh_local_worktree_status");
+		rmSync(settings);
+		const other = join(home, "settings.json");
+		writeFileSync(other, "{}", { mode: 0o600 });
+		symlinkSync(other, settings);
+		expect(submit()).toContain("Saved worktree scope is unavailable");
+	});
 
 	it("grants scope only after the native probe reaches an initialized connection", () => {
 		const cue = prompt();

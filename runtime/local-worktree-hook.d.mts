@@ -21,6 +21,16 @@ interface LocalWorktreeHookOptions {
 	memoryRuntime?: string;
 	/** Resolver called only on native or previously verified directories. */
 	resolveCheckout(cwd: string): CheckoutEvidence;
+	/** Eligibility shared with saved-source snapshots. */
+	isSourcePath?(path: string): boolean;
+	/** Confined source fingerprints. Null is proven absence, missing entries are uncertain. */
+	readSourceFingerprints?(
+		checkout: VerifiedCheckout,
+		paths: readonly string[],
+		visit?: (path: string, bytes: Buffer) => void,
+	): ReadonlyMap<string, string | null> | undefined;
+	/** The confined index and nonignored untracked inventory for additional source. */
+	visibleSourcePaths?(checkout: VerifiedCheckout): readonly string[] | undefined;
 	/** Override for the private state home. */
 	home?: string;
 	/** Override for the clock. */
@@ -115,3 +125,13 @@ export function localWorktreeShellReady(root: string, home?: string): boolean;
 
 /** Check whether an already consumed native proof remains current. */
 export function localWorktreeClaimCurrent(checkout: VerifiedCheckout, now?: number): boolean;
+
+/** Remember bounded fingerprints for an answer delivered through a live native claim. */
+export function recordDeliveredLocalWorktreeAnswer(
+	checkout: VerifiedCheckout,
+	target: string,
+	paths: readonly string[],
+	sources: ReadonlyMap<string, Uint8Array>,
+	capturedAt: number,
+	now?: number,
+): "recorded" | "skipped" | "unavailable";

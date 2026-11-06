@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "e19842a2273d26df7766e801954b7e5672c7dc63",
-  "payloadSha256": "1947fd6671c3e12e8d59710a6013a3f705b9d8f10e0c33f450b011a420a2ad4c",
+  "commit": "b065ea36fd08a6cc500c1b13acbfe11b9c81be23",
+  "payloadSha256": "f69d4e657df4b9a3d76f5409e5deca364e70a311af28f13fc43dbd9d6cbda1a8",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -166,7 +166,7 @@
     },
     {
       "path": "project-memory/graph-cues.mjs",
-      "sha256": "d2f004ef7145080b69cfac6939e3490d64c81746e91ada17b3300b76bcc6cc4c",
+      "sha256": "51d6ce9edbdbcdb9161b4d076c7feb0907b683b58202eb6ec5b54e434ceaaaee",
       "mode": "100644"
     },
     {
@@ -231,12 +231,12 @@
     },
     {
       "path": "runtime/local-worktree-hook.d.mts",
-      "sha256": "6dc399c8f1484896fba81b75ca56bf35885ce18fbb4eec2a6a303184cf24418f",
+      "sha256": "f76c54f6ff946a11e536947ec9f58ac4a2afec87268942f5e6346ee0db6e44fd",
       "mode": "100644"
     },
     {
       "path": "runtime/local-worktree-hook.mjs",
-      "sha256": "8cccc279a9de2481f79e1c24117dbe8dbbea46769bddde092df1f7cf40708561",
+      "sha256": "857887423302ea58277470f030a07cbac51fbf2e0914460c8afe9dae2c045a79",
       "mode": "100644"
     },
     {
@@ -281,7 +281,7 @@
     },
     {
       "path": "runtime/runtime-hooks.mjs",
-      "sha256": "4e3480c83ddcbcf51cd29df7dcbc6e2907508a23194b86e8573aa5c94384f0c9",
+      "sha256": "6a0ea9ec484ceddd74d62ee1f9664e993a46bf5dae65615c41eefe7b1720519a",
       "mode": "100644"
     },
     {
@@ -461,17 +461,17 @@
     },
     {
       "path": "src/local/runtime.ts",
-      "sha256": "0325a6d3e6d468011867c4474f1e4b0d4269c58d9209e6b3a776d3ee57d43cad",
+      "sha256": "b38e82e0a6faeddade4ac6690b4f2384879e9e588369fd2a2777bde33398a72e",
       "mode": "100644"
     },
     {
       "path": "src/local/scope.ts",
-      "sha256": "193b7bc2bbd203b3df8d9f47cc67b1b6b12d1bbe4379c36aea1e60b2ab6b872f",
+      "sha256": "7ef53f79d1a3b390f6211353c778cda5cb3ce9be45e3f33f5d51b84711bea339",
       "mode": "100644"
     },
     {
       "path": "src/local/snapshot.ts",
-      "sha256": "d921126f5f2cc301e6e2282d94534de210ebf42deac3704e44adc159afe1caad",
+      "sha256": "44fb549476874596b0e718bbc6a21ed501fb4b0d7f48f821cd05223d47babf38",
       "mode": "100644"
     },
     {
@@ -581,7 +581,7 @@
     },
     {
       "path": "tests/local-worktree-hook.test.ts",
-      "sha256": "b42cdb9c349e541c4a2c6e8cbd4faf37aecd0184aeeed0468e3d9a27333c43e7",
+      "sha256": "d0f162a5a8c0dcd7ce2e3e203a96cae3d07a88d21ecfdafd59a388b346798b8f",
       "mode": "100644"
     },
     {

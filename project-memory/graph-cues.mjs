@@ -59,25 +59,35 @@ function mappedRevision(input, target) {
 	if (revision && SHA.test(revision)) return revision.toLowerCase();
 }
 
-function editedPaths(input, client, root) {
-	let paths;
+/** Extract candidate native edit paths without executing commands or reading files. */
+export function nativeEditPaths(input, client, successful = true) {
 	if (client === "codex") {
 		if (input.tool_name !== "apply_patch") return [];
 		const patch = input.tool_input?.command;
-		const succeeded = responseText(input.tool_response).some((text) =>
-			/^Success\. Updated the following files:/m.test(text),
-		);
-		if (!succeeded || typeof patch !== "string" || !patch.startsWith("*** Begin Patch\n"))
+		if (typeof patch !== "string" || !patch.startsWith("*** Begin Patch\n")) return [];
+		if (
+			successful &&
+			!responseText(input.tool_response).some((text) =>
+				/^Success\. Updated the following files:/m.test(text),
+			)
+		)
 			return [];
-		paths = [
-			...patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm),
-		].map((match) => match[1]);
-	} else {
-		if (!["Edit", "Write", "MultiEdit"].includes(input.tool_name)) return [];
-		paths = [input.tool_input?.file_path];
+		const paths = [
+			...patch.matchAll(/^\*\*\* (Add File|Update File|Delete File|Move to): (.+)$/gm),
+		];
+		return paths.length <= MAX_EDIT_PATHS
+			? paths.map(([, operation, path]) => ({ path, mayAdd: operation === "Add File" }))
+			: [];
 	}
-	if (paths.length > MAX_EDIT_PATHS) return [];
-	const inCheckout = paths.flatMap((path) => {
+	if (!["Edit", "Write", "MultiEdit"].includes(input.tool_name)) return [];
+	const response = input.tool_response;
+	if (successful && (response?.isError || response?.is_error || response?.success === false))
+		return [];
+	return [{ path: input.tool_input?.file_path, mayAdd: input.tool_name === "Write" }];
+}
+
+function editedPaths(input, client, root) {
+	const inCheckout = nativeEditPaths(input, client).flatMap(({ path }) => {
 		if (typeof path !== "string" || path.length > 512 || !MAPPED_FILE.test(path)) return [];
 		const absolute = resolve(input.cwd ?? root, path);
 		let parent;
