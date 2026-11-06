@@ -280,6 +280,18 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 		pkg.files,
 		source?.files.map((file) => file.path),
 	);
+	const sourceHashes = new Map(source?.files.map((file) => [file.path, file.sha256]));
+	for (const path of NATIVE_RUNTIME_PACK_PATHS) {
+		if (!names.includes(`package/${path}`)) continue;
+		const archived = execFileSync("tar", ["-xOzf", tarball, `package/${path}`], {
+			maxBuffer: 32 * 1024 * 1024,
+		});
+		assert.equal(
+			hash(archived),
+			sourceHashes.get(path),
+			`Native runtime source hash mismatch: ${path}`,
+		);
+	}
 	return manifest;
 }
 

@@ -328,6 +328,36 @@ test("setup output and native runtime require complete verified source and rejec
 			() => verifyPackPaths([...complete, unexpected], ["runtime"], [...source, unexpected]),
 			/Unexpected npm file/,
 		);
+	const item = fixture([...paths, ...runtime], ["runtime"]);
+	const verified = {
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: "c".repeat(64),
+		files: runtime.map((path) => ({ path, sha256: hash(Buffer.from(`public ${path}`)) })),
+	};
+	try {
+		assert.equal(validateArtifact(item.directory, commit, item.save(), verified).version, version);
+		for (const path of runtime) {
+			const original = readFileSync(join(item.root, "package", path));
+			writeFileSync(join(item.root, "package", path), Buffer.from([0xff, 0x00, 0x41]));
+			const tarball = join(item.directory, item.manifest.tarballFile);
+			execFileSync(
+				"tar",
+				["-czf", tarball, ...[...paths, ...runtime].map((name) => `package/${name}`)],
+				{ cwd: item.root },
+			);
+			const bytes = readFileSync(tarball);
+			item.manifest.tarballSha256 = hash(bytes);
+			item.manifest.integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+			assert.throws(
+				() => validateArtifact(item.directory, commit, item.save(), verified),
+				/Native runtime source hash mismatch/,
+			);
+			writeFileSync(join(item.root, "package", path), original);
+		}
+	} finally {
+		item.clean();
+	}
 });
 
 test("release intent uses immutable previous package versions and skips maintenance/PR publication", () => {
