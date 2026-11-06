@@ -60,6 +60,13 @@
     .action { display:flex; align-items:center; gap:4px; border:0; background:none; padding:2px 0; color:var(--gold); font:var(--regular) var(--type-caption) var(--sans); cursor:pointer; white-space:nowrap; }
     .action:hover { color:var(--ink); }
     .action:focus-visible,summary:focus-visible { outline:2px solid var(--focus); outline-offset:2px; border-radius:var(--radius-small); }
+    .setup-next { margin:10px 0 0; }
+    .setup-next p { margin:4px 0; overflow-wrap:anywhere; font-size:var(--type-caption); }
+    .setup-choice + .setup-choice { margin-top:8px; }
+    .setup-next .action { padding:6px 10px; border:var(--line); border-radius:var(--radius); white-space:normal; }
+    .setup-next .recommended { border:1px solid var(--gold); }
+    .setup-recommended { color:var(--muted); margin-inline-start:6px; }
+    .setup-next .action:disabled { cursor:default; opacity:.7; }
     .chev { display:inline-block; }
     .action[aria-expanded="true"] .chev { transform:rotate(90deg); }
     .caveat { margin:6px 0 0; color:var(--amber); font-size:var(--type-caption); overflow-wrap:anywhere; }
@@ -132,6 +139,19 @@
     <p id="legend" class="legend"></p>
     <p id="caveat" class="caveat" hidden></p>
     <ul id="rows" class="rows" hidden></ul>
+    <div id="setup-next" class="setup-next" hidden>
+      <div class="setup-choice">
+        <button id="setup-explore" class="action recommended" type="button" aria-describedby="setup-recommended setup-explore-note">Find something worth building</button>
+        <span id="setup-recommended" class="setup-recommended">Recommended</span>
+        <p id="setup-explore-note">Get one idea you could ship with the code you already have.</p>
+      </div>
+      <div class="setup-choice">
+        <button id="setup-audit" class="action" type="button" aria-describedby="setup-audit-note">Run a codebase audit</button>
+        <p id="setup-audit-note">See what to fix first and how to track your Codebase Health.</p>
+      </div>
+      <p id="setup-explore-status" role="status" hidden></p>
+      <p id="setup-explore-fallback" hidden>Ask in chat: <q id="setup-fallback-request"></q></p>
+    </div>
     <div id="foot" class="foot" hidden>
       <button id="toggle" class="action" type="button" aria-expanded="false" aria-controls="drawer" hidden><span id="toggle-label">Details</span><span class="chev" aria-hidden="true">▸</span></button>
       <button id="expand" class="action" type="button" hidden></button>
@@ -149,6 +169,21 @@
     (() => {
       "use strict";
       const META_KEY = "so.pharaoh/trace";
+      const SETUP_OPPORTUNITY_KEY = "so.pharaoh/setup-opportunity";
+      const SETUP_LIMITS =
+        "Stay read-only. Make no edits, memory saves, or messages to others. Use at most six Pharaoh graph calls and six focused source reads. Respect freshness, access, and plan limits.";
+      const SETUP_REQUESTS = {
+        "setup-explore": "Use Pharaoh to find one thing worth building in this repo. Start with its codebase map. " +
+          "If you know what I am working on, use it to find a feature that helps. Otherwise, surprise me with one useful idea. " +
+          "Use the graph and focused source reads to verify existing capabilities. Explain who it helps and the smallest useful version. " +
+          "Separate what exists from what you would add and link up to three verified source locations. " +
+          "If evidence is thin, say what you could verify. End by inviting me to build the first version.",
+        "setup-audit": "Use Pharaoh to run a codebase audit. Start with get_codebase_map for this repo with include_health: true. " +
+          "Use the mapped commit's Codebase Health baseline when available. Follow the strongest signals with targeted graph calls and verify them in source. " +
+          "Give up to three findings in priority order, with verified code links, practical impact, and a next step for each. " +
+          "Explain which findings affect measured Health drivers (exact clones, dependency cycles, or complexity). Treat other risks separately. " +
+          "Say what you covered and what to recheck after remapping. If the baseline is unavailable or evidence is thin, say so. Do not predict a score change."
+      };
       const PROTOCOL_VERSION = "2026-01-26";
       // Kept in parity with TRACE_LIMITS in trace-contract.ts by the resource test.
       const LIMITS = { bytes:65536, nodes:120, depth:6, label:512, detail:2048, badge:128, summary:1024, notes:16, note:1024, repo:256, segments:8 };
@@ -172,10 +207,11 @@
       const root = document.getElementById("trace");
       const head = root.querySelector(".head");
       const page = document.documentElement;
-      const fields = Object.fromEntries(["kind","target","title","summary","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","expand","drawer","tree","fallback","notes","provenance"].map(id => [id,document.getElementById(id)]));
+      const fields = Object.fromEntries(["kind","target","title","summary","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","expand","drawer","tree","fallback","notes","provenance","setup-next","setup-explore","setup-audit","setup-explore-status","setup-explore-fallback","setup-fallback-request"].map(id => [id,document.getElementById(id)]));
       const compact = new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
       const initId = "pharaoh-trace-initialize";
       const displayId = "pharaoh-trace-display-";
+      const setupExploreId = "pharaoh-setup-explore";
       let tool = "";
       let ready = false;
       let closed = false;
@@ -188,6 +224,10 @@
       let displayMode = "inline";
       let hostModes = [];
       let displayRequests = 0;
+      let setupExploreSent = false;
+      let setupExploreAcknowledged = false;
+      let setupExploreTimeout = 0;
+      let setupExploreRepo = "";
       const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
       const string = (value,max) => typeof value === "string" && value.length <= max;
       const send = message => { if (!closed) window.parent.postMessage({jsonrpc:"2.0",...message},"*"); };
@@ -262,6 +302,7 @@
         fields.caveat.hidden = items.length === 0;
       }
       function fallback(title,text,notice,state="neutral") {
+        fields["setup-next"].hidden = true;
         clearResult();
         root.dataset.state = state === "error" ? "error" : "ready";
         const first = text.split("\n").find(line => line.trim()) || "";
@@ -489,6 +530,7 @@
         reveal();
       }
       function input(params) {
+        fields["setup-next"].hidden = true;
         cancelled = false;
         clearResult();
         root.dataset.state = "pending";
@@ -509,7 +551,11 @@
           return;
         }
         const view = record(params._meta) ? params._meta[META_KEY] : undefined;
-        if (validView(view)) renderView(view);
+        if (validView(view)) {
+          renderView(view);
+          setupExploreRepo = params._meta[SETUP_OPPORTUNITY_KEY] === true && /^[\w.-]+(?:\/[\w.-]+)?$/.test(view.repo || "") ? view.repo : "";
+          fields["setup-next"].hidden = !setupExploreRepo;
+        }
         else fallback("Tool response",text.text,[view === undefined ? "" : "Trace metadata could not be displayed; showing the tool's text response.",omission].filter(Boolean).join(" "));
       }
       function context(params) {
@@ -546,6 +592,28 @@
       window.addEventListener("resize",size);
       fields.toggle.addEventListener("click",() => { setOpen(fields.toggle.getAttribute("aria-expanded") !== "true"); size(); });
       fields.expand.addEventListener("click",() => send({id:`${displayId}${++displayRequests}`,method:"ui/request-display-mode",params:{mode:displayMode === "fullscreen" ? "inline" : "fullscreen"}}));
+      function setupExploreFallback(message) {
+        display("setup-explore-status",message);
+        fields["setup-explore-fallback"].hidden = false;
+        size();
+      }
+      function sendSetupRequest(request) {
+        if (!ready || closed || cancelled || fields["setup-next"].hidden || setupExploreSent) return;
+        setupExploreSent = true;
+        fields["setup-explore"].disabled = true;
+        fields["setup-audit"].disabled = true;
+        const text = `${request} ${SETUP_LIMITS} The repo is ${setupExploreRepo}.`;
+        fields["setup-fallback-request"].textContent = text;
+        display("setup-explore-status","Sending request to your agent…");
+        setupExploreTimeout = setTimeout(() => {
+          setupExploreFallback("Check whether your agent started before asking again.");
+        },10000);
+        send({id:setupExploreId,method:"ui/message",params:{role:"user",content:[{type:"text",text}]}});
+        size();
+      }
+      for (const [id,request] of Object.entries(SETUP_REQUESTS)) {
+        fields[id].addEventListener("click",() => sendSetupRequest(request));
+      }
       function receive(event) {
         if (closed || event.source !== window.parent || !record(event.data) || event.data.jsonrpc !== "2.0") return;
         const message = event.data;
@@ -569,6 +637,19 @@
           size();
           return;
         }
+        if (message.id === setupExploreId && message.method === undefined) {
+          if (!setupExploreSent || setupExploreAcknowledged) return;
+          setupExploreAcknowledged = true;
+          clearTimeout(setupExploreTimeout);
+          if (message.error || !record(message.result) || message.result.isError === true) {
+            setupExploreFallback("This chat couldn't send the request.");
+          } else {
+            display("setup-explore-status","Request sent to your agent.");
+            fields["setup-explore-fallback"].hidden = true;
+            size();
+          }
+          return;
+        }
         const request = typeof message.id === "string" || typeof message.id === "number";
         if (request) {
           if (message.method === "ping") send({id:message.id,result:{}});
@@ -576,6 +657,7 @@
             send({id:message.id,result:{}});
             closed = true;
             clearTimeout(initTimeout);
+            clearTimeout(setupExploreTimeout);
             cancelAnimationFrame(resizeFrame);
             observer?.disconnect();
             root.dataset.state = "ready";
@@ -597,7 +679,7 @@
       const initTimeout = setTimeout(() => {
         if (!ready && !closed) fallback("Text response available","Read the tool response in chat.","Trace has not received a host connection.");
       },10000);
-      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.4.0"},appCapabilities:{availableDisplayModes:DISPLAY_MODES},protocolVersion:PROTOCOL_VERSION}});
+      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.6.0"},appCapabilities:{availableDisplayModes:DISPLAY_MODES},protocolVersion:PROTOCOL_VERSION}});
     })();
   </script>
 </body>

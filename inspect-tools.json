@@ -4,7 +4,7 @@
     {
       "name": "get_codebase_map",
       "title": "Codebase Map",
-      "description": "A repo's architecture in one call.\n\nCALL THIS WHEN:\n• Getting a repo's overall structure, or which module owns something\n• The repo's exact name in Pharaoh isn't known\n\nRETURNS: Modules with file counts and LOC, module dependencies with two-way ones flagged, the 5 files changed most in 90 days, endpoints with handler files (first 50), convention entry points (first 30), and risk signals (high-risk functions without direct test links, exact clones, cycles).",
+      "description": "A repo's architecture in one call.\n\nCALL THIS WHEN:\n• Orienting in a repo or locating a module\n• The mapped repo name is unknown\n\nRETURNS: Modules and LOC, dependencies and cycles, hot files (5), endpoints (50), entry points (30), exact clones and high-risk functions without direct test links.",
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -15,6 +15,10 @@
           },
           "include_metrics": {
             "description": "List the 10 most-changed files instead of 5",
+            "type": "boolean"
+          },
+          "include_health": {
+            "description": "Include the Codebase Health baseline",
             "type": "boolean"
           }
         },
@@ -354,7 +358,7 @@
     {
       "name": "pharaoh_setup",
       "title": "Setup",
-      "description": "Pharaoh's connection and setup status for the repo you're working in. Writes no files.\n\nCALL THIS WHEN:\n• The user asks to set up Pharaoh, or to check its setup\n• Pharaoh was just connected and the user asks what to try first\n\nRETURNS: Connection, mapped-repo and access status, a Codebase Health link, bounded first-use investigation guidance for the agent, and the Pharaoh-first instructions line only when needed.",
+      "description": "Pharaoh's connection and setup status for the repo you're working in. Writes no files.\n\nCALL THIS WHEN:\n• The user asks to set up Pharaoh, or to check its setup\n• Pharaoh was just connected and the user asks what to try first\n\nRETURNS: Connection, mapped-repo and access status, a Codebase Health link, optional first-use choices, and the Pharaoh-first instructions line only when needed.",
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
