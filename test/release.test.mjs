@@ -165,6 +165,79 @@ test("npm boundary rejects private source, release credentials, traversal, links
 	}
 });
 
+test("local worktree releases require exact compiled and source assets", () => {
+	const modules = [
+		"authorization",
+		"contracts",
+		"dispatch",
+		"format",
+		"runtime",
+		"scope",
+		"snapshot",
+		"worker-host",
+	];
+	const raw = [
+		"project-memory/local.d.mts",
+		"runtime/local-worktree-hook.d.mts",
+		"runtime/local-worktree-hook.mjs",
+		"runtime/runtime-storage.d.mts",
+	];
+	const packed = [
+		...paths,
+		...modules.flatMap((name) => [`dist/local/${name}.js`, `dist/local/${name}.d.ts`]),
+		...raw,
+	];
+	const source = [...modules.map((name) => `src/local/${name}.ts`), ...raw];
+	verifyPackPaths(packed, [], source);
+	assert.throws(() => verifyPackPaths(packed), /verified source/);
+	assert.throws(
+		() => verifyPackPaths([...packed, "dist/local/unlisted.js"], [], source),
+		/Unexpected npm file/,
+	);
+	for (const omitted of packed.slice(paths.length))
+		assert.throws(
+			() =>
+				verifyPackPaths(
+					packed.filter((path) => path !== omitted),
+					[],
+					source,
+				),
+			/Missing Local worktree/,
+		);
+	for (const omitted of source)
+		assert.throws(
+			() =>
+				verifyPackPaths(
+					packed,
+					[],
+					source.filter((path) => path !== omitted),
+				),
+			/verified source/,
+		);
+
+	const item = fixture(packed);
+	const verified = {
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: item.manifest.sourcePayloadSha256,
+		files: source.map((path) => ({ path, sha256: hash(`public ${path}`) })),
+	};
+	try {
+		assert.equal(validateArtifact(item.directory, commit, item.save(), verified).version, version);
+		for (const changed of raw) {
+			const files = verified.files.map((file) =>
+				file.path === changed ? { ...file, sha256: "0".repeat(64) } : file,
+			);
+			assert.throws(
+				() => validateArtifact(item.directory, commit, item.save(), { ...verified, files }),
+				/source hash mismatch/,
+			);
+		}
+	} finally {
+		item.clean();
+	}
+});
+
 test("the release handoff requires the complete allowlisted project memory package", () => {
 	const packageFiles = ["project-memory"];
 	const runtimePaths = [

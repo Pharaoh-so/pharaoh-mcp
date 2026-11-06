@@ -66,6 +66,30 @@ const NATIVE_RUNTIME_PACK_PATHS = [
 	"runtime/runtime-native.mjs",
 	"runtime/runtime-storage.mjs",
 ];
+const LOCAL_WORKTREE_MODULES = [
+	"authorization",
+	"contracts",
+	"dispatch",
+	"format",
+	"runtime",
+	"scope",
+	"snapshot",
+	"worker-host",
+];
+const LOCAL_WORKTREE_RAW_PATHS = [
+	"project-memory/local.d.mts",
+	"runtime/local-worktree-hook.d.mts",
+	"runtime/local-worktree-hook.mjs",
+	"runtime/runtime-storage.d.mts",
+];
+const LOCAL_WORKTREE_SOURCE_PATHS = [
+	...LOCAL_WORKTREE_MODULES.map((name) => `src/local/${name}.ts`),
+	...LOCAL_WORKTREE_RAW_PATHS,
+];
+const LOCAL_WORKTREE_PACK_PATHS = [
+	...LOCAL_WORKTREE_MODULES.flatMap((name) => [`dist/local/${name}.js`, `dist/local/${name}.d.ts`]),
+	...LOCAL_WORKTREE_RAW_PATHS,
+];
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 export const hash = (bytes, algorithm = "sha256") =>
 	createHash(algorithm).update(bytes).digest("hex");
@@ -128,6 +152,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
 				SETUP_PROMPT_PACK_PATHS.includes(path) ||
 				NATIVE_RUNTIME_PACK_PATHS.includes(path) ||
+				LOCAL_WORKTREE_PACK_PATHS.includes(path) ||
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
@@ -139,6 +164,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 	for (const [name, packed, sources] of [
 		["Setup prompt", SETUP_PROMPT_PACK_PATHS, ["src/setup-prompt.generated.ts"]],
 		["Native runtime", NATIVE_RUNTIME_PACK_PATHS, NATIVE_RUNTIME_PACK_PATHS],
+		["Local worktree", LOCAL_WORKTREE_PACK_PATHS, LOCAL_WORKTREE_SOURCE_PATHS],
 	]) {
 		if (
 			!packed.some((path) => paths.includes(path)) &&
@@ -281,7 +307,7 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 		source?.files.map((file) => file.path),
 	);
 	const sourceHashes = new Map(source?.files.map((file) => [file.path, file.sha256]));
-	for (const path of NATIVE_RUNTIME_PACK_PATHS) {
+	for (const path of [...NATIVE_RUNTIME_PACK_PATHS, ...LOCAL_WORKTREE_RAW_PATHS]) {
 		if (!names.includes(`package/${path}`)) continue;
 		const archived = execFileSync("tar", ["-xOzf", tarball, `package/${path}`], {
 			maxBuffer: 32 * 1024 * 1024,
