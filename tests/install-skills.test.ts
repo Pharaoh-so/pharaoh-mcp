@@ -976,6 +976,9 @@ describe("the shared coding-agent instruction consent", () => {
 		const ask = vi.fn(async () => true);
 		const results = await offerAgentInstructionLines(["claude-code", "codex"], ask, true, home);
 		expect(ask).toHaveBeenCalledTimes(1);
+		expect(ask).toHaveBeenCalledWith(
+			`Add this Pharaoh line to your global agent instructions?\n  ${claude} and ${codex}\n  "${line}"\n[Y/n] `,
+		);
 		expect(results.map((result) => result.outcome)).toEqual(["added", "added"]);
 		expect(readFileSync(claude, "utf-8")).toContain(`My Claude rules.\n<!-- pharaoh-mcp:start`);
 		expect(readFileSync(codex, "utf-8")).toContain(`My Codex rules.\n<!-- pharaoh-mcp:start+nl`);

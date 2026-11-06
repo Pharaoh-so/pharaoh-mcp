@@ -1555,7 +1555,7 @@ export async function offerAgentInstructionLines(
 	}
 	const answer = pending.length
 		? await ask(
-				`Pharaoh: add its instruction to ${pending.map((target) => target.path).join(" and ")} so your agents check Pharaoh before searching code?\n  "${PHARAOH_CLAUDE_MD_LINE}"\n[Y/n] `,
+				`Add this Pharaoh line to your global agent instructions?\n  ${pending.map((target) => target.path).join(" and ")}\n  "${PHARAOH_CLAUDE_MD_LINE}"\n[Y/n] `,
 			)
 		: null;
 	return targets.map((target) => {

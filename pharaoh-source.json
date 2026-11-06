@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "7f9db1848b9dd410eaa9ebd119e4f2b232fa8426",
-  "payloadSha256": "6cbaa39f010fa12aa944ddeb46253d1d96dcb22cce81cbf2b09d8af6e129619b",
+  "commit": "bc8176585c41c0edd155887f411ee31ea086577d",
+  "payloadSha256": "80d8535a9a02bccc810c54ad21e7b6a862b26cabaabc1c45de54fc53b030c29b",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -401,7 +401,7 @@
     },
     {
       "path": "src/install-skills.ts",
-      "sha256": "cf6b577105cac1e781dbbc5ccc3b84d2a9b6b6dcfd8207b94c38e2092dbca169",
+      "sha256": "e11fc20bf779ff753384d6816fd6a53016653875fdb6198a201e23c7324d6572",
       "mode": "100644"
     },
     {
@@ -491,7 +491,7 @@
     },
     {
       "path": "tests/install-skills.test.ts",
-      "sha256": "96022119da0669122d7eedecd99332542a3eef96af110f858e08211975ac3c8f",
+      "sha256": "687f572eaff92181b88262e0fbf73c5559ac31dd17ab0696760f9a5f4f953325",
       "mode": "100644"
     },
     {
