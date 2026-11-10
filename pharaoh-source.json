@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "20d7e2d0e43babd78530340674655ad332cbad19",
-  "payloadSha256": "960d20d19adbd0de1d2584582c31089ff6e8df60cfd60fee0baac34177b75062",
+  "commit": "b1fa0d79e167483ac017fc277ac7ce07ab5d946f",
+  "payloadSha256": "2bb2d0c34c726c1a791a99aa47aa97fd14a26712d66cce48036b23ec12294aa9",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -411,7 +411,7 @@
     },
     {
       "path": "src/index.ts",
-      "sha256": "221adb5b9fb1f173060d93fe42ea6161108fd3ea42f323881fda80ed882869ee",
+      "sha256": "d8c43571bcd3623d40cb07ec05f320f16e71a9d318e2a71b296b845d416efa70",
       "mode": "100644"
     },
     {
@@ -481,7 +481,7 @@
     },
     {
       "path": "src/memory-hint.ts",
-      "sha256": "d34471758cf843f7f53451bfcfbd3d86415c90c36f919b232989bd3115bc7c69",
+      "sha256": "3c18ffe1e337d6a97dd603c259385794cf56b67394d574c23de03612538c9c21",
       "mode": "100644"
     },
     {
@@ -601,7 +601,7 @@
     },
     {
       "path": "tests/refresh.integration.test.ts",
-      "sha256": "fa7ef67b1791ccf73d68eddddbef2652cd7b1b26c56c87d2a253aae0d382ae36",
+      "sha256": "41a595be50d12503b33d0391a021bb56c6e29f2133ec4593ce6bc340b7540aa7",
       "mode": "100644"
     },
     {

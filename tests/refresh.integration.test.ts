@@ -19,6 +19,7 @@
  *   503 → transient GitHub API failure
  */
 
+import { execFileSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -819,6 +820,26 @@ describe("updateMemoryHint", () => {
 			cleared?.project_memory_session,
 			cleared?.access_token,
 		]).toEqual([undefined, undefined, "phat_0"]);
+	});
+
+	/** Breaks when: the installer's wait lets Node exit mid-await (it did in the 0.3.80 candidate). */
+	it("keeps a process with nothing else to do alive through the server's retry wait", () => {
+		const script = join(dir, "install-wait.mts");
+		writeFileSync(
+			script,
+			`import { updateMemoryHint } from ${JSON.stringify(new URL("../src/memory-hint.ts", import.meta.url).pathname)};
+			let calls = 0;
+			globalThis.fetch = async () => Response.json(++calls === 1
+				? { project_memory_status: "unavailable", project_memory_retry_after_ms: 200 }
+				: { project_memory_checked: true });
+			const stored = await updateMemoryHint("https://mcp.pharaoh.so", { force: true, path: process.argv[2], rounds: 3 });
+			console.log(stored ? "stored after " + calls : "nothing");`,
+		);
+		const out = execFileSync(process.execPath, ["--import", "tsx", script, path], {
+			encoding: "utf8",
+			timeout: 20_000,
+		});
+		expect(out.trim()).toBe("stored after 2");
 	});
 
 	it.each([

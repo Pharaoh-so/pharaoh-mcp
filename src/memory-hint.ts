@@ -34,6 +34,7 @@ function lastAttempt(path: string): number {
  * @param options.force - Skip the daily and hourly waits (the installer)
  * @param options.path - Credentials file (tests)
  * @param options.rounds - Calls allowed when the server asks to retry (about a minute apart)
+ * @param options.background - Inside a running proxy: the waits never keep the process alive
  * @returns The updated credentials, or null when nothing changed on disk
  */
 export async function updateMemoryHint(
@@ -42,7 +43,8 @@ export async function updateMemoryHint(
 		force = false,
 		path = CREDENTIALS_PATH,
 		rounds = 12,
-	}: { force?: boolean; path?: string; rounds?: number } = {},
+		background = false,
+	}: { force?: boolean; path?: string; rounds?: number; background?: boolean } = {},
 ): Promise<Credentials | null> {
 	if (server !== DEFAULT_SERVER) return null;
 	const now = Date.now();
@@ -76,7 +78,11 @@ export async function updateMemoryHint(
 		}
 		const wait = Number(body?.project_memory_retry_after_ms);
 		if (body?.project_memory_checked === true || !(wait > 0) || round >= rounds) break;
-		await new Promise((resolve) => setTimeout(resolve, Math.min(wait, 120_000)).unref());
+		await new Promise((resolve) => {
+			const timer = setTimeout(resolve, Math.min(wait, 120_000));
+			// A running proxy must not stay up for this wait; the installer must, or Node exits mid-await.
+			if (background) timer.unref();
+		});
 	}
 	// An incomplete check proves nothing either way: keep what is stored.
 	if (body?.project_memory_checked !== true) return null;
