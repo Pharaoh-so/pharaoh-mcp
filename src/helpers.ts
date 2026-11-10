@@ -204,17 +204,7 @@ export function tokenToCredentials(
 	}
 	const now = Date.now();
 	const production = server === DEFAULT_SERVER && new URL(sseUrl).origin === DEFAULT_SERVER;
-	const memory =
-		production && Array.isArray(token.project_memory)
-			? token.project_memory.filter(
-					(entry) =>
-						typeof entry?.repo === "string" &&
-						/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(entry.repo) &&
-						(entry.revision === null ||
-							(typeof entry.revision === "string" &&
-								/^(?!0{40}$)[a-f0-9]{40}$/.test(entry.revision))),
-				)
-			: [];
+	const memory = production ? validMemoryHint(token.project_memory) : [];
 	return {
 		version: 2,
 		access_token: token.access_token,
@@ -231,6 +221,22 @@ export function tokenToCredentials(
 			? { project_memory_status: "unavailable" }
 			: {}),
 	};
+}
+
+/** The well-formed entries of a server memory hint: `owner/repo` and a 40-hex revision or null. */
+export function validMemoryHint(
+	entries: unknown,
+): Array<{ repo: string; revision: string | null }> {
+	return Array.isArray(entries)
+		? entries.filter(
+				(entry) =>
+					typeof entry?.repo === "string" &&
+					/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(entry.repo) &&
+					(entry.revision === null ||
+						(typeof entry.revision === "string" &&
+							/^(?!0{40}$)[a-f0-9]{40}$/.test(entry.revision))),
+			)
+		: [];
 }
 
 /** Format remaining TTL as human-readable string (e.g. "5d 12h"). */

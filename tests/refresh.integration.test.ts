@@ -34,13 +34,15 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type Credentials,
 	readCredentials,
 	takeCredentialsForLogout,
 	writeCredentials,
 } from "../src/credentials.js";
+import { DEFAULT_SERVER } from "../src/helpers.js";
+import { updateMemoryHint } from "../src/memory-hint.js";
 import { loadAndRefresh, originBoundRefresh, refreshIfNeeded } from "../src/refresh.js";
 
 interface TestServer {
@@ -763,5 +765,78 @@ describe("refreshIfNeeded with several proxies sharing one credentials file", ()
 
 		expect(readdirSync(dir)).toEqual(["credentials.json"]);
 		expect(statSync(path).mode & 0o777).toBe(0o600);
+	});
+});
+
+/** Breaks when: the hint check can touch tokens, lose a sign-in, repeat per proxy, or keep a removed repo. */
+describe("updateMemoryHint", () => {
+	let dir: string;
+	let path: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "pharaoh-memory-hint-"));
+		path = join(dir, "credentials.json");
+		writeCredentials(creds("phat_0", "phrt_0", false), path);
+	});
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		rmSync(dir, { recursive: true, force: true });
+	});
+	const answer = (body: Record<string, unknown>) => async () => Response.json(body);
+
+	it("three proxies starting at once ask once, keep every token, and a later check clears a removed repo", async () => {
+		const fetch = vi.fn(
+			answer({
+				project_memory: [{ repo: "acme/repo", revision: null }],
+				project_memory_checked: true,
+			}),
+		);
+		vi.stubGlobal("fetch", fetch);
+		await Promise.all([1, 2, 3].map(() => updateMemoryHint(DEFAULT_SERVER, { path })));
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(fetch.mock.calls[0]).toEqual([
+			"https://mcp.pharaoh.so/device/project-memory",
+			expect.objectContaining({ headers: { Authorization: "Bearer phat_0" } }),
+		]);
+		const stored = readCredentials(path);
+		expect([stored?.access_token, stored?.refresh_token, stored?.project_memory]).toEqual([
+			"phat_0",
+			"phrt_0",
+			[{ repo: "acme/repo", revision: null }],
+		]);
+		// A check of many repos finishes over calls the server paces.
+		const paced = vi
+			.fn()
+			.mockImplementationOnce(
+				answer({ project_memory_status: "unavailable", project_memory_retry_after_ms: 1 }),
+			)
+			.mockImplementationOnce(answer({ project_memory_checked: true }));
+		vi.stubGlobal("fetch", paced);
+		await updateMemoryHint(DEFAULT_SERVER, { path, force: true });
+		expect(paced).toHaveBeenCalledTimes(2);
+		const cleared = readCredentials(path);
+		expect([
+			cleared?.project_memory,
+			cleared?.project_memory_session,
+			cleared?.access_token,
+		]).toEqual([undefined, undefined, "phat_0"]);
+	});
+
+	it.each([
+		["a rejected token", async () => new Response("{}", { status: 401 })],
+		["an incomplete check", answer({ project_memory_status: "unavailable" })],
+		[
+			"a network failure",
+			async () => {
+				throw new Error("offline");
+			},
+		],
+	])("leaves the credentials file byte for byte after %s, and waits an hour", async (_, reply) => {
+		const before = readFileSync(path);
+		const fetch = vi.fn(reply);
+		vi.stubGlobal("fetch", fetch);
+		expect(await updateMemoryHint(DEFAULT_SERVER, { path })).toBeNull();
+		expect(await updateMemoryHint(DEFAULT_SERVER, { path })).toBeNull();
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(readFileSync(path)).toEqual(before);
 	});
 });

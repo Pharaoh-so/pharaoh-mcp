@@ -130,7 +130,7 @@ export function resetHookPreferences(disable, home = homedir()) {
 	}
 }
 
-function nativeMemoryClient(info) {
+export function nativeMemoryClient(info) {
 	const name = typeof info?.name === "string" ? info.name.toLowerCase() : "";
 	return ["codex", "codex-mcp-client", "codex_cli_rs", "codex-desktop"].includes(name)
 		? "codex"

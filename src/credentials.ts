@@ -62,6 +62,8 @@ export interface Credentials {
 	project_memory_status?: "unavailable";
 	/** Local readiness binding, stable only across refreshes of this sign-in. */
 	project_memory_session?: string;
+	/** When the server last answered the hint completely (memory-hint.ts); absent before 0.3.80. */
+	project_memory_checked_at?: string;
 	/** Private installation binding, preserved across refresh and replaced on a new sign-in. */
 	runtime_session?: string;
 }

@@ -97,16 +97,20 @@ function validRecap(text, limit) {
 
 function captureDraft(input) {
 	if (
-		!hasKeys(input, ["kind", "summary", "detail", "refs", "verification"]) ||
+		!hasKeys(input, ["kind", "summary", "detail", "refs", "verification", "recallWhen"]) ||
 		!["observation", "lesson", "decision"].includes(input.kind) ||
 		!validRecap(input.summary, 500) ||
 		(input.detail !== undefined && !validRecap(input.detail, 1000)) ||
 		(input.verification !== undefined && !validRecap(input.verification, 300)) ||
+		(input.recallWhen !== undefined &&
+			(!Array.isArray(input.recallWhen) ||
+				input.recallWhen.length > 3 ||
+				!input.recallWhen.every((phrase) => validRecap(phrase, 60)))) ||
 		(input.refs !== undefined &&
 			(!Array.isArray(input.refs) || input.refs.length > 6 || !input.refs.every(validRef)))
 	) {
 		throw new PilotError(
-			"Use a JSON candidate with kind, summary (500 characters), optional detail (1,000), verification (300), and up to six refs.",
+			"Use a JSON candidate with kind, summary (500 characters), optional detail (1,000), verification (300), up to three recallWhen phrases (60), and up to six refs.",
 		);
 	}
 	return input;

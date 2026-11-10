@@ -1,17 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { bundledHook, installMemoryBundle, packagedMemoryBundle } from "./bundle.mjs";
-import { hasLegacyHooks, hasUserHooks, updateHooks, updateUserHooks } from "./hook-config.mjs";
-import { atomicWrite, checkout, git, hasMemoryGit } from "./local.mjs";
 import {
 	clearDiagnosticQueue,
 	diagnosticsPolicyEligible,
 	revokeDiagnosticConsent,
 } from "./diagnostics-collector.mjs";
+import { hasLegacyHooks, hasUserHooks, updateHooks, updateUserHooks } from "./hook-config.mjs";
+import { atomicWrite, checkout, git, hasMemoryGit } from "./local.mjs";
 import { requestMemory, requestMemoryPolicy } from "./memory-api.mjs";
-import { MEMORY_HOOK_CLIENTS, readHookPreferences, writeHookPreferences } from "./preferences.mjs";
+import {
+	MEMORY_HOOK_CLIENTS,
+	memoryHookStateForClient,
+	nativeMemoryClient,
+	readHookPreferences,
+	writeHookPreferences,
+} from "./preferences.mjs";
 import {
 	legacySettingsPath,
 	matchingMemoryHint,
@@ -303,6 +309,71 @@ export function applyMemoryHookChoices(decision, options = {}) {
 			notices.push(...syncMemoryHooks({ ...options, clients, graphClients: cues, enable: true }));
 	}
 	return notices;
+}
+
+/**
+ * At proxy start, give the identified Claude Code or Codex client the default
+ * memory reminder without asking, as the installer would. Leaves alone anyone who
+ * declined or ran --disable-memory-hooks, Claude Code with disableAllHooks, and an
+ * edited or unreadable Pharaoh entry; adds graph cues or diagnostics only where
+ * the user consented before. Returns lines for the user when it turned hooks on.
+ */
+export function ensureMemoryHooks(info, credentials, options = {}) {
+	const { home = homedir(), env = process.env } = options;
+	const client = nativeMemoryClient(info);
+	if (!client || typeof process.getuid !== "function" || !hasMemoryGit) return [];
+	if (credentials?.project_memory_status === "unavailable") return [];
+	if (!projectMemoryHint(credentials).length) return [];
+	const choice = readHookPreferences(home)[client] ?? {};
+	if (choice.memory === false) return [];
+	let config;
+	try {
+		config = inspectSettings(userSettings(client, home, env)).config;
+	} catch {
+		return [];
+	}
+	if (client === "claude-code" && config?.disableAllHooks === true) return [];
+	const state = memoryHookStateForClient(info, { home, env });
+	const fresh = state === "absent";
+	if (!fresh) {
+		// "installed" is Pharaoh's exact entry; anything else may be the user's edit.
+		if (state !== "installed") return [];
+		const digest = packagedMemoryBundle(options.packageRoot).sha256;
+		const current = readActiveMemoryClients(home)[client];
+		if (current === digest && existsSync(bundledHook(join(memoryClientRoot(home), digest))))
+			return [];
+	}
+	// As at setup: a saved diagnostics choice never puts back handlers the user removed.
+	if (
+		choice.diagnostics === true &&
+		(!readActiveMemoryClients(home)[client] ||
+			!hasUserHooks({ hooks: { Stop: config?.hooks?.Stop } }, client))
+	) {
+		const { diagnostics: _removed, ...kept } = choice;
+		writeHookPreferences({ ...readHookPreferences(home), [client]: kept }, home);
+	}
+	const graph =
+		choice.graph === true &&
+		["PreToolUse", "PostToolUse"].every((event) =>
+			hasUserHooks({ hooks: { [event]: config?.hooks?.[event] } }, client),
+		);
+	syncMemoryHooks({
+		...options,
+		credentials,
+		clients: [client],
+		graphClients: graph ? [client] : [],
+		enable: true,
+	});
+	if (!fresh || memoryHookStateForClient(info, { home, env }) !== "installed") return [];
+	const label = client === "codex" ? "Codex" : "Claude Code";
+	return [
+		`Pharaoh turned on project memory reminders in ${label}: from your next conversation, the agent is reminded to check past decisions for this repo. To turn them off, run \`npx @pharaoh-so/mcp --disable-memory-hooks\`.`,
+		...(client === "codex"
+			? [
+					"Codex runs the reminder only after you review and trust it in /hooks or Settings > Hooks.",
+				]
+			: []),
+	];
 }
 
 /** Run only during setup or explicit cleanup of the local memory hooks. */

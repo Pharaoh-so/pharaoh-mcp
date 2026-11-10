@@ -39,6 +39,7 @@ import {
 	runInstallSkills,
 } from "./install-skills.js";
 import { handleRefreshFailure, tryMidSessionRefresh } from "./lifecycle.js";
+import { updateMemoryHint } from "./memory-hint.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { type ProxyServer, startInAuthRequiredMode, startInSseMode } from "./proxy-server.js";
 import { loadAndRefresh } from "./refresh.js";
@@ -345,6 +346,9 @@ async function main(): Promise<void> {
 	printLines(`Pharaoh: token valid for ${formatTtl(creds.expires_at)} — connecting`);
 	activeCreds = creds;
 	const proxy = await startInSseMode(creds);
+	proxy.setMemoryCredentials(creds);
+	// Sign-ins from before project memory have no hint: ask once, in the background.
+	void updateMemoryHint(server).then((updated) => updated && proxy.setMemoryCredentials(updated));
 	await waitForProxyLifetime(proxy, server);
 }
 
@@ -458,6 +462,7 @@ let activeCreds: Credentials | null = null;
 async function useSse(proxy: ProxyServer, creds: Credentials): Promise<void> {
 	activeCreds = creds;
 	await proxy.setBackend(createSseBackend(creds.sse_url, creds.access_token));
+	proxy.setMemoryCredentials(creds);
 }
 
 /**
