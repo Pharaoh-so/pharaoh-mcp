@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "509576d097707859e25a5468750ee03aa44d9a77",
-  "payloadSha256": "2653989cef26c84b24435f17e184dff3d6e672105553d8aef9f06ced0e041cc2",
+  "commit": "960d7fa1e809f5da8b386923102dcb0598173a85",
+  "payloadSha256": "80dd05786ae109ff769e412485b2e61a19af4f46a4513ce7388a41d443e948a3",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -191,7 +191,7 @@
     },
     {
       "path": "project-memory/memory-api.mjs",
-      "sha256": "9c87a1ff55543cf6949a2d2a4abd3e67f1e3dcfba61f421b2eb264c5f1ae34ed",
+      "sha256": "93780da8bdfa34b61342e84b9a99dbf6449124b2b6e1236068ca7456f6b77f59",
       "mode": "100644"
     },
     {

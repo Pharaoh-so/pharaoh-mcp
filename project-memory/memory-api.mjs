@@ -5,7 +5,7 @@ const READY_TIMEOUT_MS = 1_200;
 const REQUEST_TIMEOUT_MS = 12_000;
 const BUILD = new URL("runtime/refresh.js", import.meta.url);
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
-const STATUS = new Set(["candidate", "approved", "superseded", "retracted"]);
+const STATUS = new Set(["candidate", "approved", "superseded", "retracted", "archived"]);
 
 export class PilotError extends Error {
 	constructor(message, rejected = false) {
