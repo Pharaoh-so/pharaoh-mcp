@@ -1,7 +1,19 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import {
+	closeSync,
+	constants,
+	fstatSync,
+	lstatSync,
+	openSync,
+	readFileSync,
+	readSync,
+	realpathSync,
+	rmSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { gitBefore, sessionKey, updateWorktreeCueState } from "./local.mjs";
+import { fileURLToPath } from "node:url";
+import { atomicWrite, gitBefore, sessionKey, updateWorktreeCueState } from "./local.mjs";
 
 const MAP_TOOL = "mcp__pharaoh__get_codebase_map";
 const SHA = /^(?!0{40}$)[a-f0-9]{40}$/i;
@@ -86,9 +98,10 @@ export function nativeEditPaths(input, client, successful = true) {
 	return [{ path: input.tool_input?.file_path, mayAdd: input.tool_name === "Write" }];
 }
 
-function editedPaths(input, client, root) {
+function editedPaths(input, client, root, anyFile = false) {
 	const inCheckout = nativeEditPaths(input, client).flatMap(({ path }) => {
-		if (typeof path !== "string" || path.length > 512 || !MAPPED_FILE.test(path)) return [];
+		if (typeof path !== "string" || path.length > 512 || !(anyFile || MAPPED_FILE.test(path)))
+			return [];
 		const absolute = resolve(input.cwd ?? root, path);
 		let parent;
 		try {
@@ -267,4 +280,173 @@ export function worktreeCue(
 		now,
 	);
 	if (context) return { hookSpecificOutput: { hookEventName: event, additionalContext: context } };
+}
+
+/** How long a fetched list of anchored records may be shown. Access is rechecked at each fetch. */
+const MEMORY_TTL = 5 * 60 * 1000;
+/** One kept list per repo, so work in a second repo never evicts the first's list or shown history. */
+const memoryCache = (directory, repo) =>
+	join(directory, `anchored-memory-${digest(repo.toLowerCase())}.json`);
+const MAX_MEMORY_BYTES = 40_000;
+const MAX_MEMORY_CUES = 2;
+/** About 300 tokens. */
+const MEMORY_CUE_CHARS = 1_100;
+const MAX_SHOWN_SESSIONS = 8;
+const MAX_SHOWN_RECORDS = 32;
+
+function anchoredMemory(directory, repo, binding, now) {
+	try {
+		const path = memoryCache(directory, repo);
+		const file = lstatSync(path);
+		if (
+			!file.isFile() ||
+			file.mode & 0o077 ||
+			file.uid !== process.getuid?.() ||
+			file.size > MAX_MEMORY_BYTES
+		)
+			return;
+		const cache = JSON.parse(readFileSync(path, "utf8"));
+		if (
+			cache?.version === 1 &&
+			cache.repo === repo.toLowerCase() &&
+			cache.binding === binding &&
+			Array.isArray(cache.records) &&
+			cache.shown &&
+			typeof cache.shown === "object"
+		)
+			return { ...cache, fresh: cache.fetchedAt <= now && now - cache.fetchedAt < MEMORY_TTL };
+	} catch {
+		// No private cache for this repo and sign-in.
+	}
+}
+
+function writeAnchoredMemory(directory, repo, binding, records, shown, now) {
+	atomicWrite(
+		memoryCache(directory, repo),
+		JSON.stringify({
+			version: 1,
+			repo: repo.toLowerCase(),
+			binding,
+			fetchedAt: now,
+			records,
+			shown,
+		}),
+	);
+}
+
+/**
+ * Fetch the records that cite a file and keep them, owner-private, for five
+ * minutes. The request names the repo only. A refusal or failure leaves an
+ * empty list, so a repo without memory access is not asked again until it expires.
+ */
+export async function refreshAnchoredMemory(
+	repo,
+	{ directory, binding, request, now = Date.now() },
+) {
+	let records = [];
+	try {
+		({ records } = await request("anchored", { repo }));
+	} catch {
+		// Keep the empty list.
+	}
+	const shown = anchoredMemory(directory, repo, binding, now)?.shown ?? {};
+	writeAnchoredMemory(directory, repo, binding, records, shown, now);
+}
+
+/**
+ * Start a background fetch when the kept list is missing or older than five
+ * minutes. The hook never waits for it: a stale list is deleted and shows nothing.
+ */
+export function primeAnchoredMemory(
+	repo,
+	{
+		binding,
+		stateDirectory,
+		now = Date.now(),
+		launch = (target) =>
+			spawn(
+				process.execPath,
+				[
+					join(dirname(fileURLToPath(import.meta.url)), "diagnostics-sender.mjs"),
+					"--anchored",
+					target,
+				],
+				{ detached: true, stdio: "ignore" },
+			).unref(),
+	},
+) {
+	if (!binding) return;
+	const cache = anchoredMemory(stateDirectory, repo, binding, now);
+	if (cache?.fresh) return cache;
+	try {
+		rmSync(memoryCache(stateDirectory, repo), { force: true });
+		// An empty placeholder stops later hook events from starting a second fetch.
+		writeAnchoredMemory(stateDirectory, repo, binding, [], cache?.shown ?? {}, now);
+		launch(repo);
+	} catch {
+		// Memory cues are advisory.
+	}
+}
+
+/**
+ * After an edit, show at most two kept records that cite the edited file, once
+ * per conversation, with their rationale inline. Matching is local: the edited
+ * path is never sent.
+ */
+export function memoryCue(
+	input,
+	{ client, target, binding, stateDirectory, now = Date.now(), launch },
+) {
+	const session = sessionKey(client, input.session_id);
+	if (input.hook_event_name !== "PostToolUse" || !session || !binding) return;
+	const paths = editedPaths(input, client, target.root, true).map((path) =>
+		path.split(sep).join("/"),
+	);
+	if (!paths.length) return;
+	const cache = primeAnchoredMemory(target.repo, { binding, stateDirectory, now, launch });
+	if (!cache) return;
+	const seen = Array.isArray(cache.shown[session]) ? cache.shown[session] : [];
+	const matches = cache.records
+		.filter(
+			(record) =>
+				typeof record?.id === "string" &&
+				typeof record.summary === "string" &&
+				!seen.includes(record.id) &&
+				Array.isArray(record.paths) &&
+				record.paths.some((path) => paths.includes(path)),
+		)
+		.slice(0, MAX_MEMORY_CUES);
+	if (!matches.length) return;
+	const header = `Project memory about ${paths.filter((path) => matches.some((record) => record.paths.includes(path))).join(", ")}. These are dated notes from earlier work in ${target.repo}; check them against the current code before relying on them.`;
+	const room = Math.floor((MEMORY_CUE_CHARS - header.length) / matches.length) - 1;
+	const lines = matches.map((record) => {
+		const line = `- ${record.kind} (${record.status}, ${String(record.createdAt).slice(0, 10)}): ${record.summary}${typeof record.detail === "string" ? ` Why: ${record.detail}` : ""}`;
+		return line.length <= room
+			? line
+			: `${line.slice(0, Math.max(0, room - 60))}… (pharaoh_memory_expand ${record.id} v${record.version})`;
+	});
+	const shown = Object.fromEntries(
+		[
+			[session, [...seen, ...matches.map((record) => record.id)].slice(-MAX_SHOWN_RECORDS)],
+			...Object.entries(cache.shown).filter(([key]) => key !== session),
+		].slice(0, MAX_SHOWN_SESSIONS),
+	);
+	try {
+		writeAnchoredMemory(
+			stateDirectory,
+			target.repo,
+			binding,
+			cache.records,
+			shown,
+			cache.fetchedAt,
+		);
+	} catch {
+		return;
+	}
+	return {
+		hookSpecificOutput: {
+			hookEventName: "PostToolUse",
+			additionalContext: [header, ...lines].join("\n").slice(0, MEMORY_CUE_CHARS + 100),
+		},
+	};
 }

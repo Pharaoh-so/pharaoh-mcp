@@ -64,19 +64,28 @@ try {
 				collectDiagnosticEvent(input, { client, target: eligible, credentials, policy, runtime });
 		}
 		if (diagnosticOnly) process.exit(0);
+		const cue = {
+			client,
+			target: eligible,
+			binding: projectMemorySession(credentials),
+			stateDirectory: memoryClientRoot(),
+		};
 		if (reminder) {
 			if (skipMemoryPrompt(input.prompt)) process.exit(0);
+			// Clients with edit cues get the records that cite a file fetched ahead of the first edit.
+			if (choice?.graph === true)
+				(await import("./graph-cues.mjs")).primeAnchoredMemory(eligible.repo, cue);
 			result = memoryReminder(eligible.repo, conversationMemoryBinding(client, input.session_id));
 		} else {
-			const { worktreeCue } = await import("./graph-cues.mjs");
-			result = worktreeCue(input, {
-				client,
-				target: eligible,
-				binding: projectMemorySession(credentials),
-				stateDirectory: memoryClientRoot(),
-				structuralSearch,
-				deadline,
-			});
+			const { memoryCue, worktreeCue } = await import("./graph-cues.mjs");
+			const outputs = [
+				worktreeCue(input, { ...cue, structuralSearch, deadline }),
+				memoryCue(input, cue),
+			].flatMap((output) => output?.hookSpecificOutput.additionalContext ?? []);
+			if (outputs.length)
+				result = {
+					hookSpecificOutput: { hookEventName: event, additionalContext: outputs.join("\n\n") },
+				};
 		}
 	} else {
 		result = handleEvent(input, {

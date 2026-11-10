@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "960d7fa1e809f5da8b386923102dcb0598173a85",
-  "payloadSha256": "80dd05786ae109ff769e412485b2e61a19af4f46a4513ce7388a41d443e948a3",
+  "commit": "b1b299aa86c08dbe19d9a0000ed6987e7863c726",
+  "payloadSha256": "1c80c477e750d1259c7a4e7cd56367510e019f67438a1283db42b297838e1d63",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -156,7 +156,7 @@
     },
     {
       "path": "project-memory/diagnostics-sender.mjs",
-      "sha256": "3b239af8d1be1d578ecd9342f6afcad32fab8a735cf8ff790f78dadf1b8025b0",
+      "sha256": "6ae31ff6387aac598a394c70545816e4aa7e0c77c83101389e07910a882f85d1",
       "mode": "100644"
     },
     {
@@ -166,7 +166,7 @@
     },
     {
       "path": "project-memory/graph-cues.mjs",
-      "sha256": "51d6ce9edbdbcdb9161b4d076c7feb0907b683b58202eb6ec5b54e434ceaaaee",
+      "sha256": "305bef1d13fffb6bf774cdc5ca53b02163f6a87e42d671aea8c3d0474bca1a1c",
       "mode": "100644"
     },
     {
@@ -186,17 +186,17 @@
     },
     {
       "path": "project-memory/local.mjs",
-      "sha256": "9abbb19c7fcacfb66939511a9224e2cc2a8db742eda69d7f7deacecbd24722c6",
+      "sha256": "a79b3575a50dfc08a4f7b651745749a9ad60d432d022c6a415f07c589fecf3ef",
       "mode": "100644"
     },
     {
       "path": "project-memory/memory-api.mjs",
-      "sha256": "93780da8bdfa34b61342e84b9a99dbf6449124b2b6e1236068ca7456f6b77f59",
+      "sha256": "9b6f4980fc650d32b5e16c4b4cd33de6b91c67b045cf3a0f4af97369241dadab",
       "mode": "100644"
     },
     {
       "path": "project-memory/pharaoh-memory-hook.mjs",
-      "sha256": "7b9ed25484a22bf67865cb9fca6665dd5d9ef799fad3e1427e96319f3f41841a",
+      "sha256": "83d96a568e1fa9f8700631e348d3c03d13c7d3a1f40f82d82c4c0d8e65cca950",
       "mode": "100644"
     },
     {
@@ -211,7 +211,7 @@
     },
     {
       "path": "project-memory/preferences.mjs",
-      "sha256": "1596f803980d8e84c04155943d5d0071142bcca154c82fe124269833c72317b4",
+      "sha256": "4a603b4822149e64c33a3e0426784e59835e6b2e129f70ef152c6cbf615e0f54",
       "mode": "100644"
     },
     {
@@ -586,7 +586,7 @@
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "5f135daf9739b60bb853a02e7f65012a02d7e8aa4fc0d71ad17134c9e6ba057b",
+      "sha256": "aec13f49b2b6a77a60a8bab7ba8fd1aefc7892efa33a21c747b5009aba2c69e7",
       "mode": "100644"
     },
     {

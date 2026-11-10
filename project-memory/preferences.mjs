@@ -1,11 +1,19 @@
 import { spawn } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { privateMemoryPath } from "./bundle.mjs";
 import { hasUserHooks } from "./hook-config.mjs";
-import { atomicWrite, shellWord } from "./local.mjs";
+import { ANCHORED_MEMORY_FILE, atomicWrite, shellWord } from "./local.mjs";
 import { memoryClientRoot, readActiveMemoryClients, readHookSettings } from "./user-target.mjs";
 
 export const MEMORY_HOOK_CLIENTS = ["claude-code", "codex"];
@@ -65,6 +73,10 @@ export function writeHookPreferences(clients, home = homedir(), expected) {
 
 export function resetHookPreferences(disable, home = homedir()) {
 	if (typeof process.getuid !== "function") return;
+	// Sign-out, clean and disable all drop the locally kept memory records.
+	const root = memoryClientRoot(home);
+	for (const name of existsSync(root) ? readdirSync(root) : [])
+		if (ANCHORED_MEMORY_FILE.test(name)) rmSync(join(root, name), { force: true });
 	const choices = readHookPreferences(home);
 	for (const client of MEMORY_HOOK_CLIENTS) {
 		const choice = choices[client];
