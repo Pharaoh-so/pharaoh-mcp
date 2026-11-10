@@ -123,9 +123,15 @@ export async function requestMemory(
 	} = {},
 ) {
 	if (
-		!["recall", "capture", "expand", "diagnostics", "diagnostics/control", "feedback"].includes(
-			operation,
-		)
+		![
+			"recall",
+			"anchored",
+			"capture",
+			"expand",
+			"diagnostics",
+			"diagnostics/control",
+			"feedback",
+		].includes(operation)
 	)
 		throw new PilotError("Unknown memory request.");
 	const privacy = { home };
@@ -222,6 +228,8 @@ export async function requestMemory(
 		throw error;
 	}
 	if (["diagnostics", "diagnostics/control", "feedback"].includes(operation)) return result;
+	if (operation === "anchored" && Array.isArray(result?.records))
+		return { records: result.records.filter((record) => UUID.test(record?.id ?? "")) };
 	if (
 		result &&
 		typeof result === "object" &&

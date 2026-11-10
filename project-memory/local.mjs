@@ -154,6 +154,9 @@ export async function readStdin(maxBytes) {
 	return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+/** The per-repo lists of memory records kept for the edit cue (graph-cues.mjs). */
+export const ANCHORED_MEMORY_FILE = /^anchored-memory-[a-f0-9]{64}\.json$/;
+
 export function atomicWrite(path, contents) {
 	const temporary = join(dirname(path), `.pharaoh-memory-${randomUUID()}.tmp`);
 	try {
@@ -406,6 +409,8 @@ export function memoryEgressDecision(binding, operation, options) {
 	if (
 		operation === "diagnostics/control" ||
 		operation === "readiness" ||
+		// Sends the repo name only and comes from no conversation.
+		operation === "anchored" ||
 		sessionLocalSensitivity(binding, options) === "clear"
 	)
 		return "normal";

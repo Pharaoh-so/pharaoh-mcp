@@ -28,7 +28,7 @@ import {
 	flushDiagnosticQueue,
 } from "../project-memory/diagnostics-collector.mjs";
 import { executeTurn } from "../project-memory/execute-turn.mjs";
-import { worktreeCue } from "../project-memory/graph-cues.mjs";
+import { memoryCue, refreshAnchoredMemory, worktreeCue } from "../project-memory/graph-cues.mjs";
 import {
 	conversationMemoryBinding,
 	markSessionLocal,
@@ -467,6 +467,90 @@ it.each([false, true])("advises safely after a map with short request=%s", (shor
 	expect(cue(patch("settings.json"))).toBeUndefined();
 	expect(existsSync(filter)).toBe(false);
 	expect(readFileSync(join(stateDirectory, "worktree-cues.json"), "utf8")).not.toContain(file);
+});
+
+it("shows kept memory about an edited file once, with its reason, and nothing otherwise", async () => {
+	mkdirSync(join(checkout, "src"));
+	const stateDirectory = join(home, ".pharaoh/project-memory-client");
+	mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
+	const kept = () =>
+		readdirSync(stateDirectory).filter((name) => name.startsWith("anchored-memory-"));
+	const launched: string[] = [];
+	const edit = (path: string, overrides = {}, session = "first") =>
+		memoryCue(
+			{
+				hook_event_name: "PostToolUse",
+				session_id: session,
+				cwd: checkout,
+				tool_name: "Edit",
+				tool_input: { file_path: join(checkout, path) },
+			},
+			{
+				client: "claude-code",
+				target: { root: checkout, repo },
+				binding: "fixture",
+				stateDirectory,
+				launch: (name: string) => launched.push(name),
+				...overrides,
+			},
+		)?.hookSpecificOutput.additionalContext;
+	// Nothing is kept yet: the edit starts one background fetch and shows nothing.
+	expect(edit("src/recovery.ts")).toBeUndefined();
+	expect(edit("src/recovery.ts")).toBeUndefined();
+	expect(launched).toEqual([repo]);
+	const records = [
+		{
+			id: "7f194a39-40b5-4a19-8d42-f3ed3aeb6034",
+			version: 1,
+			kind: "decision",
+			status: "approved",
+			summary: "Sessions restore only with membership proof.",
+			detail: "A refresh without proof kept removed members signed in. ".repeat(40),
+			createdAt: "2026-11-04T10:00:00.000Z",
+			paths: ["src/recovery.ts"],
+		},
+	];
+	// The real client: one request, to the anchored route, carrying the repo and nothing else.
+	const fetcher = vi.fn(async (_url: string, _request: RequestInit) =>
+		Response.json({ records: [...records, { ...records[0], id: "not-a-record-id" }] }),
+	);
+	const refresh = () =>
+		refreshAnchoredMemory(repo, {
+			directory: stateDirectory,
+			binding: "fixture",
+			request: (operation: string, payload: object) =>
+				requestMemory(operation, payload, { credentials, fetcher }),
+		});
+	await refresh();
+	expect(fetcher.mock.calls[0][0]).toBe("https://mcp.pharaoh.so/api/project-memory/anchored");
+	expect(fetcher.mock.calls[0][1].body).toBe(JSON.stringify({ repo }));
+	const list = join(stateDirectory, kept()[0]);
+	expect(lstatSync(list).mode & 0o777).toBe(0o600);
+	expect(JSON.parse(readFileSync(list, "utf8")).records).toHaveLength(1);
+	expect(edit("README.md")).toBeUndefined();
+	// Another sign-in never reads this one's list: it is replaced and refetched.
+	expect(edit("src/recovery.ts", { binding: "another sign-in" })).toBeUndefined();
+	await refresh();
+	expect(launched).toHaveLength(2);
+	const shown = edit("src/recovery.ts");
+	expect(shown).toContain(
+		"decision (approved, 2026-11-04): Sessions restore only with membership proof. Why: A refresh",
+	);
+	expect(shown).toContain("pharaoh_memory_expand 7f194a39-40b5-4a19-8d42-f3ed3aeb6034 v1");
+	expect(shown?.length).toBeLessThanOrEqual(1_200);
+	expect(edit("src/recovery.ts")).toBeUndefined();
+	// Work in a second repo keeps its own list and leaves this one's list and shown history alone.
+	expect(
+		edit("src/recovery.ts", { target: { root: checkout, repo: "fixture/other" } }),
+	).toBeUndefined();
+	expect(kept()).toHaveLength(2);
+	expect(edit("src/recovery.ts")).toBeUndefined();
+	expect(launched).toEqual([repo, repo, "fixture/other"]);
+	// Five minutes on, the list is deleted, refetched and not shown.
+	expect(edit("src/recovery.ts", { now: Date.now() + 300_000 }, "second")).toBeUndefined();
+	expect(launched).toHaveLength(4);
+	resetHookPreferences(false, home);
+	expect(kept()).toEqual([]);
 });
 
 function commandHook(command: string) {
@@ -1156,7 +1240,10 @@ it("redacts shell action excerpts and fences finals after a local-capable CLI at
 	queued.root = checkout;
 	queued.event.payload.actionExcerpt = privateName;
 	writeFileSync(file, JSON.stringify(queued));
-	collect(hostedSession, { hook_event_name: "Stop", last_assistant_message: "Hosted graph answer." });
+	collect(hostedSession, {
+		hook_event_name: "Stop",
+		last_assistant_message: "Hosted graph answer.",
+	});
 	const sent: Array<{ events: Array<{ eventId: string }> }> = [];
 	await flushDiagnosticQueue("codex", {
 		home,
@@ -1280,6 +1367,7 @@ it("fences uncertain or damaged conversation state without disabling unrelated d
 	expect(markSessionLocal(binding, { home })).toBe(true);
 	expect(sessionLocalSensitivity(unrelated, { home })).toBe("clear");
 	expect(memoryEgressDecision(undefined, "recall", { home })).toBe("blocked");
+	expect(memoryEgressDecision(undefined, "anchored", { home })).toBe("normal");
 	expect(memoryEgressDecision(undefined, "diagnostics", { home })).toBe("metadata");
 	expect(memoryEgressDecision(null, "recall", { home })).toBe("normal");
 	const marker = join(
