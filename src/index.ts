@@ -348,7 +348,9 @@ async function main(): Promise<void> {
 	const proxy = await startInSseMode(creds);
 	proxy.setMemoryCredentials(creds);
 	// Sign-ins from before project memory have no hint: ask once, in the background.
-	void updateMemoryHint(server).then((updated) => updated && proxy.setMemoryCredentials(updated));
+	void updateMemoryHint(server, { background: true }).then(
+		(updated) => updated && proxy.setMemoryCredentials(updated),
+	);
 	await waitForProxyLifetime(proxy, server);
 }
 
