@@ -35,7 +35,7 @@ function promptContext(token, compact, mayCapture) {
 		...(mayCapture
 			? [
 					"Before replying, optionally replace recall with capture (omit --compact) for one supported finding already made. Skip on read-only requests.",
-					'Pass {"kind":"lesson","summary":"…"} with optional detail, verification and up to six refs (path, symbol, pullRequest or commit). Character limits: summary 500, detail 1000, verification 300.',
+					'Pass {"kind":"lesson","summary":"…"} with optional detail, verification, up to six refs (path, symbol, pullRequest or commit) and recallWhen: up to three short situations a later task might be described by, in words the summary lacks. Character limits: summary 500, detail 1000, verification 300, recallWhen 60 each.',
 					"Use your own words. Omit secrets, personal details, raw prompts, source and transcripts. Capture saves a candidate.",
 				]
 			: []),

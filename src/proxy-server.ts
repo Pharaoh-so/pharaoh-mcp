@@ -40,6 +40,7 @@ import {
 	memoryDiagnosticsForClient,
 	memoryHookStateForClient,
 } from "../project-memory/preferences.mjs";
+import { ensureMemoryHooks } from "../project-memory/setup.mjs";
 import { runtimeRequestMetadata } from "../runtime/runtime-client.mjs";
 import { RUNTIME_TOOL_NAMES, sanitizeRuntimeResult } from "../runtime/runtime-native.mjs";
 import { ensurePrivateDirectory, privatePath } from "../runtime/runtime-storage.mjs";
@@ -198,6 +199,10 @@ export class ProxyServer {
 	private clientCapabilities: ClientCapabilities = {};
 	private clientInitialized = false;
 	private downstream: DownstreamClient | null = null;
+	/** Sign-in whose memory hint decides start-time hooks; set by index.ts, never read from disk here. */
+	private memoryCredentials: Credentials | null = null;
+	/** Lines for the user after hooks were turned on, carried by the next answered tool call. */
+	private memoryNotice: string[] = [];
 	private capabilityUpdate: Promise<void> = Promise.resolve();
 	private localDeliveries = new Map<RequestId, { settle: LocalDelivery; detach: () => void }>();
 	private deliverySettlements = new Set<Promise<void>>();
@@ -233,6 +238,7 @@ export class ProxyServer {
 			if (this.clientInitialized) return;
 			this.clientInitialized = true;
 			const info = this.server.getClientVersion();
+			this.ensureHooks(info);
 			const downstream: DownstreamClient = {
 				client: { name: info?.name, version: info?.version },
 				plugin: claudePluginState(),
@@ -367,16 +373,52 @@ export class ProxyServer {
 			// it from there instead of asking the agent to call again.
 			if (backend.name === "auth-required" && this.backend !== backend && !result.isError) {
 				extra.signal.throwIfAborted();
-				return sanitizeRuntimeResult(
-					cleanMemoryResult(await hostedCall(this.backend)),
-					Boolean(runtime),
+				return this.withMemoryNotice(
+					sanitizeRuntimeResult(
+						cleanMemoryResult(await hostedCall(this.backend)),
+						Boolean(runtime),
+					) as CallToolResult,
 				);
 			}
-			return sanitizeRuntimeResult(
-				cleanMemoryResult(result),
-				backend.name === "sse" && Boolean(runtime),
-			) as CallToolResult;
+			return this.withMemoryNotice(
+				sanitizeRuntimeResult(
+					cleanMemoryResult(result),
+					backend.name === "sse" && Boolean(runtime),
+				) as CallToolResult,
+			);
 		});
+	}
+
+	/**
+	 * Use `creds` for start-time memory hooks: at sign-in, after a swap, or once
+	 * memory-hint.ts stored a newer hint. Installs for an already-identified client.
+	 */
+	setMemoryCredentials(creds: Credentials | null): void {
+		this.memoryCredentials = creds;
+		if (this.clientInitialized) this.ensureHooks(this.server.getClientVersion());
+	}
+
+	/** Never prompts and never writes to stdout, which carries MCP. */
+	private ensureHooks(info: { name?: string; version?: string } | undefined): void {
+		if (!this.memoryCredentials) return;
+		let lines: string[] = [];
+		try {
+			lines = ensureMemoryHooks(info, this.memoryCredentials);
+		} catch {
+			// ALLOWED-CATCH: memory hooks are optional; MCP keeps working without them
+		}
+		if (!lines.length) return;
+		this.memoryNotice.push(...lines);
+		process.stderr.write(`${lines.join("\n")}\n`);
+		// The next upstream session reports the new state; this one already reported.
+		if (this.downstream) this.downstream.memoryHooks = memoryHookStateForClient(info);
+	}
+
+	private withMemoryNotice(result: CallToolResult): CallToolResult {
+		if (!this.memoryNotice.length || result.isError) return result;
+		const text = `\n---\n${this.memoryNotice.join("\n")}`;
+		this.memoryNotice = [];
+		return { ...result, content: [...(result.content ?? []), { type: "text", text }] };
 	}
 
 	private takeLocalDelivery(id: RequestId): LocalDelivery | undefined {

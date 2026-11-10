@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "0f9751999a210b38fbc05b33ac959c2edbe7e3b8",
-  "payloadSha256": "a4b0a8732338267882e7bee7e4d9f82706940330bfae1f5660b14866116ef2c8",
+  "commit": "20d7e2d0e43babd78530340674655ad332cbad19",
+  "payloadSha256": "960d20d19adbd0de1d2584582c31089ff6e8df60cfd60fee0baac34177b75062",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -16,7 +16,7 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "3f363c9bc1da271288b00a50051c4e8a133aeea131bbf8c344d0f1a5b4331c8d",
+      "sha256": "38fd58a029c162cb2d9d282c3c9a4641224bf034a1fb3b447aa81a8da34a685f",
       "mode": "100644"
     },
     {
@@ -161,7 +161,7 @@
     },
     {
       "path": "project-memory/execute-turn.mjs",
-      "sha256": "d07b907cf7fa94e2460f39fd6e4ab42389abb8a9b77f35629a456182b60efec2",
+      "sha256": "e300ecf039b4e2916daffca368bf5af019a91ceb0a53f406617db76a1341dd2c",
       "mode": "100644"
     },
     {
@@ -176,7 +176,7 @@
     },
     {
       "path": "project-memory/hook-events.mjs",
-      "sha256": "21d22338104e993705eee470f4dead717a2b174e9f1f3800ab46e18a91203dfd",
+      "sha256": "23192aaf54e58bf560f2514a58aa36f10b7bd05af0b6b21f0c9daf88f4ba6cc3",
       "mode": "100644"
     },
     {
@@ -211,17 +211,17 @@
     },
     {
       "path": "project-memory/preferences.mjs",
-      "sha256": "4a603b4822149e64c33a3e0426784e59835e6b2e129f70ef152c6cbf615e0f54",
+      "sha256": "3d066cbc12e215dd862d9abf564aff94e23949a8e63999e347ea96bddde1309a",
       "mode": "100644"
     },
     {
       "path": "project-memory/setup.d.mts",
-      "sha256": "c886cbc057c4d39b219a009b94aa7a6681b7d657521556aed2d52706518c84a8",
+      "sha256": "98d9780a249a8fae9d2a33b32e4b6e015f16eaebce5b7d8069cddf507459d687",
       "mode": "100644"
     },
     {
       "path": "project-memory/setup.mjs",
-      "sha256": "99b2c27201901cba62fed9ebc4f5ba3f92c7db3f6d112f795c0502e18258305e",
+      "sha256": "b86ced92085a294980d9d17424f8b26337374b5aee91d90bc02c026a51548358",
       "mode": "100644"
     },
     {
@@ -391,7 +391,7 @@
     },
     {
       "path": "src/credentials.ts",
-      "sha256": "b45f33a220e2c5232431c4b02286f8ab20f00678e04de5551e26094bfd98410c",
+      "sha256": "a8abd72c896fc1b0afcf5f5793c00942732e94d41a99dd193954b24a81b64f94",
       "mode": "100644"
     },
     {
@@ -406,12 +406,12 @@
     },
     {
       "path": "src/helpers.ts",
-      "sha256": "f8986f5d408f4756600cc5836be53add301d08d753225177e948ec10ac219b2a",
+      "sha256": "4f993d1e35c6aa6a0b2359b417886fc100d8ca86b716d5e881dcde1bd32e0cdc",
       "mode": "100644"
     },
     {
       "path": "src/index.ts",
-      "sha256": "c4e837cffde5a4fb16384077e80f410aaad4a6187713446900481229fbb6ddfb",
+      "sha256": "221adb5b9fb1f173060d93fe42ea6161108fd3ea42f323881fda80ed882869ee",
       "mode": "100644"
     },
     {
@@ -431,7 +431,7 @@
     },
     {
       "path": "src/install.ts",
-      "sha256": "0d963a0b8730f2630db48825384c32e373b6604044f338d6b3a56cfdd1dd625a",
+      "sha256": "7cb7de26815e5c42776980c3f4c97e24e297e995db9cf9faa1747766f187677c",
       "mode": "100644"
     },
     {
@@ -480,8 +480,13 @@
       "mode": "100644"
     },
     {
+      "path": "src/memory-hint.ts",
+      "sha256": "d34471758cf843f7f53451bfcfbd3d86415c90c36f919b232989bd3115bc7c69",
+      "mode": "100644"
+    },
+    {
       "path": "src/proxy-server.ts",
-      "sha256": "d9b19dde971384a70ad5e14c8b03bc3dd8ebb7354d94048f5dbed812c5fbb32c",
+      "sha256": "0b3744c5f6522daad4a0ba40a79c8114cb0d6a4cb03d8278125c3a4570f32146",
       "mode": "100644"
     },
     {
@@ -586,7 +591,7 @@
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "aec13f49b2b6a77a60a8bab7ba8fd1aefc7892efa33a21c747b5009aba2c69e7",
+      "sha256": "a7b335a373fad6490b2d779722cd5a8efb75a8887060a1c1a42c15f69ddac673",
       "mode": "100644"
     },
     {
@@ -596,7 +601,7 @@
     },
     {
       "path": "tests/refresh.integration.test.ts",
-      "sha256": "87501016a7defa8f4d88ca5b426a2e4c81d2df416a0213209c7d040c8d3a6ad7",
+      "sha256": "fa7ef67b1791ccf73d68eddddbef2652cd7b1b26c56c87d2a253aae0d382ae36",
       "mode": "100644"
     },
     {

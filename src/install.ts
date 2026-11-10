@@ -27,6 +27,7 @@ import {
 } from "./helpers.js";
 import type { ClientId, ClientOutcome, LaunchConfig } from "./install-types.js";
 import { installedLocalAnalyzer } from "./local/worker-host.js";
+import { updateMemoryHint } from "./memory-hint.js";
 import { loadAndRefresh } from "./refresh.js";
 import { ensureRuntime, RuntimeSetupError } from "./runtime.js";
 import { describeRuntimeDisable, enableInstalledRuntime } from "./runtime-command.js";
@@ -102,7 +103,11 @@ async function authenticateInstall(
 				current.creds.tenant_name,
 				current.creds.repos.length,
 			);
-			return { credentials: current.creds };
+			// A sign-in from before project memory has no hint; memory hooks need one.
+			printLines("Pharaoh: checking which of your repos have project memory...");
+			return {
+				credentials: (await updateMemoryHint(server, { force: true, rounds: 3 })) ?? current.creds,
+			};
 		}
 		if (current && current.action !== "reauth") {
 			throw new Error(

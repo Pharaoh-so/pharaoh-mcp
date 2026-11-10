@@ -47,6 +47,7 @@ import {
 import {
 	applyMemoryHookChoices,
 	chooseMemoryHooks,
+	ensureMemoryHooks,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
 import { legacyMemoryHooksMayRun } from "../project-memory/user-target.mjs";
@@ -673,6 +674,70 @@ it("restores missing memory hooks during setup and respects native disable", asy
 	expect(JSON.parse(readFileSync(path, "utf8")).hooks.UserPromptSubmit).toHaveLength(1);
 	writeFileSync(join(home, ".claude/settings.json"), '{"disableAllHooks":true}');
 	expect((await choose({ clients: ["claude-code"], requested: true })).accepted).toEqual([]);
+});
+
+/** Breaks when: proxy start installs without a hint, over a decline, an edit or disableAllHooks, silently, or twice. */
+it("turns memory reminders on at proxy start once, visibly, and never over a decline, an edit or disableAllHooks", () => {
+	const ensure = (name: string, creds: Credentials = credentials) =>
+		ensureMemoryHooks({ name }, creds, { home, env: {}, cwd: checkout, packageRoot });
+	const claude = join(home, ".claude/settings.json");
+	const codex = join(home, ".codex/hooks.json");
+	expect(ensure("claude-code", { ...credentials, project_memory: undefined })).toEqual([]);
+	expect(existsSync(claude)).toBe(false);
+	expect(ensure("claude-code")).toEqual([
+		expect.stringContaining("run `npx @pharaoh-so/mcp --disable-memory-hooks`"),
+	]);
+	expect(memoryHookStateForClient({ name: "claude-code" }, { home, env: {} })).toBe("installed");
+	const written = readFileSync(claude, "utf8");
+	expect(ensure("claude-code")).toEqual([]);
+	expect(readFileSync(claude, "utf8")).toBe(written);
+	expect(ensure("codex-mcp-client")).toEqual([
+		expect.stringContaining("in Codex"),
+		expect.stringContaining("/hooks or Settings > Hooks"),
+	]);
+	const edited = written.replace("--user", "--user --mine");
+	writeFileSync(claude, edited);
+	expect(memoryHookStateForClient({ name: "claude-code" }, { home, env: {} })).toBe("unknown");
+	expect(ensure("claude-code")).toEqual([]);
+	expect(readFileSync(claude, "utf8")).toBe(edited);
+	writeFileSync(claude, '{"disableAllHooks":true}');
+	expect(ensure("claude-code")).toEqual([]);
+	expect(readFileSync(claude, "utf8")).toBe('{"disableAllHooks":true}');
+	rmSync(codex);
+	writeHookPreferences({ codex: { memory: false } }, home);
+	expect(ensure("codex")).toEqual([]);
+	expect(existsSync(codex)).toBe(false);
+});
+
+/** Breaks when: a saved diagnostics choice restores Stop handlers the user removed, on first install or an upgrade. */
+it("never puts back diagnostic handlers at proxy start, on first install or a bundle upgrade", () => {
+	const ensure = () =>
+		ensureMemoryHooks({ name: "claude-code" }, credentials, {
+			home,
+			env: {},
+			cwd: checkout,
+			packageRoot,
+		});
+	const claude = join(home, ".claude/settings.json");
+	const stop = () => JSON.parse(readFileSync(claude, "utf8")).hooks?.Stop;
+	writeHookPreferences({ "claude-code": { memory: true, diagnostics: true } }, home);
+	expect(ensure()).toHaveLength(1);
+	expect(stop()).toBeUndefined();
+	expect(readHookPreferences(home)["claude-code"]?.diagnostics).toBeUndefined();
+	// Installed with consent, then the user removes the Stop handler and a new bundle ships.
+	writeHookPreferences({ "claude-code": { memory: true, diagnostics: true } }, home);
+	configure({ enable: true, clients: ["claude-code"] });
+	expect(stop()).toBeDefined();
+	const settings = JSON.parse(readFileSync(claude, "utf8"));
+	delete settings.hooks.Stop;
+	writeFileSync(claude, JSON.stringify(settings));
+	const active = join(home, ".pharaoh/project-memory-client/active.json");
+	const before = readFileSync(active, "utf8");
+	appendFileSync(new URL("project-memory/local.mjs", packageRoot), "\n// next release\n");
+	expect(ensure()).toEqual([]);
+	expect(readFileSync(active, "utf8")).not.toBe(before);
+	expect(stop()).toBeUndefined();
+	expect(memoryHookStateForClient({ name: "claude-code" }, { home, env: {} })).toBe("installed");
 });
 
 it("removes owned pilot hooks during default setup without changing unrelated settings", () => {
@@ -1519,7 +1584,11 @@ it("recovers dead sender leases and flushes final native events after the silent
 		}),
 	).toBe("");
 	const until = Date.now() + 3_000;
-	while (!existsSync(received) && Date.now() < until)
+	// The writer creates the file before it writes: wait for a whole line.
+	while (
+		!(existsSync(received) && readFileSync(received, "utf8").endsWith("\n")) &&
+		Date.now() < until
+	)
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	const batches = readFileSync(received, "utf8")
 		.trim()

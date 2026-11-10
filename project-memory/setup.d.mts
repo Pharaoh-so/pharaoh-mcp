@@ -38,3 +38,9 @@ export function applyMemoryHookChoices(
 export function syncMemoryHooks(
 	options?: MemoryHookSetup & { clients?: string[]; graphClients?: string[]; enable?: boolean },
 ): string[];
+
+export function ensureMemoryHooks(
+	info: { name?: string; version?: string } | undefined,
+	credentials: MemoryCredentials | null | undefined,
+	options?: MemoryHookSetup,
+): string[];
