@@ -608,6 +608,26 @@ it("enables memory by default and offers independent default-no worktree cues", 
 	const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
 	expect(hooks.UserPromptSubmit).toHaveLength(1);
 	expect(await choose()).toEqual(decision);
+	// Before the first background check (no hint, never checked) install still sets
+	// the hooks up and says when memory turns on; they stay quiet until a repo is confirmed.
+	const unchecked = { ...credentials, project_memory: undefined };
+	// From an empty client configuration, as on a first install.
+	rmSync(join(home, ".codex/hooks.json"));
+	expect(applyChoice(await choose({ credentials: unchecked }), unchecked)).toEqual(
+		expect.arrayContaining([
+			expect.stringContaining("turns on in each repo once your repos are checked"),
+		]),
+	);
+	expect(
+		JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8")).hooks.UserPromptSubmit,
+	).toHaveLength(1);
+	// An incomplete sign-in check doesn't hold setup back either.
+	rmSync(join(home, ".codex/hooks.json"));
+	const partial = { ...unchecked, project_memory_status: "unavailable" as const };
+	applyChoice(await choose({ credentials: partial }), partial);
+	expect(
+		JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8")).hooks.UserPromptSubmit,
+	).toHaveLength(1);
 });
 
 function applyChoice(decision: Awaited<ReturnType<typeof choose>>, creds = credentials) {
@@ -645,7 +665,11 @@ it("preserves setup after a temporary eligibility failure and deactivates both c
 	applyChoice(await choose({ clients, ask: async () => true }));
 	const before = readHookPreferences(home);
 	const activation = join(home, ".pharaoh/project-memory-client/active.json");
-	const noGrant = { ...credentials, project_memory: undefined };
+	const noGrant = {
+		...credentials,
+		project_memory: undefined,
+		project_memory_checked_at: "2026-11-10T00:00:00Z",
+	};
 	const unavailable = { ...noGrant, project_memory_status: "unavailable" as const };
 	applyChoice(await choose({ clients: ["claude-code"], credentials: unavailable }), unavailable);
 	expect(existsSync(activation)).toBe(true);
@@ -682,7 +706,12 @@ it("turns memory reminders on at proxy start once, visibly, and never over a dec
 		ensureMemoryHooks({ name }, creds, { home, env: {}, cwd: checkout, packageRoot });
 	const claude = join(home, ".claude/settings.json");
 	const codex = join(home, ".codex/hooks.json");
-	expect(ensure("claude-code", { ...credentials, project_memory: undefined })).toEqual([]);
+	const lost = {
+		...credentials,
+		project_memory: undefined,
+		project_memory_checked_at: "2026-11-10T00:00:00Z",
+	};
+	expect(ensure("claude-code", lost)).toEqual([]);
 	expect(existsSync(claude)).toBe(false);
 	expect(ensure("claude-code")).toEqual([
 		expect.stringContaining("run `npx @pharaoh-so/mcp --disable-memory-hooks`"),
@@ -837,12 +866,6 @@ it("keeps working settings and checkout hooks until a replacement is active", ()
 	const legacy = legacySettings();
 	const originalLegacy = readFileSync(legacy, "utf8");
 
-	expect(
-		configure({
-			enable: true,
-			credentials: { ...credentials, project_memory_status: "unavailable" },
-		}).join(" "),
-	).toContain("eligibility could not be checked");
 	expect(
 		configure({
 			enable: true,

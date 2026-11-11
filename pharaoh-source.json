@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "8189461b0a8d67109836240be724ee27d153e17f",
-  "payloadSha256": "de59a5ee883b49f42e78507a4070152d089d97787fc2e379a7136ccff97096a4",
+  "commit": "6d47c6d765b508c3db711ee65a1e4c962423efb1",
+  "payloadSha256": "5af98ea5da910ed49d1457b90d0b103e6c0da2ca1577853301f707ba01401f7d",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -16,7 +16,7 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "38fd58a029c162cb2d9d282c3c9a4641224bf034a1fb3b447aa81a8da34a685f",
+      "sha256": "183b6ff23b3d9ccca8fd8059f48f5a19f0d89982d790e6f8dd77e85d2a4c8012",
       "mode": "100644"
     },
     {
@@ -216,12 +216,12 @@
     },
     {
       "path": "project-memory/setup.d.mts",
-      "sha256": "98d9780a249a8fae9d2a33b32e4b6e015f16eaebce5b7d8069cddf507459d687",
+      "sha256": "b44ca566b733b235c0335279927ad4d1549d4f216c39c2ff528e1cea051149a3",
       "mode": "100644"
     },
     {
       "path": "project-memory/setup.mjs",
-      "sha256": "b86ced92085a294980d9d17424f8b26337374b5aee91d90bc02c026a51548358",
+      "sha256": "dc74db708f25f3da98d93c835cd3119ed0261e6fa812d72e918b61dffaf111a4",
       "mode": "100644"
     },
     {
@@ -431,7 +431,7 @@
     },
     {
       "path": "src/install.ts",
-      "sha256": "7cb7de26815e5c42776980c3f4c97e24e297e995db9cf9faa1747766f187677c",
+      "sha256": "c6b1fa24ee182b492a387b0cad8e130278d4fc24a0cc0c3b4640c729270169ae",
       "mode": "100644"
     },
     {
@@ -531,7 +531,7 @@
     },
     {
       "path": "tests/auth-flow-e2e.integration.test.ts",
-      "sha256": "e69fd564c25f9b1a5e88793b23196ac5428cc22ddbde329ca70951dbb08c59ae",
+      "sha256": "ed71f82b88fe64533e231045dc7c9602f7d593ed0c32da8b7790303a3c8b85e2",
       "mode": "100644"
     },
     {
@@ -591,7 +591,7 @@
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "a7b335a373fad6490b2d779722cd5a8efb75a8887060a1c1a42c15f69ddac673",
+      "sha256": "66ff780135d2b58ca17bd95c74cd3f5c65f7214f66248aa152879628268f9657",
       "mode": "100644"
     },
     {

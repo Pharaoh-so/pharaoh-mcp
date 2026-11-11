@@ -132,6 +132,18 @@ function writeActivation(path, active) {
 	else rmSync(path, { force: true });
 }
 
+/**
+ * A completed check that named no repo: the grant is gone. Before the first
+ * check, or after an incomplete one, the hooks install and stay quiet.
+ */
+function grantLost(credentials) {
+	return (
+		!projectMemoryHint(credentials).length &&
+		Boolean(credentials?.project_memory_checked_at) &&
+		credentials?.project_memory_status !== "unavailable"
+	);
+}
+
 /** Resolve memory defaults and explicit choices after a supported client's MCP registration. */
 export async function chooseMemoryHooks({
 	credentials,
@@ -147,16 +159,13 @@ export async function chooseMemoryHooks({
 			choices.notices.push("Pharaoh: project memory hooks need a POSIX client with system Git.");
 		return choices;
 	}
-	if (credentials?.project_memory_status === "unavailable") {
-		if (requested)
-			choices.notices.push(
-				"Pharaoh: project memory eligibility could not be checked. Retry setup to enable hooks.",
-			);
-		return choices;
-	}
-	if (!projectMemoryHint(credentials).length) {
+	// An incomplete eligibility check doesn't stop setup: the hooks stay quiet until
+	// the background check at the next session start names a repo.
+	// A completed check that found no repo is a lost grant. Before the first check
+	// (it runs at the next session start) the hooks install and stay quiet.
+	if (grantLost(credentials)) {
 		if (requested) choices.notices.push("Pharaoh: this session has no project memory hook grant.");
-		return credentials ? { ...choices, removeUnentitled: true } : choices;
+		return { ...choices, removeUnentitled: true };
 	}
 	if (!clients.length || !hasMemoryGit) {
 		if (requested && !hasMemoryGit)
@@ -322,8 +331,7 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 	const { home = homedir(), env = process.env } = options;
 	const client = nativeMemoryClient(info);
 	if (!client || typeof process.getuid !== "function" || !hasMemoryGit) return [];
-	if (credentials?.project_memory_status === "unavailable") return [];
-	if (!projectMemoryHint(credentials).length) return [];
+	if (grantLost(credentials)) return [];
 	const choice = readHookPreferences(home)[client] ?? {};
 	if (choice.memory === false) return [];
 	let config;
@@ -402,11 +410,7 @@ export function syncMemoryHooks({
 	let digest;
 	const hint = projectMemoryHint(credentials);
 	if (enable) {
-		if (credentials?.project_memory_status === "unavailable")
-			return [
-				"Pharaoh: project memory eligibility could not be checked. Retry setup to enable reminders.",
-			];
-		if (!hint.length) return ["Pharaoh: this session has no project memory hook grant."];
+		if (grantLost(credentials)) return ["Pharaoh: this session has no project memory hook grant."];
 		try {
 			if (!hasMemoryGit) throw new Error("Project memory needs a POSIX client with system Git.");
 			const enrolledRoot = target && matchingMemoryHint(target, hint) ? target.root : undefined;
@@ -471,8 +475,11 @@ export function syncMemoryHooks({
 		if (MEMORY_HOOK_CLIENTS.includes(client)) migrateCheckout(client, target, notices);
 	}
 	if (configured.length) {
+		// One line either way: before the first check, say when memory turns on.
 		notices.push(
-			"Pharaoh project memory reminders are set up for your eligible repositories. Start a new local conversation.",
+			hint.length
+				? "Pharaoh project memory reminders are set up for your eligible repositories. Start a new local conversation."
+				: "Pharaoh project memory is set up; it turns on in each repo once your repos are checked, in the background when your next session starts.",
 		);
 		if (hint.some((entry) => entry?.revision === null))
 			notices.push(
