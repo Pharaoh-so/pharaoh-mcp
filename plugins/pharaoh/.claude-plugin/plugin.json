@@ -1,7 +1,7 @@
 {
 	"name": "pharaoh",
 	"displayName": "Pharaoh",
-	"version": "0.3.79",
+	"version": "0.3.80",
 	"description": "Agents ship invisible bugs. Plan, review and refactor with Pharaoh's map of your GitHub repos, so Claude sees what a change could break before it ships.",
 	"author": {
 		"name": "Pharaoh",
