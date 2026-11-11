@@ -2,6 +2,8 @@ type MemoryCredentials = {
 	sse_url: string;
 	project_memory?: Array<{ repo: string; revision: string | null }>;
 	project_memory_status?: "unavailable";
+	/** Set by a completed hint check; without it, no hint means "not checked yet". */
+	project_memory_checked_at?: string;
 };
 
 type MemoryHookChoices = {

@@ -1033,7 +1033,8 @@ describe("auth-flow E2E", () => {
 		const report = {
 			client: { name: "claude-code", version: "2.1.3" },
 			plugin: "enabled",
-			memoryHooks: process.platform === "win32" ? "unsupported" : "absent",
+			// Turned on at start for a sign-in not yet checked for memory (0.3.81).
+			memoryHooks: process.platform === "win32" ? "unsupported" : "installed",
 			instructions: { user: "missing", managed: "absent", project: "unknown" },
 		};
 		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
@@ -1060,7 +1061,12 @@ describe("auth-flow E2E", () => {
 			params: { name: "get_codebase_map", arguments: {} },
 		});
 		const result = (await harness.waitForResponse(1)).result as Record<string, unknown>;
-		expect(result.content).toEqual([{ type: "text", text: "mock pharaoh: tool=get_codebase_map" }]);
+		// A Claude Code sign-in not yet checked for memory gets the hooks at start,
+		// and the first answered call says so once (with the off command).
+		expect(result.content).toEqual([
+			{ type: "text", text: "mock pharaoh: tool=get_codebase_map" },
+			{ type: "text", text: expect.stringContaining("--disable-memory-hooks") },
+		]);
 		const negotiated = ui
 			? {
 					extensions: {
@@ -1140,7 +1146,8 @@ describe("auth-flow E2E", () => {
 		expect(new Set(mockServer.state.clientReportSessions).size).toBe(2);
 		for (const response of await Promise.all(pending)) {
 			expect(response.error).toBeUndefined();
-			expect(response.result).toMatchObject({ content: result.content });
+			// The memory line rides only the first answered call.
+			expect(response.result).toMatchObject({ content: (result.content as unknown[]).slice(0, 1) });
 			expect((response.result as Record<string, unknown>)._meta).toEqual(resultMeta);
 		}
 		expect(await interrupted).toMatchObject({

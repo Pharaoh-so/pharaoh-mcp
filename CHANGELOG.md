@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `install` no longer waits to learn which of your repos have project memory. It sets up the memory hooks right away; they stay quiet until the check that runs in the background at your next session start confirms a repo, and install says so in one line.
 - Project memory reaches sign-ins from before it existed. The proxy asks the server once a day, read-only, which of your repos have memory; no token rotates, and a failed check leaves your credentials untouched and retries in an hour. `install` asks too, so an existing sign-in gets the memory hooks without signing in again.
 - When a Claude Code or Codex session starts, the proxy turns on the memory reminder hooks if they are missing, and says so once in a tool reply with the off command (`npx @pharaoh-so/mcp --disable-memory-hooks`). It never asks, and it leaves alone anyone who declined, Claude Code with `disableAllHooks`, and a Pharaoh hook entry you edited. Codex runs a new hook only after you review and trust it in `/hooks` or Settings > Hooks.
 - `plugins/pharaoh/`: the Claude directory plugin, generated from the same skills (plan, review, refactor and pharaoh) with the hosted connector at `https://mcp.pharaoh.so/mcp`. It has no hooks or commands and isn't part of the npm package.
