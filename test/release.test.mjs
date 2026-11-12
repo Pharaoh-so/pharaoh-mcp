@@ -343,6 +343,31 @@ test("diagnostic runtime is an exact complete pair bound to verified source", ()
 	);
 });
 
+test("memory capture runtime is an exact complete pair bound to verified source", () => {
+	const capture = ["project-memory/capture.d.mts", "project-memory/capture.mjs"];
+	const complete = [...paths, ...capture];
+	verifyPackPaths(complete, [], complete);
+	for (const omitted of capture) {
+		const partial = complete.filter((path) => path !== omitted);
+		assert.throws(
+			() => verifyPackPaths(partial, [], complete),
+			new RegExp(`Missing npm asset: ${omitted}`),
+		);
+		assert.throws(
+			() => verifyPackPaths(complete, [], partial),
+			/complete memory capture runtime/,
+		);
+	}
+	assert.throws(
+		() => verifyPackPaths(complete, [], paths),
+		/Memory capture assets are absent from the verified source/,
+	);
+	assert.throws(
+		() => verifyPackPaths([...complete, "project-memory/capture-credentials.json"]),
+		/Unexpected npm file: project-memory\/capture-credentials\.json/,
+	);
+});
+
 test("setup output and native runtime require complete verified source and reject extra assets", () => {
 	const setup = ["dist/setup-prompt.generated.js", "dist/setup-prompt.generated.d.ts"];
 	const runtime = [
