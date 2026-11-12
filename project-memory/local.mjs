@@ -69,6 +69,18 @@ export function gitBefore(cwd, deadline, ...command) {
 	}).trim();
 }
 
+/** Git output as printed: `status --porcelain` entries can start with a space. */
+export function gitRaw(cwd, maxBuffer, ...command) {
+	const { args, ...options } = gitProcess(cwd, command);
+	return execFileSync(GIT, args, {
+		...options,
+		encoding: "utf8",
+		maxBuffer,
+		timeout: GIT_TIMEOUT_MS,
+		killSignal: "SIGKILL",
+	});
+}
+
 /** Check one literal path or the entire index for flags that can hide worktree edits. */
 export async function visibleGitIndex(cwd, path) {
 	try {
@@ -271,11 +283,16 @@ function acquireLocalLock(directory, path, now) {
 
 /** Update only the bounded worktree cue metadata. Concurrent events can skip. */
 export function updateWorktreeCueState(directory, update, now = Date.now()) {
+	return updateLocalState(directory, "worktree-cues.json", update, now);
+}
+
+/** Update one bounded private state file under a lock; `update` returns { state, context }. */
+export function updateLocalState(directory, name, update, now = Date.now()) {
 	makePrivateDirectory(directory);
-	const release = acquireLocalLock(directory, join(directory, "worktree-cues.lock"), now);
+	const release = acquireLocalLock(directory, join(directory, `${name}.lock`), now);
 	if (!release) return;
 	try {
-		const path = join(directory, "worktree-cues.json");
+		const path = join(directory, name);
 		const file = lstatSync(path, { throwIfNoEntry: false });
 		if (file && file.uid !== process.getuid?.()) return;
 		const before = file ? readJson(path) : undefined;

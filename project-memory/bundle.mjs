@@ -28,6 +28,7 @@ export const LEGACY_MEMORY_RUNTIME_FILES = [
 export const MEMORY_RUNTIME_FILES = [
 	...LEGACY_MEMORY_RUNTIME_FILES,
 	"bundle.mjs",
+	"capture.mjs",
 	"diagnostics-collector.mjs",
 	"diagnostics-sender.mjs",
 	"graph-cues.mjs",

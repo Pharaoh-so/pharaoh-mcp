@@ -9,7 +9,9 @@ const MAX_CALLERS = 60;
 const OUTCOME = {
 	answered: "Known production callers",
 	empty: "No known production callers in the captured scope",
-	missing: "The target was not found in the captured scope",
+	// The saved-worktree reader captures these languages only (snapshot.ts SOURCE_EXTENSIONS)
+	missing:
+		"The target was not found in the captured scope. Local scope reads TypeScript, JavaScript, Vue and Python files only.",
 	ambiguous: "More than one target matches. Use an exact file-qualified function name.",
 	incomplete: "Coverage is incomplete. Omitted or unresolved code may contain other callers.",
 } as const;

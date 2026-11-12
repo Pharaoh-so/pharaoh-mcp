@@ -9,7 +9,14 @@ import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/
 import { updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
 import { pollOnce, requestDeviceCode } from "../src/auth.js";
 import type { Credentials } from "../src/credentials.js";
-import { type InstallOptions, runInstall } from "../src/install.js";
+import {
+	type AgentLaunch,
+	canStartAgent,
+	codexHookUntrusted,
+	type InstallOptions,
+	runInstall,
+	startAgent,
+} from "../src/install.js";
 import { allowReadTools } from "../src/install-skills.js";
 import {
 	configureClients,
@@ -67,15 +74,18 @@ describe("NPX developer install", () => {
 
 	afterEach(() => {
 		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
 		rmSync(home, { recursive: true, force: true });
 	});
 
-	function options(overrides: Partial<InstallOptions> = {}): InstallOptions {
+	/** `clis` answer `--version`, so discovery sees them start; nothing else runs. */
+	function options(overrides: Partial<InstallOptions> = {}, clis: string[] = []): InstallOptions {
 		const clientOptions = {
 			home,
 			env: { PATH: "" },
 			platform: "darwin" as const,
-			execute: () => {
+			execute: (command: string, args: readonly string[]) => {
+				if (clis.includes(command) && args[0] === "--version") return `${command} 2.1.0`;
 				throw new Error("No client CLI is installed in this fixture");
 			},
 		};
@@ -91,9 +101,18 @@ describe("NPX developer install", () => {
 				verifiedRuntimeClients: (flags) => verifiedCodingClients({ ...clientOptions, ...flags }),
 				runtimeIntent: () => null,
 				runtime: async () => launch,
+				// Registration writes the files; a CLI only marks an agent the installer can start.
 				configure: (targets, config, flags) =>
-					configureClients(targets, config, { ...clientOptions, ...flags }),
+					configureClients(
+						targets.map(({ cli: _cli, ...target }) => target),
+						config,
+						{ ...clientOptions, ...flags },
+					),
 				ask: async () => false,
+				choose: async () => 0,
+				startAgent: async () => {
+					throw new Error("No agent starts in this fixture");
+				},
 				write: (...lines) => output.push(...lines),
 				latest: async () => null,
 				...overrides.dependencies,
@@ -133,7 +152,117 @@ describe("NPX developer install", () => {
 		expect(codex).toContain("/fixture/pharaoh.js");
 		expect(active).toEqual(["claude-code", "codex"]);
 		// The user receives the complete investigation request, not only a setup command.
-		expect(output).toContain(SETUP_TOOL_PROMPT);
+		expect(output.join("\n")).toContain(SETUP_TOOL_PROMPT);
+	});
+
+	it("starts the one connected agent CLI with the setup prompt on a yes, and not on a no", async () => {
+		const startAgent = vi.fn(async (_agent: AgentLaunch) => true);
+		const ask = vi.fn<(question: string) => Promise<boolean | null>>();
+		const install = options({ interactive: true, dependencies: { ask, startAgent } }, ["claude"]);
+		ask.mockResolvedValueOnce(true);
+		expect(await runInstall(install)).toBe(0);
+		ask.mockResolvedValueOnce(false);
+		expect(await runInstall(install)).toBe(0);
+		// Codex is connected too, but without a CLI it isn't offered.
+		expect(ask).toHaveBeenCalledTimes(2);
+		expect(startAgent).toHaveBeenCalledExactlyOnceWith({
+			client: "claude-code",
+			command: "claude",
+			args: [SETUP_TOOL_PROMPT],
+		});
+	});
+
+	it("numbers several agent CLIs, starts the one picked, and none on n", async () => {
+		const startAgent = vi.fn(async (_agent: AgentLaunch) => true);
+		const choose = vi.fn<(question: string, count: number) => Promise<number | null>>();
+		choose.mockResolvedValueOnce(2).mockResolvedValueOnce(0);
+		const install = options({ interactive: true, dependencies: { choose, startAgent } }, [
+			"claude",
+			"codex",
+		]);
+		expect(await runInstall(install)).toBe(0);
+		expect(await runInstall(install)).toBe(0);
+		expect(choose.mock.calls.map(([, count]) => count)).toEqual([2, 2]);
+		expect(startAgent).toHaveBeenCalledExactlyOnceWith({
+			client: "codex",
+			command: "codex",
+			args: [SETUP_TOOL_PROMPT],
+		});
+	});
+
+	it("asks and starts nothing without a terminal, or without an agent CLI", async () => {
+		const ask = vi.fn(async () => true);
+		const choose = vi.fn(async () => 1);
+		const startAgent = vi.fn(async () => true);
+		const dependencies = { ask, choose, startAgent };
+		expect(await runInstall(options({ dependencies }, ["claude", "codex"]))).toBe(0);
+		// The whole summary: who's connected, then one command per agent.
+		expect(output).toHaveLength(3);
+		expect(output.slice(1)).toEqual([
+			`Start: claude "${SETUP_TOOL_PROMPT}"`,
+			`Start: codex "${SETUP_TOOL_PROMPT}"`,
+		]);
+		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
+		expect([ask, choose, startAgent].map((fn) => fn.mock.calls.length)).toEqual([0, 0, 0]);
+		const tty = { isTTY: true };
+		expect(canStartAgent({}, tty, tty)).toBe(true);
+		expect(canStartAgent({ CI: "true" }, tty, tty)).toBe(false);
+		expect(canStartAgent({ NO_COLOR: "1" }, tty, tty)).toBe(false);
+		expect(canStartAgent({}, {}, tty)).toBe(false);
+	});
+
+	it("gives Claude Desktop, which has no CLI, the request to send: alone, or beside a CLI", async () => {
+		mkdirSync(join(home, "Library", "Application Support", "Claude"), { recursive: true });
+		rmSync(join(home, ".claude"), { recursive: true });
+		rmSync(join(home, ".codex"), { recursive: true });
+		const ask = vi.fn(async () => false);
+		const dependencies = { ask, startAgent: vi.fn(async () => true) };
+		const desktopLines = () =>
+			output.filter((line) => line.includes("Claude Desktop") && line.includes(SETUP_TOOL_PROMPT));
+		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
+		expect(ask).not.toHaveBeenCalled();
+		expect(desktopLines()).toHaveLength(1);
+		output.length = 0;
+		expect(await runInstall(options({ interactive: true, dependencies }, ["claude"]))).toBe(0);
+		expect(ask).toHaveBeenCalledTimes(1);
+		expect(desktopLines()).toHaveLength(1);
+	});
+
+	it("asks for the Codex hook trust only while a Pharaoh hook has no trust record", async () => {
+		const codex = join(home, ".codex");
+		const hooks = join(codex, "hooks.json");
+		const own = { hooks: [{ type: "command", command: "own-hook" }] };
+		const pharaoh = {
+			hooks: [{ type: "command", command: "'hook.mjs' --pharaoh-local-worktree-v1" }],
+		};
+		writeFileSync(hooks, JSON.stringify({ hooks: { PreToolUse: [own, pharaoh] } }));
+		expect(codexHookUntrusted(codex)).toBe(true);
+		expect(await runInstall(options())).toBe(0);
+		expect(output.filter((line) => line.includes("/hooks"))).toHaveLength(1);
+		// Trusting Pharaoh's position is enough: the user's own untrusted hook isn't ours to raise.
+		const trusted = `[hooks.state."${hooks}:pre_tool_use:1:0"]\ntrusted_hash = "sha256:fixture"\n`;
+		writeFileSync(join(codex, "config.toml"), trusted);
+		expect(codexHookUntrusted(codex)).toBe(false);
+		expect(codexHookUntrusted(join(home, "missing"))).toBe(false);
+	});
+
+	it("starts an agent in this terminal without npx's npm_ variables", async () => {
+		const seen = join(home, "agent-env.json");
+		vi.stubEnv("npm_config_yes", "true");
+		// The user's npm credentials and registry stay: an .npmrc may read ${NPM_TOKEN}.
+		vi.stubEnv("NPM_TOKEN", "kept");
+		vi.stubEnv("npm_config_registry", "https://registry.example/");
+		const script = `require("node:fs").writeFileSync(${JSON.stringify(seen)}, JSON.stringify(process.env))`;
+		expect(
+			await startAgent({ client: "codex", command: process.execPath, args: ["-e", script] }),
+		).toBe(true);
+		const env = JSON.parse(readFileSync(seen, "utf8"));
+		expect(env.NPM_TOKEN).toBe("kept");
+		expect(env.npm_config_registry).toBe("https://registry.example/");
+		expect(env).not.toHaveProperty("npm_config_yes");
+		expect(await startAgent({ client: "codex", command: join(home, "missing"), args: [] })).toBe(
+			false,
+		);
 	});
 
 	it("uses a fresh device grant after an exact new registration and keeps optional errors nonfatal", async () => {
@@ -216,7 +345,8 @@ describe("NPX developer install", () => {
 			["codex", true],
 		]);
 		expect(overlapping).toBe(false);
-		expect(output).toContain("Codex CLI / Desktop: runtime analytics enabled.");
+		// Enabled analytics stays quiet; only the client that failed gets a line.
+		expect(output.filter((line) => line.includes("--client codex"))).toEqual([]);
 		expect(output.join("\n")).toContain("--runtime-enable --client claude-code");
 		expect(output.join("\n")).not.toContain("Private enrollment ticket");
 		expect(output.join("\n")).not.toContain(APPROVAL.approvalId);
@@ -436,12 +566,11 @@ describe("NPX developer install", () => {
 			),
 		).toBe(0);
 		expect(active).toEqual([]);
-		expect(output.join("\n")).toContain("No new enabled agent connection");
 	});
 
 	it("supports shell-only sign-in without treating absent apps as errors", async () => {
 		expect(await runInstall(options({ dependencies: { discover: () => [] } }))).toBe(0);
-		expect(output.join("\n")).toContain("Pharaoh CLI is signed in");
+		expect(output.join("\n")).toContain("get_codebase_map --repo");
 	});
 
 	it("routes install --help before the question-tool CLI without starting sign-in", () => {

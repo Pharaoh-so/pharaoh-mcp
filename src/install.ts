@@ -1,6 +1,9 @@
 /** One-command developer setup. Registration is separate from an answered tool call. */
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { parse as parseToml } from "smol-toml";
 import {
 	automaticRuntimeIntent,
 	disableRuntime,
@@ -17,6 +20,7 @@ import {
 } from "./auth.js";
 import { type Credentials, readCredentials, saveAuthorizedCredentials } from "./credentials.js";
 import {
+	askChoice,
 	askYesNo,
 	DEFAULT_SERVER,
 	INSTALL_COMMAND,
@@ -28,7 +32,7 @@ import {
 import type { ClientId, ClientOutcome, LaunchConfig } from "./install-types.js";
 import { installedLocalAnalyzer } from "./local/worker-host.js";
 import { loadAndRefresh } from "./refresh.js";
-import { ensureRuntime, RuntimeSetupError } from "./runtime.js";
+import { ensureRuntime, RuntimeSetupError, registryKey } from "./runtime.js";
 import { describeRuntimeDisable, enableInstalledRuntime } from "./runtime-command.js";
 import {
 	type ClientTarget,
@@ -47,20 +51,162 @@ import {
 } from "./version.js";
 
 const LABELS: Record<ClientId, string> = {
-	"claude-code": "Claude Code CLI",
-	codex: "Codex CLI / Desktop",
-	"claude-desktop": "Claude Desktop Chat / Code",
+	"claude-code": "Claude Code",
+	codex: "Codex",
+	"claude-desktop": "Claude Desktop",
 };
 
-const STATUS: Record<ClientOutcome["status"], string> = {
-	configured: "configured",
-	"already-configured": "already configured",
-	"preserved-custom": "kept your custom connection",
-	"preserved-disabled": "kept disabled",
+/** Statuses the summary reports on their own line; the rest fold into "Connected to …". */
+const PROBLEMS: Partial<Record<ClientOutcome["status"], string>> = {
 	unavailable: "not available",
 	ambiguous: "needs attention",
 	failed: "setup failed",
 };
+
+/** Statuses whose client has an enabled `pharaoh` entry the setup prompt can reach. */
+const CONNECTED: ReadonlySet<ClientOutcome["status"]> = new Set([
+	"configured",
+	"already-configured",
+	"preserved-custom",
+]);
+
+/** An agent CLI the installer can start with the setup prompt. */
+export interface AgentLaunch {
+	/** The client whose registration the agent reads. */
+	client: ClientId;
+	/** The executable `discoverClients` saw start (`claude`, `codex`). */
+	command: string;
+	/** The setup prompt, as the agent's first message. */
+	args: string[];
+}
+
+/**
+ * Whether the installer may ask a question and start an agent here: a terminal
+ * on both sides, and not CI or a NO_COLOR environment.
+ */
+export function canStartAgent(
+	env: NodeJS.ProcessEnv = process.env,
+	input: { isTTY?: boolean } = process.stdin,
+	output: { isTTY?: boolean } = process.stderr,
+): boolean {
+	return Boolean(input.isTTY && output.isTTY && !env.CI && !env.NO_COLOR);
+}
+
+/**
+ * A variable npx set for this process: its lowercase `npm_*` run-script values
+ * and INIT_CWD. Registry and credential settings stay, as in runtime.ts: a user
+ * may export them, and an `.npmrc` may read `NPM_TOKEN`.
+ */
+function npxVariable(key: string): boolean {
+	if (key === "INIT_CWD") return true;
+	if (!key.startsWith("npm_")) return false;
+	return !(key.startsWith("npm_config_") && registryKey(key.slice("npm_config_".length)));
+}
+
+/**
+ * Run an agent CLI in this terminal with inherited stdio and wait for it to exit.
+ * npx's own variables are dropped: `npm_config_yes` would let every `npx` the
+ * agent runs install without asking.
+ * @returns false when the agent could not be started.
+ */
+export function startAgent(agent: AgentLaunch): Promise<boolean> {
+	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !npxVariable(key)));
+	return new Promise((resolve) => {
+		// The agent owns Ctrl-C now; this process only waits for it.
+		const ignore = () => {};
+		process.on("SIGINT", ignore);
+		const done = (started: boolean) => {
+			process.off("SIGINT", ignore);
+			resolve(started);
+		};
+		spawn(agent.command, agent.args, { stdio: "inherit", env })
+			.once("error", () => done(false))
+			.once("exit", () => done(true));
+	});
+}
+
+/** "Claude Code", "Claude Code and Codex", "Claude Desktop, Claude Code and Codex". */
+function listNames(outcomes: readonly ClientOutcome[]): string {
+	const names = outcomes.map((outcome) => LABELS[outcome.client]);
+	return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
+}
+
+/** The command a person can paste to start an agent with the setup prompt. */
+function agentCommand(agent: AgentLaunch): string {
+	return `${agent.command} ${agent.args.map((arg) => JSON.stringify(arg)).join(" ")}`;
+}
+
+/**
+ * The next step, as the summary's last line. In a terminal it asks to start an
+ * agent CLI with the setup prompt: [Y/n] for one, a numbered pick for several
+ * (Enter = 1). Without a terminal it prints each agent's command. Claude Desktop
+ * has no command to start, so it gets the request to send, as does a person
+ * with no agent CLI.
+ * @param desktop - What to do in a connected Claude Desktop (restart after a new registration).
+ * @returns The agent the person chose to start, or null.
+ */
+async function chooseAgent(
+	agents: AgentLaunch[],
+	desktop: "open" | "restart" | null,
+	interactive: boolean,
+	{ ask, choose, write }: Pick<InstallDependencies, "ask" | "choose" | "write">,
+): Promise<AgentLaunch | null> {
+	const request = JSON.stringify(SETUP_TOOL_PROMPT);
+	if (desktop) write(`Claude Desktop: ${desktop} it and ask ${request}`);
+	else if (!agents.length) write(`Next: ask your agent ${request}`);
+	if (!agents.length) return null;
+	if (!interactive) {
+		write(...agents.map((agent) => `Start: ${agentCommand(agent)}`));
+		return null;
+	}
+	if (agents.length === 1) {
+		const label = LABELS[agents[0].client];
+		return (await ask(`Start ${label} with the setup prompt? [Y/n] `)) ? agents[0] : null;
+	}
+	const options = agents.map((agent, i) => `[${i + 1}] ${LABELS[agent.client]}`).join("  ");
+	const picked = await choose(`Start with: ${options}  (Enter = 1, n = skip) `, agents.length);
+	return picked ? agents[picked - 1] : null;
+}
+
+/** The part of Codex's hooks.json the trust check reads: event → groups → handlers. */
+type CodexHooks = Record<string, Array<{ hooks?: Array<{ command?: unknown; args?: unknown }> }>>;
+
+/** Pharaoh's hook commands: project memory, saved-worktree and runtime hooks. */
+const PHARAOH_HOOK = /pharaoh-project-memory:|--pharaoh-(?:local-worktree|runtime)-v1/;
+
+/**
+ * Whether Codex has a Pharaoh hook it hasn't trusted yet: a hooks.json entry with
+ * no `trusted_hash` at its position (`<hooks.json>:<event>:<group>:<hook>`) in
+ * config.toml's `[hooks.state]`. A hook that changed at a trusted position isn't
+ * caught here; Codex asks for that review itself.
+ * @param root - Codex's configuration directory (CODEX_HOME or ~/.codex).
+ */
+export function codexHookUntrusted(root: string): boolean {
+	const hooksPath = join(root, "hooks.json");
+	const configPath = join(root, "config.toml");
+	try {
+		if (!existsSync(hooksPath)) return false;
+		const hooks: CodexHooks = JSON.parse(readFileSync(hooksPath, "utf8")).hooks ?? {};
+		const config = existsSync(configPath) ? parseToml(readFileSync(configPath, "utf8")) : {};
+		const state =
+			(config.hooks as { state?: Record<string, { trusted_hash?: unknown }> } | undefined)?.state ??
+			{};
+		return Object.entries(hooks).some(([event, groups]) => {
+			const name = event.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase();
+			return groups.some((group, i) =>
+				(group.hooks ?? []).some(
+					(hook, j) =>
+						PHARAOH_HOOK.test(
+							`${hook.command ?? ""} ${Array.isArray(hook.args) ? hook.args.join(" ") : ""}`,
+						) && typeof state[`${hooksPath}:${name}:${i}:${j}`]?.trusted_hash !== "string",
+				),
+			);
+		});
+	} catch {
+		// An unreadable file shows no trust gap; Codex still asks for its own review.
+		return false;
+	}
+}
 
 /** Reject a mistyped explicit install command before it can authorize or change settings. */
 export function validateInstallArguments(args: readonly string[]): string | null {
@@ -150,6 +296,8 @@ interface InstallDependencies {
 	runtime: () => Promise<LaunchConfig>;
 	configure: typeof configureClients;
 	ask: (question: string) => Promise<boolean | null>;
+	choose: (question: string, count: number) => Promise<number | null>;
+	startAgent: (agent: AgentLaunch) => Promise<boolean>;
 	write: (...lines: string[]) => void;
 	latest: typeof fetchLatestVersion;
 	freshRuntimeClients: typeof freshRuntimeClients;
@@ -164,8 +312,14 @@ export interface InstallOptions {
 	server: string;
 	migrateLegacy?: boolean;
 	skipRuntime?: boolean;
+	/** Ask questions and offer to start an agent (default: canStartAgent()). */
 	interactive?: boolean;
-	afterConfigure?: (credentials: Credentials, clients: string[]) => Promise<void>;
+	/** Optional client setup. Lines passed to `note` show in the summary, after the client list. */
+	afterConfigure?: (
+		credentials: Credentials,
+		clients: string[],
+		note: (...lines: string[]) => void,
+	) => Promise<void>;
 	/** Isolated process/filesystem fixtures use the same orchestration without real user writes. */
 	dependencies?: Partial<InstallDependencies>;
 }
@@ -183,6 +337,8 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		runtime: () => ensureRuntime({ onDiagnostic: printLines }),
 		configure: configureClients,
 		ask: (question) => askYesNo(question),
+		choose: (question, count) => askChoice(question, count),
+		startAgent,
 		write: printLines,
 		latest: fetchLatestVersion,
 		freshRuntimeClients,
@@ -260,11 +416,14 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			)
 			.map((outcome) => outcome.client);
 		let extrasFailed = false;
+		const notes: string[] = [];
 		try {
-			await options.afterConfigure?.(credentials, codingClients);
+			await options.afterConfigure?.(credentials, codingClients, (...lines) =>
+				notes.push(...lines),
+			);
 		} catch {
 			extrasFailed = true;
-			write(`Pharaoh: optional client setup could not finish. Retry ${INSTALL_COMMAND}.`);
+			notes.push(`Pharaoh: optional client setup could not finish. Retry ${INSTALL_COMMAND}.`);
 		}
 		const managedProxyRoot = dirname(dirname(launch.args[0]));
 		if (options.server === DEFAULT_SERVER && installedLocalAnalyzer(managedProxyRoot)) {
@@ -318,43 +477,66 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			} catch {
 				// Analytics setup failures leave the working client connection available.
 			}
-			write(
-				activated
-					? `${label}: runtime analytics enabled.`
-					: `${label}: runtime analytics could not be enabled. Check --runtime-status or try --runtime-enable --client ${client}.`,
-			);
+			if (!activated)
+				write(
+					`${label}: runtime analytics could not be enabled. Check --runtime-status or try --runtime-enable --client ${client}.`,
+				);
 		}
 
-		write("", "Pharaoh CLI is signed in.");
+		// The summary: who's connected, a line per problem or needed action, then
+		// the next step as the last line. Everything else stays quiet.
+		const connected = outcomes.filter((outcome) => CONNECTED.has(outcome.status));
+		if (connected.length) write(`✓ Connected to ${listNames(connected)}`);
 		for (const outcome of outcomes) {
-			write(
-				`  ${LABELS[outcome.client]}: ${STATUS[outcome.status]}.${outcome.detail ? ` ${outcome.detail}` : ""}`,
-			);
-			if (outcome.recovery) write(`    ${outcome.recovery}`);
+			const label = LABELS[outcome.client];
+			const problem = PROBLEMS[outcome.status];
+			// "…registration was kept." only restates the status; other details explain it.
+			const detail = outcome.detail && !/ was kept\.$/.test(outcome.detail) ? outcome.detail : "";
+			if (problem) write(`✗ ${label}: ${problem}.${detail ? ` ${detail}` : ""}`);
+			else if (detail) write(`! ${label}: ${detail}`);
+			if (outcome.recovery) write(`  ${outcome.recovery}`);
 		}
-		const enabled = outcomes.some(
-			(outcome) => outcome.status === "configured" || outcome.status === "already-configured",
-		);
-		if (enabled) {
-			write(
-				"Restart configured desktop apps or start a new CLI session; accept any client trust prompt.",
-				"Ask your agent:",
-				"",
-				SETUP_TOOL_PROMPT,
-				"",
-			);
-		} else {
-			write("No new enabled agent connection was established. Your existing choices were kept.");
-		}
-		write(`Shell queries: ${NPX_COMMAND} get_codebase_map --repo <name>`);
+		if (notes.length) write(...notes);
+		const codex = targets.find((target) => target.client === "codex");
+		if (
+			codex &&
+			connected.some((outcome) => outcome.client === "codex") &&
+			codexHookUntrusted(dirname(codex.path))
+		)
+			write("! Codex: trust the Pharaoh hook in /hooks");
 		const latest = await dependencies.latest();
 		if (latest && isNewerVersion(latest, getPackageVersion())) {
-			write(`Pharaoh: ${latest} is available. Upgrade: ${UPGRADE_COMMAND}`);
+			write(`Pharaoh ${latest} is available: ${UPGRADE_COMMAND}`);
 		}
-		return extrasFailed ||
+		const status =
+			extrasFailed ||
 			outcomes.some((outcome) => outcome.status === "failed" || outcome.status === "ambiguous")
-			? 1
-			: 0;
+				? 1
+				: 0;
+
+		if (!connected.length) {
+			write(
+				"No agent connected; your existing choices were kept.",
+				`Shell queries: ${NPX_COMMAND} get_codebase_map --repo <name>`,
+			);
+			return status;
+		}
+		const agents: AgentLaunch[] = targets.flatMap((target) =>
+			target.cli && connected.some((outcome) => outcome.client === target.client)
+				? [{ client: target.client, command: target.cli, args: [SETUP_TOOL_PROMPT] }]
+				: [],
+		);
+		const desktop = connected.find((outcome) => outcome.client === "claude-desktop");
+		const agent = await chooseAgent(
+			agents,
+			desktop ? (desktop.status === "configured" ? "restart" : "open") : null,
+			options.interactive ?? canStartAgent(),
+			dependencies,
+		);
+		if (agent && !(await dependencies.startAgent(agent))) {
+			write(`Pharaoh: ${agent.command} could not start. Run: ${agentCommand(agent)}`);
+		}
+		return status;
 	} catch (error) {
 		// Never print native process errors: npm output/configuration may contain registry secrets.
 		if (error instanceof RuntimeSetupError) write(`Pharaoh: ${error.message}`);

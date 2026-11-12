@@ -18,16 +18,19 @@ try {
 	const [client, root, repo] = process.argv.slice(2);
 	const input = await readStdin(1024 * 1024);
 	let result;
-	if (root === "--user" || root === "--graph" || root === "--diagnostics") {
+	if (["--user", "--graph", "--diagnostics", "--capture"].includes(root)) {
 		const reminder = root === "--user";
 		const diagnosticOnly = root === "--diagnostics";
+		const capture = root === "--capture";
 		const event = input?.hook_event_name;
 		if (
 			reminder
 				? event !== "UserPromptSubmit"
 				: diagnosticOnly
 					? !["PostToolUse", "Stop", "StopFailure", "Interrupt", "SessionEnd"].includes(event)
-					: event !== "PreToolUse" && event !== "PostToolUse"
+					: capture
+						? !["PostToolUse", "PostToolUseFailure", "Stop"].includes(event)
+						: event !== "PreToolUse" && event !== "PostToolUse"
 		)
 			process.exit(0);
 		let structuralSearch;
@@ -43,9 +46,22 @@ try {
 		const choice = readHookPreferences()[client];
 		if (
 			choice?.memory === false ||
-			(diagnosticOnly ? choice?.diagnostics !== true : !reminder && choice?.graph === false)
+			(diagnosticOnly && choice?.diagnostics !== true) ||
+			(capture && choice?.capture === false)
 		)
 			process.exit(0);
+		// The memory cue is part of project memory; the structural cues are their own choice.
+		const structural = choice?.graph === true;
+		if (event === "PreToolUse" && !structural) process.exit(0);
+		if (
+			capture &&
+			event !== "Stop" &&
+			["Bash", "exec_command", "functions.exec_command"].includes(input.tool_name)
+		) {
+			// Most shell commands are not checks: leave before reading git or the sign-in.
+			const { checkCommand } = await import("./capture.mjs");
+			if (!checkCommand(input.tool_input?.command ?? input.tool_input?.cmd)) process.exit(0);
+		}
 		if (diagnosticOnly) protectLocalShellAttempt(client, input);
 		const credentials = await readMemoryCredentials();
 		const eligible = await resolveMemoryHookTarget(
@@ -56,7 +72,22 @@ try {
 			deadline,
 		);
 		if (!eligible || performance.now() >= deadline) process.exit(0);
-		if ((reminder || diagnosticOnly) && choice?.diagnostics === true) {
+		if (capture) {
+			// Learning never depends on the plan: capture runs wherever memory hooks run.
+			const { captureDirectory, recordToolEvent, stopDecision } = await import("./capture.mjs");
+			const options = {
+				client,
+				target: eligible,
+				directory: captureDirectory(memoryClientRoot()),
+				memorySession: projectMemorySession(credentials),
+				binding: conversationMemoryBinding(client, input.session_id),
+			};
+			if (event === "Stop") result = stopDecision(input, options);
+			else {
+				const ask = recordToolEvent(input, options);
+				if (ask) result = { hookSpecificOutput: { hookEventName: event, additionalContext: ask } };
+			}
+		} else if ((reminder || diagnosticOnly) && choice?.diagnostics === true) {
 			const { requestMemoryPolicy } = await import("./memory-api.mjs");
 			const { collectDiagnosticEvent } = await import("./diagnostics-collector.mjs");
 			const policy = await requestMemoryPolicy(eligible.repo, credentials, deadline, client);
@@ -71,15 +102,23 @@ try {
 			stateDirectory: memoryClientRoot(),
 		};
 		if (reminder) {
+			if (choice?.capture !== false) {
+				// Automatic capture needs the turn's start to see edits no edit hook reports.
+				const { beginTurn, captureDirectory } = await import("./capture.mjs");
+				beginTurn(input, {
+					client,
+					target: eligible,
+					directory: captureDirectory(memoryClientRoot()),
+				});
+			}
 			if (skipMemoryPrompt(input.prompt)) process.exit(0);
-			// Clients with edit cues get the records that cite a file fetched ahead of the first edit.
-			if (choice?.graph === true)
-				(await import("./graph-cues.mjs")).primeAnchoredMemory(eligible.repo, cue);
+			// The records that cite a file are fetched ahead of the first edit, for its memory cue.
+			(await import("./graph-cues.mjs")).primeAnchoredMemory(eligible.repo, cue);
 			result = memoryReminder(eligible.repo, conversationMemoryBinding(client, input.session_id));
-		} else {
+		} else if (!capture) {
 			const { memoryCue, worktreeCue } = await import("./graph-cues.mjs");
 			const outputs = [
-				worktreeCue(input, { ...cue, structuralSearch, deadline }),
+				structural ? worktreeCue(input, { ...cue, structuralSearch, deadline }) : undefined,
 				memoryCue(input, cue),
 			].flatMap((output) => output?.hookSpecificOutput.additionalContext ?? []);
 			if (outputs.length)

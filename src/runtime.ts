@@ -123,7 +123,8 @@ function runner(options: RuntimeOptions): RuntimeRunner {
 	return options.run ?? ((file, args, settings) => execFileSync(file, args, settings));
 }
 
-function registryKey(key: string): boolean {
+/** Whether an npm setting names a registry, proxy, TLS or credential value a user configures. */
+export function registryKey(key: string): boolean {
 	return (
 		/^(?:@[^:]+:)?registry$/i.test(key) ||
 		/^(?:https?-proxy|proxy|noproxy|strict-ssl|cafile|ca(?:\[\])?|cert|key|certfile|keyfile|always-auth|_auth|_authtoken|username|_password|email)$/i.test(

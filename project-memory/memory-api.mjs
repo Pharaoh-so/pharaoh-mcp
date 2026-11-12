@@ -8,9 +8,11 @@ const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const STATUS = new Set(["candidate", "approved", "superseded", "retracted", "archived"]);
 
 export class PilotError extends Error {
-	constructor(message, rejected = false) {
+	constructor(message, rejected = false, status = undefined) {
 		super(message);
 		this.rejected = rejected;
+		/** The HTTP status Pharaoh answered, when it answered. */
+		this.status = status;
 	}
 }
 
@@ -127,6 +129,7 @@ export async function requestMemory(
 			"recall",
 			"anchored",
 			"capture",
+			"forget",
 			"expand",
 			"diagnostics",
 			"diagnostics/control",
@@ -192,9 +195,17 @@ export async function requestMemory(
 		// The shared credential file can now name a different OAuth session. Do
 		// not reuse an already prepared operation under newly loaded credentials.
 		if (response.status === 401)
-			throw new PilotError("Pharaoh rejected this sign-in. Reconnect before trying again.", true);
+			throw new PilotError(
+				"Pharaoh rejected this sign-in. Reconnect before trying again.",
+				true,
+				401,
+			);
 		if (response.status === 404)
-			throw new PilotError("Project memory is unavailable for this repository or account.", true);
+			throw new PilotError(
+				"Project memory is unavailable for this repository or account.",
+				true,
+				404,
+			);
 		if (response.status === 400 || response.status === 413)
 			throw new PilotError(
 				"Pharaoh rejected the memory payload. Check its shape, size, and sensitive content.",
@@ -206,7 +217,7 @@ export async function requestMemory(
 				true,
 			);
 		if (response.status === 429)
-			throw new PilotError("Pharaoh project memory reached its request limit.", true);
+			throw new PilotError("Pharaoh project memory reached its request limit.", true, 429);
 		if (operation === "capture" && response.status >= 500) {
 			throw new PilotError(
 				"Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying.",
@@ -228,6 +239,7 @@ export async function requestMemory(
 		throw error;
 	}
 	if (["diagnostics", "diagnostics/control", "feedback"].includes(operation)) return result;
+	if (operation === "forget") return { forgotten: result?.forgotten === true };
 	if (operation === "anchored" && Array.isArray(result?.records))
 		return { records: result.records.filter((record) => UUID.test(record?.id ?? "")) };
 	if (
@@ -287,7 +299,11 @@ export async function requestMemory(
 		UUID.test(result.record.id)
 	) {
 		return {
-			record: { id: result.record.id, status: result.record.status },
+			record: {
+				id: result.record.id,
+				status: result.record.status,
+				...(Number.isInteger(result.record.version) && { version: result.record.version }),
+			},
 			...diagnosticResponseFields(result),
 		};
 	}

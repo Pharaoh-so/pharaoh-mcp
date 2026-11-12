@@ -7,6 +7,7 @@ export type HookPreferences = Partial<
 			memory?: boolean;
 			graph?: boolean;
 			diagnostics?: boolean;
+			capture?: boolean;
 			diagnosticsPolicyVersion?: string;
 			diagnosticsGeneration?: string;
 		}
@@ -20,6 +21,7 @@ export function writeHookPreferences(
 	expected?: HookPreferences,
 ): void;
 export function resetHookPreferences(disable: boolean, home?: string): void;
+export function setMemoryCapture(enabled: boolean, home?: string): void;
 export function memoryHookStateForClient(
 	info: { name?: string; version?: string } | undefined,
 	options?: { home?: string; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform },

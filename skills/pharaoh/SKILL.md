@@ -1,7 +1,7 @@
 ---
 name: pharaoh
 prompt-name: pharaoh-core
-description: "Which Pharaoh tool answers which structural question about a mapped repo (TypeScript, JavaScript, Python): where code lives, what calls it, what a change affects, what a module contains and what nothing runs. Use when Pharaoh's tools are connected and the question is about the structure of a repo Pharaoh maps."
+description: "Which Pharaoh tool answers which structural question about a mapped repo (TypeScript, JavaScript, Python, C and C++): where code lives, what calls it, what a change affects, what a module contains and what nothing runs. Use when Pharaoh's tools are connected and the question is about the structure of a repo Pharaoh maps."
 description-npx: "Codebase knowledge graph — gives AI agents full architectural awareness. Query architecture, dependencies, blast radius, module context, and function search instead of reading files one at a time. Code intelligence via MCP: understand any codebase in seconds."
 version: 0.3.1
 homepage: https://pharaoh.so

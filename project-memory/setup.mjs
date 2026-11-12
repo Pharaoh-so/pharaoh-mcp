@@ -8,7 +8,16 @@ import {
 	diagnosticsPolicyEligible,
 	revokeDiagnosticConsent,
 } from "./diagnostics-collector.mjs";
-import { hasLegacyHooks, hasUserHooks, updateHooks, updateUserHooks } from "./hook-config.mjs";
+import {
+	hasCaptureHook,
+	hasLegacyHooks,
+	hasMemoryCueHook,
+	hasStructuralCueHooks,
+	hasUserHookMode,
+	hasUserHooks,
+	updateHooks,
+	updateUserHooks,
+} from "./hook-config.mjs";
 import { atomicWrite, checkout, git, hasMemoryGit } from "./local.mjs";
 import { requestMemory, requestMemoryPolicy } from "./memory-api.mjs";
 import {
@@ -104,6 +113,7 @@ function syncUserHooks(
 	alreadyActive,
 	graphCues,
 	diagnostics,
+	capture,
 ) {
 	let known = Boolean(alreadyActive);
 	try {
@@ -117,7 +127,7 @@ function syncUserHooks(
 				hasLegacyHooks(settings.config, client, target.root);
 			writeSettings(
 				settings,
-				updateUserHooks(settings.config, client, hookPath, node, graphCues, diagnostics),
+				updateUserHooks(settings.config, client, hookPath, node, graphCues, diagnostics, capture),
 				target,
 				checkoutHook,
 			);
@@ -209,17 +219,14 @@ export async function chooseMemoryHooks({
 			// A reminder reinstall must not restore diagnostic handlers from an old choice.
 			if (
 				choice.diagnostics === true &&
-				(!active[client] || !hasUserHooks({ hooks: { Stop: config?.hooks?.Stop } }, client))
+				(!active[client] || !hasUserHookMode(config, ["Stop"], "--diagnostics"))
 			)
 				delete choice.diagnostics;
-			let graphEnabled =
-				choice.graph === true &&
-				["PreToolUse", "PostToolUse"].every((event) =>
-					hasUserHooks({ hooks: { [event]: config?.hooks?.[event] } }, client),
-				);
+			// The memory cue comes with memory; this choice covers only the structural cues.
+			let graphEnabled = choice.graph === true && hasStructuralCueHooks(config, client);
 			if (requested || choice.graph === undefined || (choice.graph === true && !graphEnabled)) {
 				const answer = await ask(
-					`Enable advisory Pharaoh worktree cues in ${label}? [y/N] `,
+					`Also show Pharaoh's structural hints in ${label}? When your agent greps for code, they suggest the Pharaoh query; after a codebase map, they say when an edited file differs from the mapped revision. [y/N] `,
 					false,
 				);
 				if (answer !== null) {
@@ -322,10 +329,12 @@ export function applyMemoryHookChoices(decision, options = {}) {
 
 /**
  * At proxy start, give the identified Claude Code or Codex client the default
- * memory reminder without asking, as the installer would. Leaves alone anyone who
- * declined or ran --disable-memory-hooks, Claude Code with disableAllHooks, and an
- * edited or unreadable Pharaoh entry; adds graph cues or diagnostics only where
- * the user consented before. Returns lines for the user when it turned hooks on.
+ * memory hooks without asking, as the installer would: the reminder and the
+ * edit-time memory cue, added to installs from before the cue came with memory.
+ * Leaves alone anyone who declined or ran --disable-memory-hooks, Claude Code with
+ * disableAllHooks, and an edited or unreadable Pharaoh entry; keeps the structural
+ * cues and diagnostics only where the user chose them before. Returns lines for
+ * the user when it turned hooks on, or added a Codex hook that needs trusting.
  */
 export function ensureMemoryHooks(info, credentials, options = {}) {
 	const { home = homedir(), env = process.env } = options;
@@ -348,23 +357,25 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 		if (state !== "installed") return [];
 		const digest = packagedMemoryBundle(options.packageRoot).sha256;
 		const current = readActiveMemoryClients(home)[client];
-		if (current === digest && existsSync(bundledHook(join(memoryClientRoot(home), digest))))
+		if (
+			hasMemoryCueHook(config) &&
+			(choice.capture === false || hasCaptureHook(config)) &&
+			current === digest &&
+			existsSync(bundledHook(join(memoryClientRoot(home), digest)))
+		)
 			return [];
 	}
+	const addsCue = !fresh && !hasMemoryCueHook(config);
+	const addsCapture = !fresh && choice.capture !== false && !hasCaptureHook(config);
 	// As at setup: a saved diagnostics choice never puts back handlers the user removed.
 	if (
 		choice.diagnostics === true &&
-		(!readActiveMemoryClients(home)[client] ||
-			!hasUserHooks({ hooks: { Stop: config?.hooks?.Stop } }, client))
+		(!readActiveMemoryClients(home)[client] || !hasUserHookMode(config, ["Stop"], "--diagnostics"))
 	) {
 		const { diagnostics: _removed, ...kept } = choice;
 		writeHookPreferences({ ...readHookPreferences(home), [client]: kept }, home);
 	}
-	const graph =
-		choice.graph === true &&
-		["PreToolUse", "PostToolUse"].every((event) =>
-			hasUserHooks({ hooks: { [event]: config?.hooks?.[event] } }, client),
-		);
+	const graph = choice.graph === true && hasStructuralCueHooks(config, client);
 	syncMemoryHooks({
 		...options,
 		credentials,
@@ -372,6 +383,22 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 		graphClients: graph ? [client] : [],
 		enable: true,
 	});
+	if ((addsCue || addsCapture) && client === "codex") {
+		// Announce only what the settings now show: a failed write is retried next start, silently.
+		let added = false;
+		try {
+			const next = inspectSettings(userSettings(client, home, env)).config;
+			added = (addsCue && hasMemoryCueHook(next)) || (addsCapture && hasCaptureHook(next));
+		} catch {
+			// Unreadable settings: nothing to announce.
+		}
+		if (!added) return [];
+		return [
+			addsCapture
+				? "Pharaoh added project memory hooks to Codex: after a turn that changed code and passed a check, your agent saves the fix and its reason to project memory. Review and trust them in /hooks or Settings > Hooks. To stop automatic saving, run `npx @pharaoh-so/mcp --disable-memory-capture`."
+				: "Pharaoh added a project memory hook to Codex: when your agent edits a file, it shows what project memory says about that file. Review and trust it in /hooks or Settings > Hooks. To turn memory hooks off, run `npx @pharaoh-so/mcp --disable-memory-hooks`.",
+		];
+	}
 	if (!fresh || memoryHookStateForClient(info, { home, env }) !== "installed") return [];
 	const label = client === "codex" ? "Codex" : "Claude Code";
 	return [
@@ -447,6 +474,7 @@ export function syncMemoryHooks({
 					active[client],
 					graphClients.includes(client),
 					preferences[client]?.memory !== false && preferences[client]?.diagnostics === true,
+					preferences[client]?.capture !== false,
 				);
 			} catch (error) {
 				if (replacing) writeActivation(activePath, active);
@@ -473,22 +501,6 @@ export function syncMemoryHooks({
 	}
 	for (const client of enable ? configured : clients) {
 		if (MEMORY_HOOK_CLIENTS.includes(client)) migrateCheckout(client, target, notices);
-	}
-	if (configured.length) {
-		// One line either way: before the first check, say when memory turns on.
-		notices.push(
-			hint.length
-				? "Pharaoh project memory reminders are set up for your eligible repositories. Start a new local conversation."
-				: "Pharaoh project memory is set up; it turns on in each repo once your repos are checked, in the background when your next session starts.",
-		);
-		if (hint.some((entry) => entry?.revision === null))
-			notices.push(
-				"A connected repository is still mapping. Its reminder will run after the mapped revision is available.",
-			);
-		if (configured.includes("codex"))
-			notices.push(
-				"In Codex, review and trust the Pharaoh reminder in /hooks or Settings > Hooks.",
-			);
 	}
 	return notices;
 }

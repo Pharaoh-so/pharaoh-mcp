@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
 	appendFileSync,
+	chmodSync,
 	cpSync,
 	existsSync,
 	lstatSync,
@@ -337,11 +338,12 @@ function prompt(
 	});
 }
 
-it("runs the worktree cue from the installed, activated bundle", () => {
+it("runs the worktree cue from the installed, activated bundle", async () => {
 	writeCredentials(
 		{ ...credentials, project_memory_session: "79d35b00-e832-4b5b-972d-acbb9ec59622" },
 		join(home, ".pharaoh/credentials.json"),
 	);
+	writeHookPreferences({ codex: { memory: true, graph: true } }, home);
 	configure({ enable: true, clients: ["codex"], graphClients: ["codex"] });
 	const settings = join(home, ".codex/hooks.json");
 	const run = (command: string, env: NodeJS.ProcessEnv = {}) =>
@@ -386,6 +388,47 @@ it("runs the worktree cue from the installed, activated bundle", () => {
 		additionalContext: expect.stringContaining("search_functions"),
 	});
 	expect(run(command)).toBe("");
+	// Memory on without the structural choice: the grep cue stays quiet.
+	writeHookPreferences({ codex: { memory: true } }, home);
+	expect(run("rg -n 'function otherWidget'")).toBe("");
+	// The installed edit hook shows memory about the file whatever the structural choice.
+	mkdirSync(join(checkout, "src"), { recursive: true });
+	await refreshAnchoredMemory(repo, {
+		directory: join(home, ".pharaoh/project-memory-client"),
+		binding: "79d35b00-e832-4b5b-972d-acbb9ec59622",
+		request: async () => ({
+			records: [
+				{
+					id: "7f194a39-40b5-4a19-8d42-f3ed3aeb6034",
+					version: 1,
+					kind: "decision",
+					status: "approved",
+					summary: "Sessions restore only with membership proof.",
+					createdAt: "2026-11-04T10:00:00.000Z",
+					paths: ["src/recovery.ts"],
+				},
+			],
+		}),
+	});
+	for (const [index, choice] of [{ memory: true, graph: false }, { memory: true }].entries()) {
+		writeHookPreferences({ codex: choice }, home);
+		const edited = execFileSync("/bin/sh", ["-c", hookCommand(settings, "PostToolUse")], {
+			cwd: checkout,
+			env: { ...process.env, HOME: home },
+			encoding: "utf8",
+			input: JSON.stringify({
+				hook_event_name: "PostToolUse",
+				cwd: checkout,
+				session_id: `memory-${index}`,
+				tool_name: "apply_patch",
+				tool_input: {
+					command: "*** Begin Patch\n*** Update File: src/recovery.ts\n*** End Patch\n",
+				},
+				tool_response: "Success. Updated the following files:\nM src/recovery.ts",
+			}),
+		});
+		expect(edited).toContain("Sessions restore only with membership proof.");
+	}
 	resetHookPreferences(true, home);
 	expect(run("rg 'function anotherWidget'")).toBe("");
 });
@@ -613,11 +656,8 @@ it("enables memory by default and offers independent default-no worktree cues", 
 	const unchecked = { ...credentials, project_memory: undefined };
 	// From an empty client configuration, as on a first install.
 	rmSync(join(home, ".codex/hooks.json"));
-	expect(applyChoice(await choose({ credentials: unchecked }), unchecked)).toEqual(
-		expect.arrayContaining([
-			expect.stringContaining("turns on in each repo once your repos are checked"),
-		]),
-	);
+	// Memory is hands-off: a successful install prints nothing (only failures speak).
+	expect(applyChoice(await choose({ credentials: unchecked }), unchecked)).toEqual([]);
 	expect(
 		JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8")).hooks.UserPromptSubmit,
 	).toHaveLength(1);
@@ -655,8 +695,11 @@ it("honors an opt-out saved after setup answers and re-offers cues only when req
 	writeFileSync(path, JSON.stringify(config));
 	applyChoice(await choose({ ask: async () => null }));
 	const hooks = JSON.parse(readFileSync(path, "utf8")).hooks;
+	// Removing either structural hook turns those cues off until asked again; the memory
+	// cue is part of memory and comes back beside the user's own hook.
 	expect(hooks.PreToolUse).toBeUndefined();
-	expect(hooks.PostToolUse).toEqual(unrelated);
+	expect(hooks.PostToolUse).toHaveLength(2);
+	expect(hooks.PostToolUse).toEqual(expect.arrayContaining(unrelated));
 	expect(hooks.UserPromptSubmit).toHaveLength(1);
 });
 
@@ -724,6 +767,22 @@ it("turns memory reminders on at proxy start once, visibly, and never over a dec
 		expect.stringContaining("in Codex"),
 		expect.stringContaining("/hooks or Settings > Hooks"),
 	]);
+	// An install from before the memory cue came with memory gains it once, without the
+	// structural cues; Codex is told to trust the new hook.
+	const reminderOnly = JSON.parse(readFileSync(codex, "utf8"));
+	delete reminderOnly.hooks.PostToolUse;
+	writeFileSync(codex, JSON.stringify(reminderOnly));
+	chmodSync(join(home, ".codex"), 0o500);
+	try {
+		expect(ensure("codex")).toEqual([]);
+	} finally {
+		chmodSync(join(home, ".codex"), 0o700);
+	}
+	expect(ensure("codex")).toEqual([expect.stringContaining("/hooks or Settings > Hooks")]);
+	const upgraded = JSON.parse(readFileSync(codex, "utf8")).hooks;
+	// The edit cue and the capture recorder; no structural cues.
+	expect([upgraded.PostToolUse?.length, upgraded.PreToolUse]).toEqual([2, undefined]);
+	expect(ensure("codex")).toEqual([]);
 	const edited = written.replace("--user", "--user --mine");
 	writeFileSync(claude, edited);
 	expect(memoryHookStateForClient({ name: "claude-code" }, { home, env: {} })).toBe("unknown");
@@ -748,15 +807,19 @@ it("never puts back diagnostic handlers at proxy start, on first install or a bu
 			packageRoot,
 		});
 	const claude = join(home, ".claude/settings.json");
-	const stop = () => JSON.parse(readFileSync(claude, "utf8")).hooks?.Stop;
+	// The capture hook also runs on Stop; this test is about the diagnostics handler.
+	const stop = () =>
+		JSON.stringify(JSON.parse(readFileSync(claude, "utf8")).hooks?.Stop ?? []).includes(
+			"--diagnostics",
+		);
 	writeHookPreferences({ "claude-code": { memory: true, diagnostics: true } }, home);
 	expect(ensure()).toHaveLength(1);
-	expect(stop()).toBeUndefined();
+	expect(stop()).toBe(false);
 	expect(readHookPreferences(home)["claude-code"]?.diagnostics).toBeUndefined();
 	// Installed with consent, then the user removes the Stop handler and a new bundle ships.
 	writeHookPreferences({ "claude-code": { memory: true, diagnostics: true } }, home);
 	configure({ enable: true, clients: ["claude-code"] });
-	expect(stop()).toBeDefined();
+	expect(stop()).toBe(true);
 	const settings = JSON.parse(readFileSync(claude, "utf8"));
 	delete settings.hooks.Stop;
 	writeFileSync(claude, JSON.stringify(settings));
@@ -765,7 +828,7 @@ it("never puts back diagnostic handlers at proxy start, on first install or a bu
 	appendFileSync(new URL("project-memory/local.mjs", packageRoot), "\n// next release\n");
 	expect(ensure()).toEqual([]);
 	expect(readFileSync(active, "utf8")).not.toBe(before);
-	expect(stop()).toBeUndefined();
+	expect(stop()).toBe(false);
 	expect(memoryHookStateForClient({ name: "claude-code" }, { home, env: {} })).toBe("installed");
 });
 
@@ -893,7 +956,7 @@ it("keeps working settings and checkout hooks until a replacement is active", ()
 	expect(readFileSync(activation, "utf8")).toBe(originalActivation);
 	expect(readFileSync(legacy, "utf8")).toBe(originalLegacy);
 
-	expect(configure({ enable: true, clients: ["codex"] }).join(" ")).toContain("review and trust");
+	expect(configure({ enable: true, clients: ["codex"] })).toEqual([]);
 	expect(readFileSync(activation, "utf8")).not.toBe(originalActivation);
 	expect(prompt(codex, checkout)).toContain("pharaoh_memory_recall");
 	expect(readFileSync(legacy, "utf8")).not.toContain("pharaoh-project-memory");
@@ -935,8 +998,8 @@ it("disables quietly with unrelated linked settings and fails for known linked h
 	expect(clean).toMatchObject({ status: 0, stdout: "", stderr: "" });
 	expect(readFileSync(external, "utf8")).toBe(unrelated);
 	expect(readHookPreferences(home)).toEqual({
-		"claude-code": { memory: false, graph: false, diagnostics: false },
-		codex: { memory: false, graph: false, diagnostics: false },
+		"claude-code": { memory: false, graph: false, diagnostics: false, capture: false },
+		codex: { memory: false, graph: false, diagnostics: false, capture: false },
 	});
 
 	const managed = JSON.stringify({
@@ -956,14 +1019,18 @@ it("disables quietly with unrelated linked settings and fails for known linked h
 it("opts in to one MCP reminder per client and scopes it to eligible worktrees", () => {
 	const claude = join(home, ".claude/settings.json");
 	const codex = join(home, ".codex/hooks.json");
-	expect(configure({ enable: true }).join(" ")).toContain("review and trust");
+	expect(configure({ enable: true })).toEqual([]);
 	const first = readFileSync(codex, "utf8");
 	configure({ enable: true });
 	expect(readFileSync(codex, "utf8")).toBe(first);
 	const worktree = join(home, "worktree");
 	git("worktree", "add", "--quiet", "--detach", worktree);
 	for (const file of [claude, codex]) {
-		expect(Object.keys(JSON.parse(readFileSync(file, "utf8")).hooks)).toEqual(["UserPromptSubmit"]);
+		expect(Object.keys(JSON.parse(readFileSync(file, "utf8")).hooks)).toEqual(
+			file === claude
+				? ["UserPromptSubmit", "Stop", "PostToolUse", "PostToolUseFailure"]
+				: ["UserPromptSubmit", "Stop", "PostToolUse"],
+		);
 		const reminder = prompt(file, worktree);
 		expect(reminder).toContain("pharaoh_memory_recall");
 		expect(reminder).toContain("pharaoh_memory_expand");
@@ -989,9 +1056,7 @@ it("can opt in from an unrelated repository rooted at the user's home", () => {
 	const dotfiles = "https://github.com/fixture/dotfiles.git";
 	execFileSync("git", ["init", "-q", home]);
 	execFileSync("git", ["-C", home, "remote", "add", "origin", dotfiles]);
-	expect(configure({ cwd: home, clients: ["codex"], enable: true }).join(" ")).toContain(
-		"memory reminders are set up",
-	);
+	expect(configure({ cwd: home, clients: ["codex"], enable: true })).toEqual([]);
 	expect(existsSync(join(home, ".codex/hooks.json"))).toBe(true);
 });
 
@@ -1016,9 +1081,7 @@ it("uses only readiness metadata to enable the reminder after first map", () => 
 	const credentialsFile = join(home, ".pharaoh/credentials.json");
 	writeCredentials(pending, credentialsFile);
 	const settings = join(home, ".codex/hooks.json");
-	expect(configure({ credentials: pending, clients: ["codex"], enable: true }).join(" ")).toContain(
-		"still mapping",
-	);
+	expect(configure({ credentials: pending, clients: ["codex"], enable: true })).toEqual([]);
 	const installed = readFileSync(settings, "utf8");
 	// Later prompts run the private installed runtime, independent of the package cache.
 	rmSync(packageRoot, { recursive: true });
@@ -1177,7 +1240,7 @@ it("restores the reminder after cleanup without accepting piped input for option
 	const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
 	expect(hooks.UserPromptSubmit).toHaveLength(1);
 	expect(hooks.PreToolUse).toBeUndefined();
-	expect(hooks.Stop).toBeUndefined();
+	expect(JSON.stringify(hooks.Stop)).not.toContain("--diagnostics");
 	expect(readHookPreferences(home).codex?.diagnostics).toBeUndefined();
 	expect(String(input.read())).toBe("y\ny\n");
 	expect(output.read()).toBeNull();

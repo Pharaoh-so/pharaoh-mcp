@@ -661,7 +661,7 @@ function installClaudeCodeCommands(home: string): {
  *
  * @param kept - File names from `runInstallSkills().keptCommands`.
  */
-export function formatKeptCommands(kept: readonly string[]): string | null {
+function formatKeptCommands(kept: readonly string[]): string | null {
 	if (kept.length === 0) return null;
 	return `Pharaoh: kept your own ~/.claude/commands/${kept.join(", ")} (not Pharaoh's file). Delete one and re-run to take Pharaoh's version.`;
 }
@@ -1000,24 +1000,22 @@ export function allowReadTools(home = homedir()): AllowReadToolsResult {
 }
 
 /**
- * The line the interactive setup prints for an `allowReadTools` result, so
- * the user always learns what was done to their settings.
+ * The install summary's line for an `allowReadTools` result: said only when
+ * setup changed the user's settings, so they learn what was done to them.
  *
  * @param result - What `allowReadTools` returned.
  */
-export function describeAllowReadTools(result: AllowReadToolsResult): string {
+export function describeAllowReadTools(result: AllowReadToolsResult): string | null {
 	const count = PHARAOH_ALLOW_RULES.length;
 	switch (result) {
 		case "added":
-			return `Pharaoh: allowed ${count} read-only tools by name in ~/.claude/settings.json (permissions.allow). pharaoh_manage_repo, which switches or refreshes a repo, still asks first.`;
+			return `✓ Claude Code: ${count} read-only Pharaoh tools allowed in ~/.claude/settings.json`;
 		case "migrated":
-			return `Pharaoh: replaced the blanket mcp__pharaoh rule in ~/.claude/settings.json with ${count} read-only tools by name. pharaoh_manage_repo asks first again.`;
+			return `✓ Claude Code: ~/.claude/settings.json now allows ${count} read-only Pharaoh tools by name, not all of them`;
 		case "current":
-			return `Pharaoh: ~/.claude/settings.json already allows the ${count} read-only tools by name.`;
 		case "no-settings":
-			return "Pharaoh: no ~/.claude/settings.json yet, so Pharaoh's tools ask before they run. The rules to allow the read-only tools are in the README (Security).";
 		case "runtime-hooks-only":
-			return "Pharaoh: the settings file only has runtime hook configuration. Pharaoh's tools ask before they run.";
+			return null;
 		case "error":
 			return "Pharaoh: ~/.claude/settings.json could not be read safely. Pharaoh's tools ask before they run.";
 	}
@@ -1596,20 +1594,19 @@ export async function offerAgentInstructionLines(
 	});
 }
 
+/**
+ * The install summary's line for an instruction-file outcome: only what still
+ * needs the person. Null when the file is as they chose (added, updated, declined)
+ * or there was no terminal to ask in: the setup tool shows the line when it's missing.
+ *
+ * @param result - One client's `offerAgentInstructionLines` outcome.
+ */
 export function describeAgentInstructionOutcome(result: AgentInstructionOutcome): string | null {
 	switch (result.outcome) {
-		case "added":
-			return `Pharaoh: added its instruction to ${result.path}. --clean removes the managed block.`;
-		case "updated":
-			return `Pharaoh: updated its instruction in ${result.path}.`;
-		case "declined":
-			return `Pharaoh: kept ${result.path}. Setup remembers your choice.`;
 		case "kept":
 			return `Pharaoh: preserved ${result.path} because its path or managed markers need attention. You can add the instruction by hand: ${PHARAOH_CLAUDE_MD_LINE}`;
 		case "failed":
 			return `Pharaoh: could not update ${result.path}. You can add the instruction by hand: ${PHARAOH_CLAUDE_MD_LINE}`;
-		case "no-terminal":
-			return `Pharaoh: add the instruction to ${result.path} interactively with npx ${PACKAGE_NAME}@latest install.`;
 		default:
 			return null;
 	}

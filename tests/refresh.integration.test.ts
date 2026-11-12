@@ -842,6 +842,95 @@ describe("updateMemoryHint", () => {
 		expect(out.trim()).toBe("stored after 2");
 	});
 
+	/** Breaks when: proven repos wait for the whole check, or a check cut short holds the next one off for an hour. */
+	it("stores proven repos before the check finishes, and a check cut short frees up in minutes", async () => {
+		const partial = vi.fn();
+		let finish: (response: Response) => void = () => {};
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn()
+				.mockImplementationOnce(
+					answer({
+						project_memory: [{ repo: "acme/repo", revision: null }],
+						project_memory_status: "unavailable",
+						project_memory_retry_after_ms: 1,
+					}),
+				)
+				.mockImplementationOnce(() => new Promise<Response>((resolve) => (finish = resolve))),
+		);
+		const done = updateMemoryHint(DEFAULT_SERVER, { path, onPartial: partial });
+		// On disk while the rest of the check is still pending, and not marked done.
+		await vi.waitFor(() => expect(partial).toHaveBeenCalledOnce());
+		const midway = readCredentials(path);
+		expect([
+			midway?.project_memory,
+			midway?.project_memory_checked_at,
+			midway?.access_token,
+		]).toEqual([[{ repo: "acme/repo", revision: null }], undefined, "phat_0"]);
+		finish(
+			Response.json({
+				project_memory: [{ repo: "acme/other", revision: null }],
+				project_memory_checked: true,
+			}),
+		);
+		expect((await done)?.project_memory).toEqual([{ repo: "acme/other", revision: null }]);
+		// A late partial answer never re-adds a repo a newer completed check removed.
+		vi.stubGlobal(
+			"fetch",
+			answer({
+				project_memory: [{ repo: "acme/repo", revision: null }],
+				project_memory_status: "unavailable",
+			}),
+		);
+		writeCredentials(
+			{
+				...creds("phat_0", "phrt_0", false),
+				project_memory_checked_at: new Date(Date.now() + 60_000).toISOString(),
+			},
+			path,
+		);
+		await updateMemoryHint(DEFAULT_SERVER, { path, force: true });
+		expect(readCredentials(path)?.project_memory).toBeUndefined();
+		// A partial answer adds to the stored list, so a recheck cut short keeps yesterday's repos.
+		const [a, b, c] = ["acme/a", "acme/b", "acme/c"].map((repo) => ({ repo, revision: null }));
+		writeCredentials({ ...creds("phat_0", "phrt_0", false), project_memory: [a, c] }, path);
+		const merged = vi.fn();
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn()
+				.mockImplementationOnce(
+					answer({
+						project_memory: [a, b],
+						project_memory_status: "unavailable",
+						project_memory_retry_after_ms: 1,
+					}),
+				)
+				.mockImplementationOnce(() => new Promise<Response>(() => {})),
+		);
+		void updateMemoryHint(DEFAULT_SERVER, {
+			path,
+			force: true,
+			onPartial: merged,
+			background: true,
+		});
+		await vi.waitFor(() => expect(merged).toHaveBeenCalledOnce());
+		expect(readCredentials(path)?.project_memory).toEqual([a, c, b]);
+		// A check in flight claims only a few minutes, so a session that ends mid-check doesn't block the next for an hour.
+		rmSync(`${path}.memory-check`, { force: true });
+		writeCredentials(creds("phat_0", "phrt_0", false), path);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(() => new Promise(() => {})),
+		);
+		void updateMemoryHint(DEFAULT_SERVER, { path, background: true });
+		await vi.waitFor(() => expect(existsSync(`${path}.memory-check`)).toBe(true));
+		const claim = Number(readFileSync(`${path}.memory-check`, "utf8")) - Date.now();
+		expect(claim).toBeGreaterThan(170_000);
+		expect(claim).toBeLessThanOrEqual(180_000);
+	});
+
 	it.each([
 		["a rejected token", async () => new Response("{}", { status: 401 })],
 		["an incomplete check", answer({ project_memory_status: "unavailable" })],
@@ -856,8 +945,16 @@ describe("updateMemoryHint", () => {
 		const fetch = vi.fn(reply);
 		vi.stubGlobal("fetch", fetch);
 		expect(await updateMemoryHint(DEFAULT_SERVER, { path })).toBeNull();
+		// The failure holds the next check off for an hour, not just the in-flight claim.
+		expect(Number(readFileSync(`${path}.memory-check`, "utf8")) - Date.now()).toBeGreaterThan(
+			3_500_000,
+		);
 		expect(await updateMemoryHint(DEFAULT_SERVER, { path })).toBeNull();
 		expect(fetch).toHaveBeenCalledTimes(1);
 		expect(readFileSync(path)).toEqual(before);
+		// Once the hold has passed, the next start checks again.
+		writeFileSync(`${path}.memory-check`, String(Date.now() - 1));
+		await updateMemoryHint(DEFAULT_SERVER, { path });
+		expect(fetch.mock.calls.length).toBeGreaterThan(1);
 	});
 });

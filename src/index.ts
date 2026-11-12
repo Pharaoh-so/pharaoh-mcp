@@ -13,7 +13,7 @@
  *                      place — the stdio session never disconnects.
  */
 import { fileURLToPath } from "node:url";
-import { resetHookPreferences } from "../project-memory/preferences.mjs";
+import { resetHookPreferences, setMemoryCapture } from "../project-memory/preferences.mjs";
 import {
 	applyMemoryHookChoices,
 	chooseMemoryHooks,
@@ -34,7 +34,6 @@ import {
 	allowReadTools,
 	describeAgentInstructionOutcome,
 	describeAllowReadTools,
-	formatKeptCommands,
 	offerAgentInstructionLines,
 	runInstallSkills,
 } from "./install-skills.js";
@@ -75,18 +74,26 @@ function clearMemoryHookChoices(disable: boolean): boolean {
 	}
 }
 
-async function setupMemoryHooks(credentials: Credentials, clients: string[], requested: boolean) {
+async function setupMemoryHooks(
+	credentials: Credentials,
+	clients: string[],
+	requested: boolean,
+	note: (...lines: string[]) => void,
+) {
 	try {
+		if (requested) setMemoryCapture(true);
 		const decision = await chooseMemoryHooks({
 			credentials,
 			clients,
 			requested,
 			ask: askYesNoInTerminal,
 		});
+		// Memory runs on its own (DECIDED 2026-11-10: hands-off), so install reports only its
+		// failures, which start "Pharaoh:". The Codex trust step is the summary's own check.
 		const notices = applyMemoryHookChoices(decision, { credentials });
-		if (notices.length) printLines(...notices);
+		note(...notices.filter((notice) => notice.startsWith("Pharaoh:")));
 	} catch {
-		printLines("Pharaoh: could not finish local project memory setup. MCP remains available.");
+		note("Pharaoh: could not finish local project memory setup. MCP remains available.");
 	}
 }
 
@@ -187,6 +194,38 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	if (args.includes("--disable-memory-capture")) {
+		try {
+			setMemoryCapture(false);
+			printLines(
+				"Pharaoh: automatic project memory saving is off. Run `npx @pharaoh-so/mcp install --memory-hooks` to turn it back on.",
+			);
+		} catch {
+			printLines("Pharaoh: could not update local project memory choices.");
+			process.exitCode = 1;
+		}
+		return;
+	}
+
+	if (args.includes("--undo-memory")) {
+		const { undoLastCapture } = await import("../project-memory/capture.mjs");
+		try {
+			// The npm package has no bundled runtime/refresh.js; its own refresh module is the same code.
+			const { undone, repo } = await undoLastCapture({ helper: await import("./refresh.js") });
+			printLines(
+				undone
+					? `Pharaoh: removed the last automatic save from ${repo} project memory.`
+					: "Pharaoh: there is no automatic save to undo.",
+			);
+		} catch {
+			printLines(
+				"Pharaoh: could not reach project memory to undo the last save. Retry, or remove it at https://mcp.pharaoh.so/setup/memory.",
+			);
+			process.exitCode = 1;
+		}
+		return;
+	}
+
 	if (args.includes("--disable-memory-hooks")) {
 		const saved = clearMemoryHookChoices(true);
 		if (!reportMemorySetup() || !saved) process.exitCode = 1;
@@ -242,26 +281,23 @@ async function main(): Promise<void> {
 			server,
 			migrateLegacy: args.includes("--migrate-legacy"),
 			skipRuntime: args.includes("--skip-runtime"),
-			afterConfigure: async (credentials, clients) => {
+			// Questions print as they're asked; the outcomes wait for the install summary.
+			afterConfigure: async (credentials, clients, note) => {
 				let extraFailures = false;
 				const codingClients = clients.filter(
 					(client): client is "claude-code" | "codex" =>
 						client === "claude-code" || client === "codex",
 				);
 				if (clients.length) {
-					const { keptCommands, errors } = runInstallSkills(undefined, {
-						silent: true,
-						clients: codingClients,
-					});
-					const kept = formatKeptCommands(keptCommands);
-					if (kept) printLines(kept);
+					const { errors } = runInstallSkills(undefined, { silent: true, clients: codingClients });
 					if (errors.length) {
-						printLines(...errors);
+						note(...errors);
 						extraFailures = true;
 					}
 				}
 				if (clients.includes("claude-code")) {
-					printLines(describeAllowReadTools(allowReadTools()));
+					const allowed = describeAllowReadTools(allowReadTools());
+					if (allowed) note(allowed);
 				}
 				const instructions = await offerAgentInstructionLines(
 					codingClients,
@@ -270,12 +306,12 @@ async function main(): Promise<void> {
 				);
 				for (const instruction of instructions) {
 					const message = describeAgentInstructionOutcome(instruction);
-					if (message) printLines(message);
+					if (message) note(message);
 				}
 				if (instructions.some((instruction) => instruction.outcome === "failed")) {
 					extraFailures = true;
 				}
-				await setupMemoryHooks(credentials, clients, args.includes("--memory-hooks"));
+				await setupMemoryHooks(credentials, clients, args.includes("--memory-hooks"), note);
 				if (extraFailures) throw new Error("Optional client setup needs attention.");
 			},
 		});
@@ -348,9 +384,13 @@ async function main(): Promise<void> {
 	const proxy = await startInSseMode(creds);
 	proxy.setMemoryCredentials(creds);
 	// Sign-ins from before project memory have no hint: ask once, in the background.
-	void updateMemoryHint(server, { background: true }).then(
-		(updated) => updated && proxy.setMemoryCredentials(updated),
-	);
+	void updateMemoryHint(server, {
+		background: true,
+		onPartial: (partial) => proxy.setMemoryCredentials(partial),
+	})
+		.then((updated) => updated && proxy.setMemoryCredentials(updated))
+		// ALLOWED-CATCH: the memory check is optional; MCP keeps working without it
+		.catch(() => {});
 	await waitForProxyLifetime(proxy, server);
 }
 
