@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configureClients, verifiedCodingClients } from "../src/client-install.js";
-import { askYesNo, parseArgs } from "../src/helpers.js";
+import { askChoice, askYesNo, parseArgs } from "../src/helpers.js";
 import {
 	allowReadTools,
 	CODEX_SKILLS,
@@ -1390,6 +1390,17 @@ describe("the Pharaoh-first line in ~/.claude/CLAUDE.md (interactive setup only)
 		expect(await reply("\n", false, false)).toBe(false);
 		expect(await reply("N\n")).toBe(false);
 		expect(await reply("maybe\n", true)).toBe(null);
+		// The numbered pick: Enter is 1, a listed number picks it, n skips, others ask again.
+		const pick = async (input: string) => {
+			const stdin = new PassThrough();
+			const answer = askChoice("Start which? ", 2, stdin, new PassThrough());
+			stdin.end(input);
+			return answer;
+		};
+		expect(await pick("\n")).toBe(1);
+		expect(await pick("3\n2\n")).toBe(2);
+		expect(await pick("no\n")).toBe(0);
+		expect(await pick("1.5\n")).toBe(null);
 	});
 
 	it("askYesNo on a terminal drops an Enter pressed before the question showed", async () => {

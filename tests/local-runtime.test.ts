@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLocalAuthorization } from "../src/local/authorization.js";
 import type { LocalDelivery } from "../src/local/contracts.js";
+import { formatLocalBlastRadius } from "../src/local/format.js";
 import { createLocalBlastRuntime } from "../src/local/runtime.js";
 import { captureLocalSnapshot, type LocalSnapshot } from "../src/local/snapshot.js";
 import { installedLocalAnalyzer, runLocalAnalyzer } from "../src/local/worker-host.js";
@@ -62,7 +63,13 @@ describe("saved-worktree delivery freshness", () => {
 			depth: 1,
 			targets: [],
 			callers: [
-				{ uid: "caller", name: captured.fingerprint, file: "src/saved.ts", module: "src", depth: 1 },
+				{
+					uid: "caller",
+					name: captured.fingerprint,
+					file: "src/saved.ts",
+					module: "src",
+					depth: 1,
+				},
 			],
 		}));
 
@@ -95,4 +102,15 @@ describe("saved-worktree delivery freshness", () => {
 			expect(abort).toHaveBeenCalledWith(permit, "error");
 		}
 	});
+});
+
+// Local scope reads only some languages: a target it can't find says which, so a miss
+// in a C/C++ file isn't taken for "no callers".
+it("names the languages local scope reads when a target is missing", () => {
+	const answer = formatLocalBlastRadius(
+		{ status: "missing", coverage: "complete", depth: 1, targets: [], callers: [] },
+		snapshot("caller"),
+	);
+	expect(JSON.stringify(answer.content)).toContain("Local scope reads TypeScript");
+	expect(answer._meta?.pharaohScope).toMatchObject({ scope: "local", status: "missing" });
 });

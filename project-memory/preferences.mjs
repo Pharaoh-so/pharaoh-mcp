@@ -36,7 +36,7 @@ export function readHookPreferences(home = homedir()) {
 				!choice ||
 				typeof choice !== "object" ||
 				Array.isArray(choice) ||
-				["memory", "graph", "diagnostics"].some(
+				["memory", "graph", "diagnostics", "capture"].some(
 					(key) => Object.hasOwn(choice, key) && typeof choice[key] !== "boolean",
 				) ||
 				(choice.diagnosticsPolicyVersion !== undefined &&
@@ -71,16 +71,46 @@ export function writeHookPreferences(clients, home = homedir(), expected) {
 	atomicWrite(path, `${JSON.stringify({ version: 1, clients })}\n`);
 }
 
+/** Turn automatic capture on or off for every client; the hooks read it at each event. */
+export function setMemoryCapture(enabled, home = homedir()) {
+	// Off drops turn logs and saves not sent yet; the receipt stays for --undo-memory.
+	if (!enabled) clearCaptureState(home, false);
+	const choices = readHookPreferences(home);
+	for (const client of MEMORY_HOOK_CLIENTS) {
+		const { capture: _previous, ...choice } = choices[client] ?? {};
+		if (!enabled) choices[client] = { ...choice, capture: false };
+		else if (Object.keys(choice).length) choices[client] = choice;
+		else delete choices[client];
+	}
+	writeHookPreferences(choices, home);
+}
+
+/** Remove automatic capture's local state: turn logs, unsent saves and, with `receipt`, the undo receipt. */
+function clearCaptureState(home, receipt) {
+	const directory = join(memoryClientRoot(home), "capture");
+	for (const name of existsSync(directory) ? readdirSync(directory) : [])
+		if (receipt || name !== "last.json")
+			rmSync(join(directory, name), { force: true, recursive: true });
+}
+
 export function resetHookPreferences(disable, home = homedir()) {
 	if (typeof process.getuid !== "function") return;
 	// Sign-out, clean and disable all drop the locally kept memory records.
+	clearCaptureState(home, true);
 	const root = memoryClientRoot(home);
 	for (const name of existsSync(root) ? readdirSync(root) : [])
 		if (ANCHORED_MEMORY_FILE.test(name)) rmSync(join(root, name), { force: true });
 	const choices = readHookPreferences(home);
 	for (const client of MEMORY_HOOK_CLIENTS) {
 		const choice = choices[client];
-		if (disable) choices[client] = { ...choice, memory: false, graph: false, diagnostics: false };
+		if (disable)
+			choices[client] = {
+				...choice,
+				memory: false,
+				graph: false,
+				diagnostics: false,
+				capture: false,
+			};
 		else if (choice) {
 			if (choice.memory === true) delete choice.memory;
 			if (choice.graph === true) delete choice.graph;

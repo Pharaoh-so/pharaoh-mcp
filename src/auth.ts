@@ -252,10 +252,11 @@ export function printAuthSuccess(
 	tenant: string | null,
 	repoCount: number,
 ): void {
-	const parts: string[] = ["✓ Authenticated"];
+	const parts: string[] = ["✓ Signed in"];
 	if (login) parts.push(`as ${login}`);
-	if (tenant) parts.push(`(${tenant})`);
-	parts.push(`— ${repoCount} repo${repoCount === 1 ? "" : "s"} connected`);
+	// A personal account is named after its login; say it once.
+	if (tenant && tenant.toLowerCase() !== login?.toLowerCase()) parts.push(`(${tenant})`);
+	parts.push(`· ${repoCount} repo${repoCount === 1 ? "" : "s"}`);
 	process.stderr.write(`${parts.join(" ")}\n`);
 }
 

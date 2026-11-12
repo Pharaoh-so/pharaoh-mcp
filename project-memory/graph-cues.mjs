@@ -98,7 +98,7 @@ export function nativeEditPaths(input, client, successful = true) {
 	return [{ path: input.tool_input?.file_path, mayAdd: input.tool_name === "Write" }];
 }
 
-function editedPaths(input, client, root, anyFile = false) {
+export function editedPaths(input, client, root, anyFile = false) {
 	const inCheckout = nativeEditPaths(input, client).flatMap(({ path }) => {
 		if (typeof path !== "string" || path.length > 512 || !(anyFile || MAPPED_FILE.test(path)))
 			return [];

@@ -36,12 +36,52 @@ const TYPE_AHEAD_MS = 50;
  * @param defaultAnswer - The answer for Enter (defaults to yes).
  * @returns The answer, or null when input ended before one.
  */
-export async function askYesNo(
+export function askYesNo(
 	question: string,
 	input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
 	output: NodeJS.WritableStream = process.stderr,
 	defaultAnswer = true,
 ): Promise<boolean | null> {
+	return askLine(question, input, output, (answer) => {
+		if (answer === "") return defaultAnswer;
+		if (answer === "y" || answer === "yes") return true;
+		if (answer === "n" || answer === "no") return false;
+		return undefined;
+	});
+}
+
+/**
+ * Ask for one of `count` numbered options. Enter picks 1; a number from 1 to
+ * `count` picks that option; `n` or `no` skips. Anything else asks again.
+ * Ctrl-C and typed-ahead keys behave as in askYesNo.
+ *
+ * @param question - The prompt, ending in something like `[1] `.
+ * @param count - How many options were listed (1-based).
+ * @param input - Where the answer is read (defaults to stdin).
+ * @param output - Where the prompt is written (defaults to stderr).
+ * @returns The chosen option's 1-based number, 0 for a skip, or null when input ended first.
+ */
+export function askChoice(
+	question: string,
+	count: number,
+	input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
+	output: NodeJS.WritableStream = process.stderr,
+): Promise<number | null> {
+	return askLine(question, input, output, (answer) => {
+		if (answer === "") return 1;
+		if (answer === "n" || answer === "no") return 0;
+		const picked = /^\d+$/.test(answer) ? Number(answer) : 0;
+		return picked >= 1 && picked <= count ? picked : undefined;
+	});
+}
+
+/** Prompt until `parse` accepts a trimmed, lowercased line; null when input ends first. */
+async function askLine<T>(
+	question: string,
+	input: NodeJS.ReadableStream & { isTTY?: boolean },
+	output: NodeJS.WritableStream,
+	parse: (answer: string) => T | undefined,
+): Promise<T | null> {
 	if (input.isTTY) await dropTypedAhead(input);
 	const rl = createInterface({ input, output });
 	rl.on("SIGINT", () => {
@@ -53,10 +93,8 @@ export async function askYesNo(
 	try {
 		// The iterator ends on EOF; rl.question never settles then.
 		for await (const reply of rl) {
-			const answer = reply.trim().toLowerCase();
-			if (answer === "") return defaultAnswer;
-			if (answer === "y" || answer === "yes") return true;
-			if (answer === "n" || answer === "no") return false;
+			const answer = parse(reply.trim().toLowerCase());
+			if (answer !== undefined) return answer;
 			rl.prompt();
 		}
 		return null;
@@ -143,6 +181,8 @@ export function printUsage(): void {
 		"  --clean           Remove Pharaoh setup, including managed local project memory hooks",
 		"  --memory-hooks    Re-enable eligible memory reminders and offer optional settings",
 		"  --disable-memory-hooks  Remove Pharaoh's memory hooks and remember the choice",
+		"  --disable-memory-capture  Stop saving fixes to project memory automatically",
+		"  --undo-memory     Remove the last automatic project memory save",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --migrate-legacy  Move plain pinned NPX connections to the managed runtime during install",
 		"  --skip-runtime    Turn off runtime analytics during install and remember the choice",

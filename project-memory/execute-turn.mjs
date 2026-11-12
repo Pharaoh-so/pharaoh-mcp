@@ -19,7 +19,7 @@ const UNSAFE_RECAP = [
 ];
 const REF_PATH = /^[\p{L}\p{N}._+@ -]+(?:\/[\p{L}\p{N}._+@ -]+)*$/u;
 
-function safeRecap(text) {
+export function safeRecap(text) {
 	return (
 		![...text].some((char) => {
 			const code = char.charCodeAt(0);
@@ -141,7 +141,7 @@ function pathAtRevision(root, rev, path) {
 	}
 }
 
-async function citeRefs(root, rev, refs) {
+export async function citeRefs(root, rev, refs) {
 	const unverified = worktreeEvidence(root, rev);
 	const needsFullIndex = refs.some((ref) => !ref.commit && !ref.path && ref.symbol);
 	const fullIndex = !unverified && needsFullIndex && visibleGitIndex(root);

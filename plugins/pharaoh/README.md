@@ -1,6 +1,6 @@
 # Pharaoh
 
-Pharaoh maps your GitHub repositories into a graph of modules, functions, call relationships, endpoints, cron jobs and dependencies, for TypeScript, JavaScript and Python. Each graph covers a repo's default branch and is re-mapped on every push to it. This plugin adds four skills that query that graph, plus the Pharaoh connector they query through.
+Pharaoh maps your GitHub repositories into a graph of modules, functions, call relationships, endpoints, cron jobs and dependencies, for TypeScript, JavaScript, Python, C and C++. Each graph covers a repo's default branch and is re-mapped on every push to it. This plugin adds four skills that query that graph, plus the Pharaoh connector they query through.
 
 ## What's in the plugin
 
