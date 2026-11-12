@@ -46,6 +46,7 @@ const MEMORY_DIAGNOSTIC_PACK_PATHS = [
 	"project-memory/diagnostics-collector.mjs",
 	"project-memory/diagnostics-sender.mjs",
 ];
+const MEMORY_CAPTURE_PACK_PATHS = ["project-memory/capture.d.mts", "project-memory/capture.mjs"];
 const SETUP_PROMPT_PACK_PATHS = [
 	"dist/setup-prompt.generated.js",
 	"dist/setup-prompt.generated.d.ts",
@@ -155,6 +156,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 				LOCAL_WORKTREE_PACK_PATHS.includes(path) ||
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
+				MEMORY_CAPTURE_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
 					path,
 				),
@@ -205,6 +207,17 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 			"Verified source must declare the complete worktree cue runtime",
 		);
 	}
+	const captureInPack = MEMORY_CAPTURE_PACK_PATHS.some((path) => paths.includes(path));
+	const captureInSource = sourcePaths?.some((path) => MEMORY_CAPTURE_PACK_PATHS.includes(path));
+	if (sourcePaths && captureInPack) {
+		assert.ok(captureInSource, "Memory capture assets are absent from the verified source");
+	}
+	if (captureInSource) {
+		assert.ok(
+			MEMORY_CAPTURE_PACK_PATHS.every((path) => sourcePaths.includes(path)),
+			"Verified source must declare the complete memory capture runtime",
+		);
+	}
 	for (const required of [
 		"package.json",
 		"dist/index.js",
@@ -215,6 +228,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		...(hasMemory ? PROJECT_MEMORY_PACK_PATHS : []),
 		...(worktreeInSource || worktreeInPack ? WORKTREE_CUE_PACK_PATHS : []),
 		...(diagnosticInSource || diagnosticInPack ? MEMORY_DIAGNOSTIC_PACK_PATHS : []),
+		...(captureInSource || captureInPack ? MEMORY_CAPTURE_PACK_PATHS : []),
 	])
 		assert.ok(paths.includes(required), `Missing npm asset: ${required}`);
 }
