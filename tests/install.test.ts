@@ -158,16 +158,22 @@ describe("NPX developer install", () => {
 		expect(output.join("\n")).toContain(SETUP_TOOL_PROMPT);
 	});
 
-	it("starts the one connected agent CLI with the setup prompt on a yes, and not on a no", async () => {
+	it("offers the one connected agent CLI in the same menu, starting it when picked and not on Skip", async () => {
 		const startAgent = vi.fn(async (_agent: AgentLaunch) => true);
-		const ask = vi.fn<(question: string) => Promise<boolean | null>>();
-		const install = options({ interactive: true, dependencies: { ask, startAgent } }, ["claude"]);
-		ask.mockResolvedValueOnce(true);
+		const choose = vi.fn<(title: string, options: readonly string[]) => Promise<number | null>>();
+		const install = options({ interactive: true, dependencies: { choose, startAgent } }, [
+			"claude",
+		]);
+		choose.mockResolvedValueOnce(0);
 		expect(await runInstall(install)).toBe(0);
-		ask.mockResolvedValueOnce(false);
+		expect(output).toContain("Starting Claude Code…");
+		choose.mockResolvedValueOnce(1);
 		expect(await runInstall(install)).toBe(0);
 		// Codex is connected too, but without a CLI it isn't offered.
-		expect(ask).toHaveBeenCalledTimes(2);
+		expect(choose.mock.calls).toEqual([
+			["Try Pharaoh in:", ["Claude Code", "Skip"]],
+			["Try Pharaoh in:", ["Claude Code", "Skip"]],
+		]);
 		expect(startAgent).toHaveBeenCalledExactlyOnceWith({
 			client: "claude-code",
 			command: "claude",
@@ -175,17 +181,22 @@ describe("NPX developer install", () => {
 		});
 	});
 
-	it("numbers several agent CLIs, starts the one picked, and none on n", async () => {
+	it("lists several agent CLIs, starts the one picked, and none on n or ended input", async () => {
 		const startAgent = vi.fn(async (_agent: AgentLaunch) => true);
-		const choose = vi.fn<(question: string, count: number) => Promise<number | null>>();
-		choose.mockResolvedValueOnce(2).mockResolvedValueOnce(0);
+		const choose = vi.fn<(title: string, options: readonly string[]) => Promise<number | null>>();
+		choose.mockResolvedValueOnce(1).mockResolvedValueOnce(-1).mockResolvedValueOnce(null);
 		const install = options({ interactive: true, dependencies: { choose, startAgent } }, [
 			"claude",
 			"codex",
 		]);
 		expect(await runInstall(install)).toBe(0);
 		expect(await runInstall(install)).toBe(0);
-		expect(choose.mock.calls.map(([, count]) => count)).toEqual([2, 2]);
+		expect(await runInstall(install)).toBe(0);
+		expect(choose.mock.calls.map(([, labels]) => labels)).toEqual([
+			["Claude Code", "Codex", "Skip"],
+			["Claude Code", "Codex", "Skip"],
+			["Claude Code", "Codex", "Skip"],
+		]);
 		expect(startAgent).toHaveBeenCalledExactlyOnceWith({
 			client: "codex",
 			command: "codex",
@@ -218,16 +229,17 @@ describe("NPX developer install", () => {
 		mkdirSync(join(home, "Library", "Application Support", "Claude"), { recursive: true });
 		rmSync(join(home, ".claude"), { recursive: true });
 		rmSync(join(home, ".codex"), { recursive: true });
-		const ask = vi.fn(async () => false);
-		const dependencies = { ask, startAgent: vi.fn(async () => true) };
+		// Skip in the menu, so nothing starts.
+		const choose = vi.fn(async () => -1);
+		const dependencies = { choose, startAgent: vi.fn(async () => true) };
 		const desktopLines = () =>
 			output.filter((line) => line.includes("Claude Desktop") && line.includes(SETUP_TOOL_PROMPT));
 		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
-		expect(ask).not.toHaveBeenCalled();
+		expect(choose).not.toHaveBeenCalled();
 		expect(desktopLines()).toHaveLength(1);
 		output.length = 0;
 		expect(await runInstall(options({ interactive: true, dependencies }, ["claude"]))).toBe(0);
-		expect(ask).toHaveBeenCalledTimes(1);
+		expect(choose).toHaveBeenCalledTimes(1);
 		expect(desktopLines()).toHaveLength(1);
 	});
 
@@ -544,7 +556,9 @@ describe("NPX developer install", () => {
 				finishRuntime = () => resolve(launch);
 			});
 		};
-		const install = runInstall(options({ dependencies: { ...dependencies, runtime: downloading } }));
+		const install = runInstall(
+			options({ dependencies: { ...dependencies, runtime: downloading } }),
+		);
 		await vi.waitFor(() => expect(runtimeStarted).toBe(true));
 		// Nothing draws or prints over the sign-in prompt.
 		expect(events).toEqual([]);
@@ -567,7 +581,14 @@ describe("NPX developer install", () => {
 			throw new RuntimeSetupError("Pharaoh could not install its exact-version runtime.");
 		};
 		const status = await runInstall(
-			options({ dependencies: { ...dependencies, authenticate: async () => ({ credentials: CREDENTIALS }), runtime: failing, configure } }),
+			options({
+				dependencies: {
+					...dependencies,
+					authenticate: async () => ({ credentials: CREDENTIALS }),
+					runtime: failing,
+					configure,
+				},
+			}),
 		);
 		expect(status).toBe(1);
 		expect(configure).not.toHaveBeenCalled();
@@ -587,7 +608,11 @@ describe("NPX developer install", () => {
 			throw new Error("sign-in refused");
 		};
 		expect(
-			await runInstall(options({ dependencies: { ...dependencies, authenticate: refused, runtime: pending, configure } })),
+			await runInstall(
+				options({
+					dependencies: { ...dependencies, authenticate: refused, runtime: pending, configure },
+				}),
+			),
 		).toBe(1);
 		expect(preparation?.aborted).toBe(true);
 		expect(configure).not.toHaveBeenCalled();
@@ -622,9 +647,16 @@ describe("NPX developer install", () => {
 			const asked: string[] = [];
 			const questioning = showProgress(stream(true, asked), () => clock);
 			questioning.step("Connecting Claude Code");
-			expect(await askYesNo("Add the line? [Y/n] ", Readable.from(["y\n"]), new PassThrough())).toBe(true);
+			expect(
+				await askYesNo("Add the line? [Y/n] ", Readable.from(["y\n"]), new PassThrough()),
+			).toBe(true);
 			questioning.stop();
-			expect(asked.map((chunk) => chunk.slice(0, 6))).toEqual(["\r\x1b[2K⠋", "\r\x1b[2K", "\r\x1b[2K⠙", "\r\x1b[2K"]);
+			expect(asked.map((chunk) => chunk.slice(0, 6))).toEqual([
+				"\r\x1b[2K⠋",
+				"\r\x1b[2K",
+				"\r\x1b[2K⠙",
+				"\r\x1b[2K",
+			]);
 			const piped: string[] = [];
 			const quiet = showProgress(stream(false, piped));
 			quiet.step("Installing Pharaoh 9.9.9");

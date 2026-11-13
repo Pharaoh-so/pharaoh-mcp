@@ -20,12 +20,12 @@ import {
 } from "./auth.js";
 import { type Credentials, readCredentials, saveAuthorizedCredentials } from "./credentials.js";
 import {
-	askChoice,
 	askYesNo,
 	DEFAULT_SERVER,
 	INSTALL_COMMAND,
 	NPX_COMMAND,
 	type Progress,
+	pickOption,
 	printLines,
 	resolveSseUrl,
 	showProgress,
@@ -138,12 +138,15 @@ function agentCommand(agent: AgentLaunch): string {
 	return `${agent.command} ${agent.args.map((arg) => JSON.stringify(arg)).join(" ")}`;
 }
 
+/** The menu title for the first run; each connected agent CLI is an option, then Skip. */
+const TRY_TITLE = "Try Pharaoh in:";
+
 /**
- * The next step, as the summary's last line. In a terminal it asks to start an
- * agent CLI with the setup prompt: [Y/n] for one, a numbered pick for several
- * (Enter = 1). Without a terminal it prints each agent's command. Claude Desktop
- * has no command to start, so it gets the request to send, as does a person
- * with no agent CLI.
+ * The next step, as the summary's last line. In a terminal it offers a menu of the connected
+ * agent CLIs (one or several) plus Skip; the one picked starts with the setup prompt, and
+ * the menu collapses to a "Starting …" line. Without a terminal it prints each agent's
+ * command. Claude Desktop has no command to start, so it gets the request to send, as does
+ * a person with no agent CLI, who sees no menu at all.
  * @param desktop - What to do in a connected Claude Desktop (restart after a new registration).
  * @returns The agent the person chose to start, or null.
  */
@@ -151,7 +154,7 @@ async function chooseAgent(
 	agents: AgentLaunch[],
 	desktop: "open" | "restart" | null,
 	interactive: boolean,
-	{ ask, choose, write }: Pick<InstallDependencies, "ask" | "choose" | "write">,
+	{ choose, write }: Pick<InstallDependencies, "choose" | "write">,
 ): Promise<AgentLaunch | null> {
 	const request = JSON.stringify(SETUP_TOOL_PROMPT);
 	if (desktop) write(`Claude Desktop: ${desktop} it and ask ${request}`);
@@ -161,13 +164,12 @@ async function chooseAgent(
 		write(...agents.map((agent) => `Start: ${agentCommand(agent)}`));
 		return null;
 	}
-	if (agents.length === 1) {
-		const label = LABELS[agents[0].client];
-		return (await ask(`Start ${label} with the setup prompt? [Y/n] `)) ? agents[0] : null;
-	}
-	const options = agents.map((agent, i) => `[${i + 1}] ${LABELS[agent.client]}`).join("  ");
-	const picked = await choose(`Start with: ${options}  (Enter = 1, n = skip) `, agents.length);
-	return picked ? agents[picked - 1] : null;
+	const labels = agents.map((agent) => LABELS[agent.client]);
+	const picked = await choose(TRY_TITLE, [...labels, "Skip"]);
+	// Skip, n/Esc (-1) and an ended input (null) all start nothing.
+	if (picked === null || picked < 0 || picked >= agents.length) return null;
+	write(`Starting ${labels[picked]}…`);
+	return agents[picked];
 }
 
 /** The part of Codex's hooks.json the trust check reads: event → groups → handlers. */
@@ -305,7 +307,8 @@ interface InstallDependencies {
 	progress: () => Progress;
 	configure: typeof configureClients;
 	ask: (question: string) => Promise<boolean | null>;
-	choose: (question: string, count: number) => Promise<number | null>;
+	/** Pick one of `options` from a menu: its 0-based index, -1 for none, null on ended input. */
+	choose: (title: string, options: readonly string[]) => Promise<number | null>;
 	startAgent: (agent: AgentLaunch) => Promise<boolean>;
 	write: (...lines: string[]) => void;
 	latest: typeof fetchLatestVersion;
@@ -349,7 +352,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		progress: () => showProgress(),
 		configure: configureClients,
 		ask: (question) => askYesNo(question),
-		choose: (question, count) => askChoice(question, count),
+		choose: (title, labels) => pickOption(title, labels),
 		startAgent,
 		write: printLines,
 		latest: fetchLatestVersion,
