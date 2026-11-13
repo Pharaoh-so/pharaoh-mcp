@@ -386,16 +386,15 @@ test("setup output and native runtime require complete verified source and rejec
 		"runtime/runtime-native.mjs",
 		"runtime/runtime-storage.mjs",
 	];
-	const update = [
-		"runtime/launcher-v1.d.mts",
-		"runtime/launcher-v1.mjs",
-		"runtime/update-notice.d.mts",
-		"runtime/update-notice.mjs",
-	];
+	// The notice and the launcher ship in separate releases, so each group stands alone.
+	const notice = ["runtime/update-notice.d.mts", "runtime/update-notice.mjs"];
+	const launcher = ["runtime/launcher-v1.d.mts", "runtime/launcher-v1.mjs"];
+	const update = [...launcher, ...notice];
 	for (const [packed, source] of [
 		[setup, ["src/setup-prompt.generated.ts"]],
 		[runtime, runtime],
-		[update, update],
+		[notice, notice],
+		[launcher, launcher],
 	]) {
 		verifyPackPaths([...paths, ...packed], [], [...paths, ...source]);
 		for (const omitted of packed)
