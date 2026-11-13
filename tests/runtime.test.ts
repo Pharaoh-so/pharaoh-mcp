@@ -100,7 +100,11 @@ describe("managed exact-version runtime", () => {
 	const runtimes = (home: string) => join(realpathSync(home), ".pharaoh", "runtimes", "mcp");
 
 	it("prepares a cache-independent absolute entry with a GUI-like PATH", async () => {
+		// The installer's progress line hangs on this: once for a download, never for a current runtime.
+		const onInstall = vi.fn<(version: string) => void>();
+		options.onInstall = onInstall;
 		const launch = await ensureRuntime(options);
+		expect(onInstall.mock.calls).toEqual([[VERSION]]);
 		expect(launch).toEqual({
 			command: realpathSync(node),
 			args: [join(runtimes(home), VERSION, "node_modules", "@pharaoh-so", "mcp", "dist", "index.js")],
@@ -111,6 +115,7 @@ describe("managed exact-version runtime", () => {
 		if (process.platform !== "win32") expect(statSync(runtimes(home)).mode & 0o777).toBe(0o700);
 		expect(await ensureRuntime(options)).toEqual(launch);
 		expect(installs).toBe(1);
+		expect(onInstall).toHaveBeenCalledTimes(1);
 	});
 
 	it("uses exact registry installation in neutral staging and suppresses lifecycle scripts", async () => {

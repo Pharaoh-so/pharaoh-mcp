@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "4cd5afb0996b1e49f6de463907065df56988b446",
-  "payloadSha256": "54e1d7b159021c82ffc307df37bbee20e79077446ad4511bc19f6fc00b189e93",
+  "commit": "27e2c25ee08145d6b578915a568d8ebf0ce730af",
+  "payloadSha256": "af4a96d557d2b7c4a3a47fb163be5f4be872322954e30d1d277f14b8c046aff6",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -416,7 +416,7 @@
     },
     {
       "path": "src/helpers.ts",
-      "sha256": "d551f8074d15e5d46a0389bad73cb7bea700786a5964e96735a541a4a75fe500",
+      "sha256": "f6dd075987493d2bb124276628b9ade7e740cee585b021b2d7ef71090dbf5482",
       "mode": "100644"
     },
     {
@@ -441,7 +441,7 @@
     },
     {
       "path": "src/install.ts",
-      "sha256": "87cb42636222000369e328c50b82f803d44ffe58f3aa17c379ea5c4cdf916c2c",
+      "sha256": "f6e3e8a447a7ee10f103edf65a4b3672f10f72911d83f6ff566c611ac841f408",
       "mode": "100644"
     },
     {
@@ -516,7 +516,7 @@
     },
     {
       "path": "src/runtime.ts",
-      "sha256": "a8386e4f94febb3778ff913bcc912ce184b1e81f7529776bdecae4c9ffbf7e02",
+      "sha256": "371808b00f27da4621d212909cd14055281ea789bf95cad7372a0c82a7bb6e1a",
       "mode": "100644"
     },
     {
@@ -571,7 +571,7 @@
     },
     {
       "path": "tests/install.test.ts",
-      "sha256": "d72b6f4f2b995d38e8ea45cced1639f0ef356bccdae950621abc4b5b78aebf45",
+      "sha256": "b3bfb6c69eac835b57312296dbe2472dc9bc5810cdccca02fe71c746410b49c0",
       "mode": "100644"
     },
     {
@@ -631,7 +631,7 @@
     },
     {
       "path": "tests/runtime.test.ts",
-      "sha256": "484dfe2b49aaee830188f759b589d49254988d2e5708b58fcab5357ee6867121",
+      "sha256": "0e90d6ebfc877e0a25ef1d3d2cf34967346d748c973e191ce91f639b707e79c2",
       "mode": "100644"
     },
     {

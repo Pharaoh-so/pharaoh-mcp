@@ -9,6 +9,7 @@ import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/
 import { updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
 import { pollOnce, requestDeviceCode } from "../src/auth.js";
 import type { Credentials } from "../src/credentials.js";
+import { showProgress } from "../src/helpers.js";
 import {
 	type AgentLaunch,
 	canStartAgent,
@@ -511,6 +512,74 @@ describe("NPX developer install", () => {
 		expect(status).toBe(1);
 		expect(readFileSync(join(home, ".claude.json"), "utf8")).toBe(original);
 		expect(output.join("\n")).not.toContain("fixture registry password");
+	});
+
+	it("shows progress only while a new version downloads, and erases it before anything prints", async () => {
+		const events: string[] = [];
+		const dependencies = {
+			progress: (label: string) => {
+				events.push(`show ${label}`);
+				return () => events.push("erase");
+			},
+			write: (...lines: string[]) => events.push(...lines),
+		};
+		const downloading = async (onInstall: (version: string) => void) => {
+			onInstall("9.9.9");
+			return launch;
+		};
+		await runInstall(options({ dependencies: { ...dependencies, runtime: downloading } }));
+		expect(events.slice(0, 2)).toEqual([
+			"show Installing Pharaoh 9.9.9 (once per update)…",
+			"erase",
+		]);
+		expect(events.filter((event) => event === "erase")).toHaveLength(1);
+
+		events.length = 0;
+		const failing = async (onInstall: (version: string) => void) => {
+			onInstall("9.9.9");
+			throw new Error("registry unreachable");
+		};
+		expect(await runInstall(options({ dependencies: { ...dependencies, runtime: failing } }))).toBe(
+			1,
+		);
+		expect(events.slice(0, 2)).toEqual([
+			"show Installing Pharaoh 9.9.9 (once per update)…",
+			"erase",
+		]);
+
+		events.length = 0;
+		await runInstall(options({ dependencies }));
+		expect(events.some((event) => event.startsWith("show "))).toBe(false);
+	});
+
+	it("draws the spinner only on a terminal and erases its own line", () => {
+		vi.useFakeTimers();
+		vi.stubEnv("TERM", "xterm-256color");
+		try {
+			const stream = (isTTY: boolean, chunks: string[]) => ({
+				isTTY,
+				write: (chunk: string | Uint8Array) => chunks.push(String(chunk)) > 0,
+			});
+			const terminal: string[] = [];
+			const stop = showProgress(
+				"Installing Pharaoh 9.9.9 (once per update)…",
+				stream(true, terminal),
+			);
+			vi.advanceTimersByTime(80);
+			stop();
+			stop();
+			expect(terminal).toEqual([
+				"\r⠋ Installing Pharaoh 9.9.9 (once per update)…",
+				"\r⠙ Installing Pharaoh 9.9.9 (once per update)…",
+				"\r\x1b[2K",
+			]);
+			const piped: string[] = [];
+			showProgress("Installing Pharaoh 9.9.9 (once per update)…", stream(false, piped))();
+			expect(piped).toEqual([]);
+		} finally {
+			vi.unstubAllEnvs();
+			vi.useRealTimers();
+		}
 	});
 
 	it("keeps a legacy pin without consent, then migrates on the explicit opt-in", async () => {
