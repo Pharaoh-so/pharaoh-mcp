@@ -67,13 +67,11 @@ const NATIVE_RUNTIME_PACK_PATHS = [
 	"runtime/runtime-native.mjs",
 	"runtime/runtime-storage.mjs",
 ];
-// The consented updater's stable launcher and its once-a-day notice: raw files, hash-bound to source.
-const UPDATE_RUNTIME_PACK_PATHS = [
-	"runtime/launcher-v1.d.mts",
-	"runtime/launcher-v1.mjs",
-	"runtime/update-notice.d.mts",
-	"runtime/update-notice.mjs",
-];
+// The once-a-day update notice and the consented updater's stable launcher ship separately,
+// so each is its own complete group of raw files, hash-bound to source.
+const UPDATE_NOTICE_PACK_PATHS = ["runtime/update-notice.d.mts", "runtime/update-notice.mjs"];
+const UPDATE_LAUNCHER_PACK_PATHS = ["runtime/launcher-v1.d.mts", "runtime/launcher-v1.mjs"];
+const UPDATE_RUNTIME_PACK_PATHS = [...UPDATE_NOTICE_PACK_PATHS, ...UPDATE_LAUNCHER_PACK_PATHS];
 const LOCAL_WORKTREE_MODULES = [
 	"authorization",
 	"contracts",
@@ -174,7 +172,8 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 	for (const [name, packed, sources] of [
 		["Setup prompt", SETUP_PROMPT_PACK_PATHS, ["src/setup-prompt.generated.ts"]],
 		["Native runtime", NATIVE_RUNTIME_PACK_PATHS, NATIVE_RUNTIME_PACK_PATHS],
-		["Update runtime", UPDATE_RUNTIME_PACK_PATHS, UPDATE_RUNTIME_PACK_PATHS],
+		["Update notice", UPDATE_NOTICE_PACK_PATHS, UPDATE_NOTICE_PACK_PATHS],
+		["Update launcher", UPDATE_LAUNCHER_PACK_PATHS, UPDATE_LAUNCHER_PACK_PATHS],
 		["Local worktree", LOCAL_WORKTREE_PACK_PATHS, LOCAL_WORKTREE_SOURCE_PATHS],
 	]) {
 		if (
