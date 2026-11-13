@@ -67,6 +67,13 @@ const NATIVE_RUNTIME_PACK_PATHS = [
 	"runtime/runtime-native.mjs",
 	"runtime/runtime-storage.mjs",
 ];
+// The consented updater's stable launcher and its once-a-day notice: raw files, hash-bound to source.
+const UPDATE_RUNTIME_PACK_PATHS = [
+	"runtime/launcher-v1.d.mts",
+	"runtime/launcher-v1.mjs",
+	"runtime/update-notice.d.mts",
+	"runtime/update-notice.mjs",
+];
 const LOCAL_WORKTREE_MODULES = [
 	"authorization",
 	"contracts",
@@ -153,6 +160,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
 				SETUP_PROMPT_PACK_PATHS.includes(path) ||
 				NATIVE_RUNTIME_PACK_PATHS.includes(path) ||
+				UPDATE_RUNTIME_PACK_PATHS.includes(path) ||
 				LOCAL_WORKTREE_PACK_PATHS.includes(path) ||
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
@@ -166,6 +174,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 	for (const [name, packed, sources] of [
 		["Setup prompt", SETUP_PROMPT_PACK_PATHS, ["src/setup-prompt.generated.ts"]],
 		["Native runtime", NATIVE_RUNTIME_PACK_PATHS, NATIVE_RUNTIME_PACK_PATHS],
+		["Update runtime", UPDATE_RUNTIME_PACK_PATHS, UPDATE_RUNTIME_PACK_PATHS],
 		["Local worktree", LOCAL_WORKTREE_PACK_PATHS, LOCAL_WORKTREE_SOURCE_PATHS],
 	]) {
 		if (
@@ -321,7 +330,11 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 		source?.files.map((file) => file.path),
 	);
 	const sourceHashes = new Map(source?.files.map((file) => [file.path, file.sha256]));
-	for (const path of [...NATIVE_RUNTIME_PACK_PATHS, ...LOCAL_WORKTREE_RAW_PATHS]) {
+	for (const path of [
+		...NATIVE_RUNTIME_PACK_PATHS,
+		...UPDATE_RUNTIME_PACK_PATHS,
+		...LOCAL_WORKTREE_RAW_PATHS,
+	]) {
 		if (!names.includes(`package/${path}`)) continue;
 		const archived = execFileSync("tar", ["-xOzf", tarball, `package/${path}`], {
 			maxBuffer: 32 * 1024 * 1024,

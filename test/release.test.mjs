@@ -386,9 +386,16 @@ test("setup output and native runtime require complete verified source and rejec
 		"runtime/runtime-native.mjs",
 		"runtime/runtime-storage.mjs",
 	];
+	const update = [
+		"runtime/launcher-v1.d.mts",
+		"runtime/launcher-v1.mjs",
+		"runtime/update-notice.d.mts",
+		"runtime/update-notice.mjs",
+	];
 	for (const [packed, source] of [
 		[setup, ["src/setup-prompt.generated.ts"]],
 		[runtime, runtime],
+		[update, update],
 	]) {
 		verifyPackPaths([...paths, ...packed], [], [...paths, ...source]);
 		for (const omitted of packed)
@@ -413,8 +420,8 @@ test("setup output and native runtime require complete verified source and rejec
 			);
 		assert.throws(() => verifyPackPaths([...paths, ...packed]), /verified source/);
 	}
-	const complete = [...paths, ...setup, ...runtime];
-	const source = [...paths, "src/setup-prompt.generated.ts", ...runtime];
+	const complete = [...paths, ...setup, ...runtime, ...update];
+	const source = [...paths, "src/setup-prompt.generated.ts", ...runtime, ...update];
 	verifyPackPaths(complete, ["runtime"], source);
 	for (const unexpected of [
 		"runtime/credentials.json",
@@ -426,22 +433,24 @@ test("setup output and native runtime require complete verified source and rejec
 			() => verifyPackPaths([...complete, unexpected], ["runtime"], [...source, unexpected]),
 			/Unexpected npm file/,
 		);
-	const item = fixture([...paths, ...runtime], ["runtime"]);
+	// Every raw runtime file, the updater's launcher included, must match its reviewed source bytes.
+	const raw = [...runtime, ...update];
+	const item = fixture([...paths, ...raw], ["runtime"]);
 	const verified = {
 		repository: "Pharaoh-so/pharaoh",
 		commit: sourceCommit,
 		payloadSha256: "c".repeat(64),
-		files: runtime.map((path) => ({ path, sha256: hash(Buffer.from(`public ${path}`)) })),
+		files: raw.map((path) => ({ path, sha256: hash(Buffer.from(`public ${path}`)) })),
 	};
 	try {
 		assert.equal(validateArtifact(item.directory, commit, item.save(), verified).version, version);
-		for (const path of runtime) {
+		for (const path of raw) {
 			const original = readFileSync(join(item.root, "package", path));
 			writeFileSync(join(item.root, "package", path), Buffer.from([0xff, 0x00, 0x41]));
 			const tarball = join(item.directory, item.manifest.tarballFile);
 			execFileSync(
 				"tar",
-				["-czf", tarball, ...[...paths, ...runtime].map((name) => `package/${name}`)],
+				["-czf", tarball, ...[...paths, ...raw].map((name) => `package/${name}`)],
 				{ cwd: item.root },
 			);
 			const bytes = readFileSync(tarball);
