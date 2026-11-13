@@ -16,38 +16,89 @@ export const NPX_COMMAND = "npx @pharaoh-so/mcp";
 /** Explicit setup works in a terminal or a script; tool commands keep the base NPX command. */
 export const INSTALL_COMMAND = "npx @pharaoh-so/mcp@latest install";
 
-/** Write one or more lines to stderr. */
+/** Write one or more lines to stderr, above the progress line if one is showing. */
 export function printLines(...lines: string[]): void {
-	process.stderr.write(`${lines.join("\n")}\n`);
+	writeStderr(`${lines.join("\n")}\n`);
+}
+
+/** Write text to stderr as given, above the progress line if one is showing. */
+export function writeStderr(text: string): void {
+	const resume = pauseProgress();
+	process.stderr.write(text);
+	resume();
 }
 
 const PROGRESS_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PROGRESS_FRAME_MS = 80;
+const ERASE_LINE = "\r\x1b[2K";
+
+/** A transient status line: the current step and the seconds since the line appeared. */
+export interface Progress {
+	/** Show `label` as the current step; the first call starts drawing. */
+	step(label: string): void;
+	/** Stop and erase the line (safe to call twice). */
+	stop(): void;
+}
+
+/** The progress line on screen, so printed lines and questions can step around it. */
+let activeProgress: { pause(): void; resume(): void } | undefined;
+
+/** Erase the progress line until the returned function redraws it. */
+function pauseProgress(): () => void {
+	const progress = activeProgress;
+	progress?.pause();
+	return () => progress?.resume();
+}
 
 /**
- * Show a one-line spinner while a slow step runs, on a terminal only. Piped, CI and dumb
- * terminals get nothing, so their output keeps only the summary lines.
- * @param label - What is happening, after the spinner.
+ * Show what the installer is doing on a terminal, as one line it rewrites:
+ * `⠋ Installing Pharaoh 0.3.83 · 4s`. Piped, CI and dumb terminals get nothing, so their
+ * output keeps only the summary lines. printLines and questions erase it first and redraw
+ * it after, so it never sits on top of either.
  * @param stream - Where to draw it; stderr, like every other installer line.
- * @returns A function that stops the spinner and erases its line (safe to call twice).
+ * @param now - Clock in milliseconds, for fixtures.
  */
 export function showProgress(
-	label: string,
 	stream: Pick<NodeJS.WriteStream, "isTTY" | "write"> = process.stderr,
-): () => void {
-	if (!stream.isTTY || process.env.TERM === "dumb") return () => {};
+	now: () => number = Date.now,
+): Progress {
+	if (!stream.isTTY || process.env.TERM === "dumb") return { step() {}, stop() {} };
+	let label: string | undefined;
+	let started = 0;
 	let frame = 0;
-	const draw = () =>
-		stream.write(`\r${PROGRESS_FRAMES[frame++ % PROGRESS_FRAMES.length]} ${label}`);
-	draw();
-	const timer = setInterval(draw, PROGRESS_FRAME_MS);
-	timer.unref();
-	let running = true;
-	return () => {
-		if (!running) return;
-		running = false;
+	let timer: NodeJS.Timeout | undefined;
+	const draw = () => {
+		const seconds = Math.floor((now() - started) / 1000);
+		stream.write(
+			`${ERASE_LINE}${PROGRESS_FRAMES[frame++ % PROGRESS_FRAMES.length]} ${label} · ${seconds}s`,
+		);
+	};
+	const pause = () => {
+		if (!timer) return;
 		clearInterval(timer);
-		stream.write("\r\x1b[2K");
+		timer = undefined;
+		stream.write(ERASE_LINE);
+	};
+	const resume = () => {
+		if (timer || label === undefined) return;
+		draw();
+		timer = setInterval(draw, PROGRESS_FRAME_MS);
+		timer.unref();
+	};
+	const handle = { pause, resume };
+	return {
+		step(next) {
+			if (label === undefined) started = now();
+			label = next;
+			activeProgress = handle;
+			if (timer) draw();
+			else resume();
+		},
+		stop() {
+			pause();
+			label = undefined;
+			if (activeProgress === handle) activeProgress = undefined;
+		},
 	};
 }
 
@@ -107,6 +158,20 @@ export function askChoice(
 
 /** Prompt until `parse` accepts a trimmed, lowercased line; null when input ends first. */
 async function askLine<T>(
+	question: string,
+	input: NodeJS.ReadableStream & { isTTY?: boolean },
+	output: NodeJS.WritableStream,
+	parse: (answer: string) => T | undefined,
+): Promise<T | null> {
+	const resumeProgress = pauseProgress();
+	try {
+		return await askOnce(question, input, output, parse);
+	} finally {
+		resumeProgress();
+	}
+}
+
+async function askOnce<T>(
 	question: string,
 	input: NodeJS.ReadableStream & { isTTY?: boolean },
 	output: NodeJS.WritableStream,

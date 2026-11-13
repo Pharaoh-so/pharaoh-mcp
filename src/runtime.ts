@@ -1,9 +1,5 @@
 /** Prepare an exact-version runtime whose path survives npm cache eviction. */
-import {
-	type ExecFileSyncOptionsWithStringEncoding,
-	execFile,
-	execFileSync,
-} from "node:child_process";
+import { type ExecFileSyncOptionsWithStringEncoding, execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
@@ -31,6 +27,8 @@ import { getPackageVersion, PACKAGE_NAME } from "./version.js";
 const RECOVERY = "npx @pharaoh-so/mcp@latest install";
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const LOCK_TIMEOUT_MS = 150_000;
+/** All npm time for one runtime install, retry included; below LOCK_TIMEOUT_MS, so lock waiters outlast it. */
+const INSTALL_TIMEOUT_MS = 120_000;
 const pending = new Map<string, Promise<LaunchConfig>>();
 
 /** An installer error whose message is safe to display without npm diagnostics. */
@@ -61,6 +59,8 @@ export interface RuntimeOptions {
 	/** Called once, just before a fresh install or repair downloads `version`; never when the runtime is current. */
 	onInstall?: (version: string) => void;
 	lockTimeoutMs?: number;
+	/** Stops a preparation the caller no longer needs: npm is killed, and the lock and stage are released. */
+	signal?: AbortSignal;
 	/** Preserve npm's relative TLS paths when installation moves to neutral staging. */
 	sourceCwd?: string;
 	/** Internal neutral directory used for npm's version probe. */
@@ -126,47 +126,46 @@ export function resolveLaunchNode(options: RuntimeOptions = {}): string {
 	return target;
 }
 
-function runner(options: RuntimeOptions): RuntimeRunner {
-	return options.run ?? ((file, args, settings) => execFileSync(file, args, settings));
-}
-
 const execFileAsync = promisify(execFile);
 
 /**
- * Run the runtime's npm install without blocking the event loop, so the installer can draw
- * progress while it downloads. A fixture runner keeps its synchronous seam.
+ * Run npm without blocking the event loop, so sign-in and the installer's progress line
+ * keep running meanwhile. A fixture runner keeps its synchronous seam.
+ * @returns npm's standard output
  */
-async function runInstallCommand(
+async function runNpm(
 	options: RuntimeOptions,
 	file: string,
 	args: readonly string[],
 	settings: ExecFileSyncOptionsWithStringEncoding,
-): Promise<void> {
-	if (options.run) {
-		options.run(file, args, settings);
-		return;
-	}
+): Promise<string> {
+	options.signal?.throwIfAborted();
+	if (options.run) return options.run(file, args, settings);
 	// execFile pipes every stream, so close stdin to match the synchronous "ignore":
 	// an npm prompt then ends at once instead of waiting out the timeout.
 	const { stdio: _pipes, ...asyncSettings } = settings;
-	const install = execFileAsync(file, [...args], asyncSettings);
-	install.child.stdin?.end();
-	await install;
+	const run = execFileAsync(file, [...args], { ...asyncSettings, signal: options.signal });
+	run.child.stdin?.end();
+	return (await run).stdout;
 }
 
-/** Whether an npm setting names a registry, proxy, TLS or credential value a user configures. */
+/**
+ * Whether an npm setting names a registry, proxy, TLS, credential or cache value a user
+ * configures. The cache is the one npx just filled with this release.
+ */
 export function registryKey(key: string): boolean {
 	return (
 		/^(?:@[^:]+:)?registry$/i.test(key) ||
-		/^(?:https?-proxy|proxy|noproxy|strict-ssl|cafile|ca(?:\[\])?|cert|key|certfile|keyfile|always-auth|_auth|_authtoken|username|_password|email)$/i.test(
+		/^(?:https?-proxy|proxy|noproxy|strict-ssl|cafile|ca(?:\[\])?|cert|key|certfile|keyfile|always-auth|_auth|_authtoken|username|_password|email|cache)$/i.test(
 			key,
 		) ||
 		/^\/\/[^\s=]+:(?:_authToken|_auth|username|_password|certfile|keyfile|always-auth)$/i.test(key)
 	);
 }
 
+/** Settings whose value is a file path, resolved before npm runs from the neutral stage. */
 function tlsPathKey(key: string): boolean {
-	return /(?:^|:)(?:cafile|certfile|keyfile)$/i.test(key);
+	return /(?:^|:)(?:cafile|certfile|keyfile|cache)$/i.test(key);
 }
 
 function tlsPath(value: string, options: RuntimeOptions): string {
@@ -183,6 +182,16 @@ function tlsPath(value: string, options: RuntimeOptions): string {
 	return resolve(options.sourceCwd ?? process.cwd(), expanded);
 }
 
+/** A path setting's resolved value. A cache path that can't be resolved is dropped, so npm uses its default. */
+function settingPath(key: string, value: string, options: RuntimeOptions): string | undefined {
+	try {
+		return tlsPath(value, options);
+	} catch (error) {
+		if (/(?:^|:)cache$/i.test(key)) return undefined;
+		throw error;
+	}
+}
+
 /** Keep registry credentials while preventing inherited install or loader redirection. */
 function npmEnvironment(options: RuntimeOptions): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
@@ -193,10 +202,12 @@ function npmEnvironment(options: RuntimeOptions): NodeJS.ProcessEnv {
 			if (!registryKey(setting)) continue;
 		}
 		if (/^(?:NODE_OPTIONS|NODE_PATH|LD_PRELOAD|DYLD_.+)$/i.test(key)) continue;
-		env[key] =
-			value !== undefined && tlsPathKey(key.replace(/^npm_config_/i, ""))
-				? tlsPath(value, options)
-				: value;
+		const setting = key.replace(/^npm_config_/i, "");
+		if (value === undefined || !tlsPathKey(setting)) env[key] = value;
+		else {
+			const path = settingPath(setting, value, options);
+			if (path !== undefined) env[key] = path;
+		}
 	}
 	return env;
 }
@@ -237,7 +248,7 @@ function npmEntry(candidate: string): string | null {
 }
 
 /** Locate and validate npm without executing a PATH shell wrapper. */
-export function resolveNpmCli(options: RuntimeOptions = {}): string {
+export async function resolveNpmCli(options: RuntimeOptions = {}): Promise<string> {
 	const executable = options.execPath ?? process.execPath;
 	const node = resolveLaunchNode({ ...options, onDiagnostic: undefined });
 	const nodeDirectory = dirname(realpathSync(executable));
@@ -255,7 +266,9 @@ export function resolveNpmCli(options: RuntimeOptions = {}): string {
 		const entry = npmEntry(candidate);
 		if (!entry) continue;
 		try {
-			const version = runner(options)(node, [entry, "--version"], npmSettings(options)).trim();
+			const version = (
+				await runNpm(options, node, [entry, "--version"], npmSettings(options))
+			).trim();
 			if (SEMVER.test(version)) return entry;
 		} catch {
 			// Continue to another validated npm installation, without exposing its output.
@@ -356,11 +369,16 @@ interface RuntimeLock {
 	release(): void;
 }
 
-async function acquireLock(root: string, timeoutMs: number): Promise<RuntimeLock> {
+async function acquireLock(
+	root: string,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<RuntimeLock> {
 	const directory = join(root, ".install-lock");
 	const token = randomUUID();
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
+		if (signal?.aborted) fail("Pharaoh stopped preparing its runtime.");
 		let created = false;
 		try {
 			mkdirSync(directory, { mode: 0o700 });
@@ -414,16 +432,14 @@ async function acquireLock(root: string, timeoutMs: number): Promise<RuntimeLock
 	fail("Another Pharaoh installation is still preparing the runtime.");
 }
 
-function registryConfig(options: RuntimeOptions, npm: string, node: string): string {
+async function registryConfig(options: RuntimeOptions, npm: string, node: string): Promise<string> {
 	const env = options.env ?? process.env;
 	const home = options.home ?? homedir();
 	let global = environmentValue(env, "npm_config_globalconfig");
 	if (!global) {
 		try {
-			global = runner(options)(
-				node,
-				[npm, "config", "get", "globalconfig"],
-				npmSettings(options),
+			global = (
+				await runNpm(options, node, [npm, "config", "get", "globalconfig"], npmSettings(options))
 			).trim();
 		} catch {
 			fail("Pharaoh could not read npm's registry configuration.");
@@ -451,7 +467,8 @@ function registryConfig(options: RuntimeOptions, npm: string, node: string): str
 			} else if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
 			else value = value.replace(/\s+[;#].*$/, "").trim();
 			if (typeof value !== "string") fail("Pharaoh could not read npm's TLS file path.");
-			lines.push(`${key}=${JSON.stringify(tlsPath(value, options))}`);
+			const path = settingPath(key, value, options);
+			if (path !== undefined) lines.push(`${key}=${JSON.stringify(path)}`);
 		}
 	}
 	return `${lines.join("\n")}\n`;
@@ -477,7 +494,7 @@ function removeAbandonedStages(root: string): void {
 async function prepareRuntime(options: RuntimeOptions, version: string): Promise<LaunchConfig> {
 	const root = runtimeRoot(options.home ?? homedir());
 	const command = resolveLaunchNode(options);
-	const lock = await acquireLock(root, options.lockTimeoutMs ?? LOCK_TIMEOUT_MS);
+	const lock = await acquireLock(root, options.lockTimeoutMs ?? LOCK_TIMEOUT_MS, options.signal);
 	let staging: string | undefined;
 	let hostedFallback: LaunchConfig | undefined;
 	try {
@@ -502,15 +519,23 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 			mode: 0o600,
 		});
 		writeFileSync(join(staging, "package.json"), '{"private":true}\n', { mode: 0o600 });
-		const npm = resolveNpmCli({ ...options, cwd: staging });
+		const npm = await resolveNpmCli({ ...options, cwd: staging });
 		const npmrc = join(staging, ".npmrc");
 		const emptyConfig = join(staging, ".empty-npmrc");
-		writeFileSync(npmrc, registryConfig({ ...options, cwd: staging }, npm, command), {
+		writeFileSync(npmrc, await registryConfig({ ...options, cwd: staging }, npm, command), {
 			mode: 0o600,
 		});
 		writeFileSync(emptyConfig, "", { mode: 0o600 });
-		try {
-			await runInstallCommand(
+		// npx has just cached this exact release and its dependencies, so prefer npm's cache: npm
+		// still checks every tarball's integrity and fetches whatever isn't cached. Under
+		// --prefer-offline npm never refreshes a cached version list, so one older than this
+		// release fails (ETARGET) and one older than the analyzer's pin drops it; the same
+		// install then runs once more with --prefer-online, which rechecks every cached list,
+		// within the same time budget.
+		const deadline = Date.now() + INSTALL_TIMEOUT_MS;
+		const prefix = staging;
+		const install = (extra: readonly string[]) =>
+			runNpm(
 				options,
 				command,
 				[
@@ -518,7 +543,7 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 					"install",
 					`${PACKAGE_NAME}@${version}`,
 					"--prefix",
-					staging,
+					prefix,
 					"--global=false",
 					"--workspaces=false",
 					"--ignore-scripts",
@@ -526,15 +551,31 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 					"--no-audit",
 					"--no-fund",
 					"--package-lock=false",
+					...extra,
 					"--userconfig",
 					npmrc,
 					"--globalconfig",
 					emptyConfig,
 				],
-				{ ...npmSettings(options), cwd: staging, timeout: 120_000 },
+				{ ...npmSettings(options), cwd: prefix, timeout: deadline - Date.now() },
 			);
+		let cached = false;
+		try {
+			await install(["--prefer-offline"]);
+			cached =
+				localAnalyzerInstallStatus(join(staging, "node_modules", PACKAGE_NAME)) !== "repair-needed";
 		} catch {
-			fail("Pharaoh could not install its exact-version runtime. Check npm registry access.");
+			// Retried online below.
+		}
+		if (!cached) {
+			rmSync(join(staging, "node_modules"), { recursive: true, force: true });
+			try {
+				// A timeout of 0 would mean none at all.
+				if (deadline - Date.now() < 1_000) throw new Error("No time left to install online.");
+				await install(["--prefer-online"]);
+			} catch {
+				fail("Pharaoh could not install its exact-version runtime. Check npm registry access.");
+			}
 		}
 		rmSync(npmrc, { force: true });
 		rmSync(emptyConfig, { force: true });
