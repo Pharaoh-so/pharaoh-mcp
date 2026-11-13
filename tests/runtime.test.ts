@@ -128,7 +128,7 @@ describe("managed exact-version runtime", () => {
 		expect(args.slice(0, 3)).toEqual([realpathSync(npm), "install", "@pharaoh-so/mcp@1.2.3"]);
 		expect(args).toEqual(expect.arrayContaining([
 			"--ignore-scripts", "--omit=dev", "--global=false", "--workspaces=false",
-			"--no-audit", "--no-fund", "--package-lock=false",
+			"--no-audit", "--no-fund", "--package-lock=false", "--prefer-offline",
 		]));
 		expect(settings.shell).toBe(false);
 		expect(settings.cwd).toContain(`${runtimes(home)}`);
@@ -138,7 +138,7 @@ describe("managed exact-version runtime", () => {
 	it("retains registry authentication while removing install and preload redirection", async () => {
 		const secret = "fixture-registry-secret";
 		const npmrc = join(home, "custom-npmrc");
-		write(npmrc, `registry=https://registry.example/\n//registry.example/:_authToken=\${NPM_TOKEN}\n//private.example/:_authToken=\${NPM_PRIVATE_TOKEN}\nproxy=http://proxy.example/\ncafile=certs/company.pem\nprefix=/wrong\nscript-shell=/do-not-run\n`);
+		write(npmrc, `registry=https://registry.example/\n//registry.example/:_authToken=\${NPM_TOKEN}\n//private.example/:_authToken=\${NPM_PRIVATE_TOKEN}\nproxy=http://proxy.example/\ncafile=certs/company.pem\ncache=~/npm-cache\nprefix=/wrong\nscript-shell=/do-not-run\n`);
 		options.sourceCwd = join(home, "original repository");
 		options.env = {
 			...options.env,
@@ -157,6 +157,7 @@ describe("managed exact-version runtime", () => {
 			NPM_AUTH_TOKEN: secret,
 			NPM_PRIVATE_TOKEN: secret,
 			npm_config_registry: "https://registry.example/",
+			npm_config_cache: "npx-cache",
 		};
 		let config = "";
 		let installEnv: NodeJS.ProcessEnv | undefined;
@@ -172,11 +173,14 @@ describe("managed exact-version runtime", () => {
 		expect(config).toContain(":_authToken=${NPM_PRIVATE_TOKEN}");
 		expect(config).toContain("proxy=http://proxy.example/");
 		expect(config).toContain(JSON.stringify(join(home, "original repository", "certs", "company.pem")));
+		// The install reads the cache npx just filled: a relative path resolves where npx ran.
+		expect(config).toContain(`cache=${JSON.stringify(join(home, "npm-cache"))}`);
 		expect(config).not.toContain("script-shell");
 		expect(config).not.toContain("prefix");
 		expect(installEnv).toMatchObject({
 			NPM_TOKEN: secret, NPM_AUTH_TOKEN: secret, NPM_PRIVATE_TOKEN: secret,
 			npm_config_registry: "https://registry.example/",
+			npm_config_cache: join(home, "original repository", "npx-cache"),
 		});
 		for (const key of [
 			"NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
@@ -233,6 +237,80 @@ describe("managed exact-version runtime", () => {
 		await expect(ensureRuntime({ ...options, version: "1.2.4" })).rejects.not.toThrow("registry-password");
 		expect(existsSync(old.args[0])).toBe(true);
 		expect(readdirSync(runtimes(home))).toEqual([VERSION]);
+	});
+
+	it("installs from npm's cache first, then online when the cache can't satisfy this exact version", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const online: { args: readonly string[]; timeout?: number }[] = [];
+			options.run = (file, args, settings) => {
+				if (args[1] !== "install") return run(file, args, settings);
+				if (!args.includes("--prefer-offline")) {
+					online.push({ args, timeout: settings.timeout });
+					return run(file, args, settings);
+				}
+				installs++;
+				write(join(args[args.indexOf("--prefix") + 1], "node_modules", "partial", "package.json"));
+				vi.setSystemTime(Date.now() + 30_000);
+				throw new Error("ETARGET: the cached version list predates this release");
+			};
+			const launch = await ensureRuntime(options);
+			expect(installs).toBe(2);
+			expect(existsSync(launch.args[0])).toBe(true);
+			expect(existsSync(join(runtimes(home), VERSION, "node_modules", "partial"))).toBe(false);
+			// The online run rechecks cached version lists and gets only what's left of 120 s.
+			expect(online[0].args).toContain("--prefer-online");
+			expect(online[0].timeout).toBeLessThanOrEqual(90_000);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("drops a cache path it can't resolve, so npm uses its default cache", async () => {
+		const npmrc = join(home, "custom-npmrc");
+		write(npmrc, "cache=${PHARAOH_FIXTURE_UNSET}/npm\nregistry=https://registry.example/\n");
+		options.env = { ...options.env, npm_config_userconfig: npmrc, npm_config_cache: "${PHARAOH_FIXTURE_UNSET}" };
+		let config = "";
+		let installEnv: NodeJS.ProcessEnv | undefined;
+		options.run = (file, args, settings) => {
+			if (args[1] === "install") {
+				config = readFileSync(args[args.indexOf("--userconfig") + 1], "utf8");
+				installEnv = settings.env;
+			}
+			return run(file, args, settings);
+		};
+		await ensureRuntime(options);
+		expect(config).toBe("registry=https://registry.example/\n");
+		expect(installEnv).not.toHaveProperty("npm_config_cache");
+	});
+
+	it("stops waiting for another installer's lock when the caller gives up", async () => {
+		const root = runtimes(home);
+		mkdirSync(join(root, ".install-lock"), { recursive: true });
+		writeFileSync(join(root, ".install-lock", "owner.json"), JSON.stringify({ pid: process.pid, token: "other installer" }));
+		const preparation = new AbortController();
+		setTimeout(() => preparation.abort(), 50);
+		const started = Date.now();
+		await expect(ensureRuntime({ ...options, lockTimeoutMs: 60_000, signal: preparation.signal })).rejects.toThrow(RuntimeSetupError);
+		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(installs).toBe(0);
+	});
+
+	it("does not start the online install once the time budget is spent", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			options.run = (_file, args) => {
+				if (args[1] === "--version") return "10.9.0";
+				if (args[1] === "config") return join(home, "global-npmrc");
+				installs++;
+				vi.setSystemTime(Date.now() + 119_500);
+				throw new Error("npm timed out");
+			};
+			await expect(ensureRuntime(options)).rejects.toThrow(RuntimeSetupError);
+			expect(installs).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it.each(["wrong-version", "missing-sdk", "outside-entry"])("rejects %s before publishing", async (fault) => {
@@ -296,9 +374,10 @@ describe("managed exact-version runtime", () => {
 			includeAnalyzer = true;
 			expect(await ensureRuntime(options)).toEqual(launch);
 			expect(existsSync(analyzerFile(dirname(dirname(launch.args[0]))))).toBe(true);
-			expect(installs).toBe(4);
+			// Each install that lacked the analyzer ran from the cache, then once online.
+			expect(installs).toBe(7);
 			expect(await ensureRuntime(options)).toEqual(launch);
-			expect(installs).toBe(4);
+			expect(installs).toBe(7);
 		} finally {
 			probe.mockRestore();
 		}
@@ -355,32 +434,32 @@ describe("Node and npm discovery", () => {
 		expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining("npx @pharaoh-so/mcp@latest install"));
 	});
 
-	it("normalizes npx-cli.js to its validated npm sibling", () => {
+	it("normalizes npx-cli.js to its validated npm sibling", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pharaoh-npm-"));
 		roots.push(root);
 		const npm = npmFixture(join(root, "npm"));
 		const run = vi.fn(() => "10.9.0\n");
-		expect(resolveNpmCli({ env: { PATH: "", npm_execpath: join(dirname(npm), "npx-cli.js") }, run })).toBe(realpathSync(npm));
+		await expect(resolveNpmCli({ env: { PATH: "", npm_execpath: join(dirname(npm), "npx-cli.js") }, run })).resolves.toBe(realpathSync(npm));
 		expect(run).toHaveBeenCalledWith(expect.any(String), [realpathSync(npm), "--version"], expect.objectContaining({ timeout: 15_000, shell: false }));
 	});
 
-	it("finds the npm layout beside Windows Node without reading npm.cmd", () => {
+	it("finds the npm layout beside Windows Node without reading npm.cmd", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pharaoh Windows layout "));
 		roots.push(root);
 		write(join(root, "node.exe"));
 		write(join(root, "npm.cmd"), "do not execute or interpret this command file");
 		const npm = npmFixture(join(root, "node_modules", "npm"));
-		expect(resolveNpmCli({ platform: "win32", execPath: join(root, "node.exe"), env: { Path: root }, run: () => "10.9.0" })).toBe(realpathSync(npm));
+		await expect(resolveNpmCli({ platform: "win32", execPath: join(root, "node.exe"), env: { Path: root }, run: () => "10.9.0" })).resolves.toBe(realpathSync(npm));
 	});
 
-	it("rejects invalid package hints without executing them", () => {
+	it("rejects invalid package hints without executing them", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pharaoh-invalid-npm-"));
 		roots.push(root);
 		const hint = npmFixture(join(root, "not-npm"));
 		write(join(root, "not-npm", "package.json"), '{"name":"not-npm","version":"10.9.0"}');
 		write(join(root, "node"));
 		const run = vi.fn(() => "10.9.0");
-		expect(() => resolveNpmCli({ execPath: join(root, "node"), env: { PATH: "", npm_execpath: hint }, run })).toThrow("working npm installation");
+		await expect(resolveNpmCli({ execPath: join(root, "node"), env: { PATH: "", npm_execpath: hint }, run })).rejects.toThrow("working npm installation");
 		expect(run).not.toHaveBeenCalled();
 	});
 });

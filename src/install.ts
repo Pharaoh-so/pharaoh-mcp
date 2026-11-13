@@ -25,6 +25,7 @@ import {
 	DEFAULT_SERVER,
 	INSTALL_COMMAND,
 	NPX_COMMAND,
+	type Progress,
 	printLines,
 	resolveSseUrl,
 	showProgress,
@@ -127,7 +128,7 @@ export function startAgent(agent: AgentLaunch): Promise<boolean> {
 }
 
 /** "Claude Code", "Claude Code and Codex", "Claude Desktop, Claude Code and Codex". */
-function listNames(outcomes: readonly ClientOutcome[]): string {
+function listNames(outcomes: readonly { client: ClientId }[]): string {
 	const names = outcomes.map((outcome) => LABELS[outcome.client]);
 	return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
 }
@@ -294,10 +295,14 @@ interface InstallDependencies {
 	discover: () => ClientTarget[];
 	migrations: typeof legacyMigrations;
 	authenticate: typeof authenticateInstall;
-	/** Prepare the runtime; `onInstall` fires only when a version has to be downloaded. */
-	runtime: (onInstall: (version: string) => void) => Promise<LaunchConfig>;
-	/** Show a transient progress line; the returned function erases it. */
-	progress: (label: string) => () => void;
+	/** Prepare the runtime; `onInstall` fires only when a version has to be installed. */
+	runtime: (
+		onInstall: (version: string) => void,
+		onDiagnostic: (message: string) => void,
+		signal: AbortSignal,
+	) => Promise<LaunchConfig>;
+	/** A transient progress line naming the current step. */
+	progress: () => Progress;
 	configure: typeof configureClients;
 	ask: (question: string) => Promise<boolean | null>;
 	choose: (question: string, count: number) => Promise<number | null>;
@@ -329,8 +334,9 @@ export interface InstallOptions {
 }
 
 /**
- * Discover, authorize, prepare a pinned runtime, then configure every client independently.
- * A failed runtime never reaches a configuration writer. Partial successes are retained.
+ * Prepare the pinned runtime while discovering and signing in, then configure every client
+ * independently. A failed runtime never reaches a configuration writer, and an install that
+ * stops early stops the runtime's preparation too. Partial successes are retained.
  * @returns A shell exit status; does not terminate the caller or mark onboarding complete.
  */
 export async function runInstall(options: InstallOptions): Promise<number> {
@@ -338,8 +344,9 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		discover: discoverClients,
 		migrations: legacyMigrations,
 		authenticate: authenticateInstall,
-		runtime: (onInstall) => ensureRuntime({ onDiagnostic: printLines, onInstall }),
-		progress: showProgress,
+		runtime: (onInstall, onDiagnostic, signal) =>
+			ensureRuntime({ onDiagnostic, onInstall, signal }),
+		progress: () => showProgress(),
 		configure: configureClients,
 		ask: (question) => askYesNo(question),
 		choose: (question, count) => askChoice(question, count),
@@ -354,7 +361,34 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		...options.dependencies,
 	};
 	const write = dependencies.write;
+	let progress: Progress = { step() {}, stop() {} };
+	// Whichever way runInstall leaves, nothing it started keeps the process alive: an
+	// unfinished runtime preparation stops (a finished one ignores this).
+	const preparation = new AbortController();
 	try {
+		// The runtime and the newest version need no sign-in, so both start now and the
+		// install waits only for what's left. Until sign-in ends, the runtime's progress and
+		// notes are held back so the sign-in prompt stays clean.
+		let signedIn = false;
+		let installing: string | undefined;
+		let runtimeReady = false;
+		const held: string[] = [];
+		const runtime = dependencies.runtime(
+			(version) => {
+				installing = version;
+				if (signedIn) progress.step(`Installing Pharaoh ${version}`);
+			},
+			(message) => (signedIn ? write(message) : held.push(message)),
+			preparation.signal,
+		);
+		// Awaited after sign-in; a failure before then must not go unhandled.
+		runtime.then(
+			() => {
+				runtimeReady = true;
+			},
+			() => {},
+		);
+		const latestVersion = dependencies.latest();
 		if (options.skipRuntime) {
 			const stopped = await Promise.allSettled(
 				RUNTIME_CLIENTS.map(async (client) => dependencies.disableRuntime(client)),
@@ -407,18 +441,13 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			options.server,
 			runtimeInstallations,
 		);
-		// A new version downloads for several seconds after "Signed in"; say so instead of
-		// looking frozen. The line is erased before anything else prints.
-		let stopProgress = () => {};
-		let launch: LaunchConfig;
-		try {
-			launch = await dependencies.runtime((version) => {
-				stopProgress();
-				stopProgress = dependencies.progress(`Installing Pharaoh ${version} (once per update)…`);
-			});
-		} finally {
-			stopProgress();
-		}
+		signedIn = true;
+		if (held.length) write(...held);
+		// What's left shows as one line naming the step, erased before the summary.
+		progress = dependencies.progress();
+		if (installing && !runtimeReady) progress.step(`Installing Pharaoh ${installing}`);
+		const launch = await runtime;
+		if (targets.length) progress.step(`Connecting ${listNames(targets)}`);
 		const configuredLaunch =
 			options.server === DEFAULT_SERVER
 				? launch
@@ -499,6 +528,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				);
 		}
 
+		progress.stop();
 		// The summary: who's connected, a line per problem or needed action, then
 		// the next step as the last line. Everything else stays quiet.
 		const connected = outcomes.filter((outcome) => CONNECTED.has(outcome.status));
@@ -520,7 +550,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			codexHookUntrusted(dirname(codex.path))
 		)
 			write("! Codex: trust the Pharaoh hook in /hooks");
-		const latest = await dependencies.latest();
+		const latest = await latestVersion;
 		if (latest && isNewerVersion(latest, getPackageVersion())) {
 			write(`Pharaoh ${latest} is available: ${UPGRADE_COMMAND}`);
 		}
@@ -554,9 +584,12 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		}
 		return status;
 	} catch (error) {
+		progress.stop();
 		// Never print native process errors: npm output/configuration may contain registry secrets.
 		if (error instanceof RuntimeSetupError) write(`Pharaoh: ${error.message}`);
 		write(`Pharaoh: installation could not finish. Retry ${INSTALL_COMMAND}.`);
 		return 1;
+	} finally {
+		preparation.abort();
 	}
 }

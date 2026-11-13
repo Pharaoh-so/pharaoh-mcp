@@ -4,12 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough, Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/runtime-client.mjs";
 import { updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
 import { pollOnce, requestDeviceCode } from "../src/auth.js";
 import type { Credentials } from "../src/credentials.js";
-import { showProgress } from "../src/helpers.js";
+import { askYesNo, printLines, showProgress } from "../src/helpers.js";
 import {
 	type AgentLaunch,
 	canStartAgent,
@@ -19,6 +20,7 @@ import {
 	startAgent,
 } from "../src/install.js";
 import { allowReadTools } from "../src/install-skills.js";
+import { RuntimeSetupError } from "../src/runtime.js";
 import {
 	configureClients,
 	discoverClients,
@@ -514,71 +516,123 @@ describe("NPX developer install", () => {
 		expect(output.join("\n")).not.toContain("fixture registry password");
 	});
 
-	it("shows progress only while a new version downloads, and erases it before anything prints", async () => {
+	it("prepares the runtime during sign-in and shows what's left, step by step, before the summary", async () => {
 		const events: string[] = [];
+		let signIn = () => {};
+		let runtimeStarted = false;
 		const dependencies = {
-			progress: (label: string) => {
-				events.push(`show ${label}`);
-				return () => events.push("erase");
-			},
+			progress: () => ({
+				step: (label: string) => events.push(`step ${label}`),
+				stop: () => events.push("stop"),
+			}),
 			write: (...lines: string[]) => events.push(...lines),
+			authenticate: async () => {
+				expect(runtimeStarted).toBe(true);
+				await new Promise<void>((resolve) => {
+					signIn = resolve;
+				});
+				events.push("signed in");
+				return { credentials: CREDENTIALS };
+			},
 		};
-		const downloading = async (onInstall: (version: string) => void) => {
+		let finishRuntime = () => {};
+		const downloading = (onInstall: (version: string) => void, note: (message: string) => void) => {
+			runtimeStarted = true;
 			onInstall("9.9.9");
-			return launch;
+			note("Pharaoh will use the current Node.js installation.");
+			return new Promise<typeof launch>((resolve) => {
+				finishRuntime = () => resolve(launch);
+			});
 		};
-		await runInstall(options({ dependencies: { ...dependencies, runtime: downloading } }));
-		expect(events.slice(0, 2)).toEqual([
-			"show Installing Pharaoh 9.9.9 (once per update)…",
-			"erase",
+		const install = runInstall(options({ dependencies: { ...dependencies, runtime: downloading } }));
+		await vi.waitFor(() => expect(runtimeStarted).toBe(true));
+		// Nothing draws or prints over the sign-in prompt.
+		expect(events).toEqual([]);
+		signIn();
+		await vi.waitFor(() => expect(events).toContain("step Installing Pharaoh 9.9.9"));
+		finishRuntime();
+		expect(await install).toBe(0);
+		expect(events.slice(0, 6)).toEqual([
+			"signed in",
+			"Pharaoh will use the current Node.js installation.",
+			"step Installing Pharaoh 9.9.9",
+			"step Connecting Claude Code and Codex",
+			"stop",
+			"✓ Connected to Claude Code and Codex",
 		]);
-		expect(events.filter((event) => event === "erase")).toHaveLength(1);
 
 		events.length = 0;
-		const failing = async (onInstall: (version: string) => void) => {
-			onInstall("9.9.9");
-			throw new Error("registry unreachable");
+		const configure = vi.fn();
+		const failing = async () => {
+			throw new RuntimeSetupError("Pharaoh could not install its exact-version runtime.");
 		};
-		expect(await runInstall(options({ dependencies: { ...dependencies, runtime: failing } }))).toBe(
-			1,
+		const status = await runInstall(
+			options({ dependencies: { ...dependencies, authenticate: async () => ({ credentials: CREDENTIALS }), runtime: failing, configure } }),
 		);
-		expect(events.slice(0, 2)).toEqual([
-			"show Installing Pharaoh 9.9.9 (once per update)…",
-			"erase",
-		]);
+		expect(status).toBe(1);
+		expect(configure).not.toHaveBeenCalled();
+		expect(events).toContain("stop");
 
-		events.length = 0;
-		await runInstall(options({ dependencies }));
-		expect(events.some((event) => event.startsWith("show "))).toBe(false);
+		// A sign-in that fails a macrotask later stops the preparation it started alongside,
+		// so npm and the lock wait can't hold the process open after the failure prints.
+		let preparation: AbortSignal | undefined;
+		const pending = (_onInstall: unknown, _note: unknown, signal: AbortSignal) => {
+			preparation = signal;
+			return new Promise<typeof launch>((_resolve, reject) => {
+				signal.addEventListener("abort", () => reject(new RuntimeSetupError("stopped")));
+			});
+		};
+		const refused = async () => {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			throw new Error("sign-in refused");
+		};
+		expect(
+			await runInstall(options({ dependencies: { ...dependencies, authenticate: refused, runtime: pending, configure } })),
+		).toBe(1);
+		expect(preparation?.aborted).toBe(true);
+		expect(configure).not.toHaveBeenCalled();
 	});
 
-	it("draws the spinner only on a terminal and erases its own line", () => {
-		vi.useFakeTimers();
+	it("draws one step-and-seconds line on a terminal, around printed lines, and erases it", async () => {
 		vi.stubEnv("TERM", "xterm-256color");
+		const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 		try {
 			const stream = (isTTY: boolean, chunks: string[]) => ({
 				isTTY,
 				write: (chunk: string | Uint8Array) => chunks.push(String(chunk)) > 0,
 			});
+			let clock = 1_000;
 			const terminal: string[] = [];
-			const stop = showProgress(
-				"Installing Pharaoh 9.9.9 (once per update)…",
-				stream(true, terminal),
-			);
-			vi.advanceTimersByTime(80);
-			stop();
-			stop();
+			const progress = showProgress(stream(true, terminal), () => clock);
+			progress.step("Installing Pharaoh 9.9.9");
+			clock += 4_200;
+			progress.step("Connecting Claude Code and Codex");
+			printLines("! Codex: trust the Pharaoh hook in /hooks");
+			progress.stop();
+			progress.stop();
 			expect(terminal).toEqual([
-				"\r⠋ Installing Pharaoh 9.9.9 (once per update)…",
-				"\r⠙ Installing Pharaoh 9.9.9 (once per update)…",
+				"\r\x1b[2K⠋ Installing Pharaoh 9.9.9 · 0s",
+				"\r\x1b[2K⠙ Connecting Claude Code and Codex · 4s",
+				"\r\x1b[2K",
+				"\r\x1b[2K⠹ Connecting Claude Code and Codex · 4s",
 				"\r\x1b[2K",
 			]);
+			expect(stderr).toHaveBeenCalledWith("! Codex: trust the Pharaoh hook in /hooks\n");
+			// A question erases the line while it waits and redraws it after the answer.
+			const asked: string[] = [];
+			const questioning = showProgress(stream(true, asked), () => clock);
+			questioning.step("Connecting Claude Code");
+			expect(await askYesNo("Add the line? [Y/n] ", Readable.from(["y\n"]), new PassThrough())).toBe(true);
+			questioning.stop();
+			expect(asked.map((chunk) => chunk.slice(0, 6))).toEqual(["\r\x1b[2K⠋", "\r\x1b[2K", "\r\x1b[2K⠙", "\r\x1b[2K"]);
 			const piped: string[] = [];
-			showProgress("Installing Pharaoh 9.9.9 (once per update)…", stream(false, piped))();
+			const quiet = showProgress(stream(false, piped));
+			quiet.step("Installing Pharaoh 9.9.9");
+			quiet.stop();
 			expect(piped).toEqual([]);
 		} finally {
+			stderr.mockRestore();
 			vi.unstubAllEnvs();
-			vi.useRealTimers();
 		}
 	});
 

@@ -28,6 +28,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
 import { ensurePharaohHome } from "./credentials.js";
+import { writeStderr } from "./helpers.js";
 import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
 import { getPackageVersion, PACKAGE_NAME, pinnedPackageSpec } from "./version.js";
 
@@ -481,14 +482,14 @@ function readPharaohManifest(skillsDir: string): PharaohManifest | null {
 			!Array.isArray(parsed.skills) ||
 			!parsed.skills.every((s) => typeof s === "string")
 		) {
-			process.stderr.write(
+			writeStderr(
 				`Pharaoh: ${MANIFEST_FILENAME} has unexpected shape — treating as missing and writing a fresh one.\n`,
 			);
 			return null;
 		}
 		return parsed as PharaohManifest;
 	} catch {
-		process.stderr.write(
+		writeStderr(
 			`Pharaoh: ${MANIFEST_FILENAME} is not valid JSON — treating as missing and writing a fresh one.\n`,
 		);
 		return null;
@@ -812,9 +813,7 @@ function removeManagedAgentSkills(home: string, client: AgentInstructionClient):
 				rmSync(directory, { recursive: true, force: true });
 		} catch {
 			// ALLOWED-CATCH: a custom or unreadable skill is retained during cleanup.
-			process.stderr.write(
-				`Pharaoh: kept the agent skill at ${directory}. Remove it by hand if needed.\n`,
-			);
+			writeStderr(`Pharaoh: kept the agent skill at ${directory}. Remove it by hand if needed.\n`);
 		}
 	}
 }
@@ -879,7 +878,7 @@ export function mergeOpenClawConfig(home = homedir()): boolean {
 			const raw = readFileSync(configPath, "utf-8");
 			config = JSON.parse(raw) as OpenClawConfig;
 		} catch {
-			process.stderr.write(
+			writeStderr(
 				[
 					"Pharaoh: ~/.openclaw/openclaw.json exists but is not valid JSON.",
 					"Fix or delete it manually, then re-run --install-skills.",
@@ -1395,7 +1394,7 @@ function removeClaudeMdBlock(home: string): void {
 	} catch (err) {
 		// ALLOWED-CATCH: the other cleanup steps (credentials on --logout) must still run; the user is told what's left
 		const code = (err as NodeJS.ErrnoException).code;
-		process.stderr.write(
+		writeStderr(
 			`Pharaoh: couldn't remove its line from ~/.claude/CLAUDE.md${code ? ` (${code})` : ""}. Delete the pharaoh-mcp block by hand.\n`,
 		);
 	}
@@ -1635,7 +1634,7 @@ function removeAdditionalAgentInstructionLines(home: string): void {
 			rmSync(target.answerPath, { force: true });
 		} catch {
 			// ALLOWED-CATCH: one protected user file must not prevent the remaining cleanup.
-			process.stderr.write(
+			writeStderr(
 				`Pharaoh: could not remove its instruction from ${target.path}. Remove its marked block by hand.\n`,
 			);
 		}
@@ -1692,11 +1691,11 @@ export function runInstallSkills(
 					const personal = installManagedAgentSkills(home, "claude-code");
 					const message = `Pharaoh: installed ${personal.installed} personal Claude Code skills. Plugin registration is unavailable, so plugin hooks are inactive.${personal.kept.length ? ` Preserved your skills: ${personal.kept.join(", ")}.` : ""}`;
 					warnings.push(message);
-					process.stderr.write(message + "\n");
+					writeStderr(message + "\n");
 				} catch {
 					const message = "Pharaoh: optional Claude Code personal skills could not be installed.";
 					errors.push(message);
-					process.stderr.write(message + "\n");
+					writeStderr(message + "\n");
 				}
 			}
 			const commands = installClaudeCodeCommands(home);
@@ -1712,7 +1711,7 @@ export function runInstallSkills(
 						"  → Disabled in Claude Code; left off (`claude plugin enable pharaoh@pharaoh` turns it on)",
 					failed: `  → Couldn't run \`claude plugin install\`. Run: claude plugin marketplace add ${claudeMarketplaceDir(home)} && claude plugin install ${PLUGIN_ID}`,
 				};
-				process.stderr.write(
+				writeStderr(
 					[
 						`Pharaoh: Claude Code plugin with ${skillCount} skills and the Grep routing hook`,
 						registrationLine[registration],
@@ -1731,7 +1730,7 @@ export function runInstallSkills(
 			const message =
 				"Pharaoh: optional Claude Code skill setup could not finish. Other clients continue.";
 			errors.push(message);
-			process.stderr.write(message + "\n");
+			writeStderr(message + "\n");
 		}
 		installed = true;
 	}
@@ -1746,7 +1745,7 @@ export function runInstallSkills(
 				? "Pharaoh MCP server added to ~/.openclaw/openclaw.json"
 				: "Pharaoh already present in ~/.openclaw/openclaw.json — skipped";
 
-			process.stderr.write(
+			writeStderr(
 				[
 					`Pharaoh: installed ${count} skills to ~/.openclaw/skills/`,
 					`  → ${configMsg}`,
@@ -1764,26 +1763,25 @@ export function runInstallSkills(
 		try {
 			const { installed: count, kept } = installManagedAgentSkills(home, "codex");
 			if (!silent) {
-				process.stderr.write(
+				writeStderr(
 					`Pharaoh: installed ${count} skills to ~/.agents/skills/ for Codex ($pharaoh, $pharaoh-plan, $pharaoh-review, $pharaoh-refactor, $pharaoh-debug, $pharaoh-verify, $pharaoh-brainstorm, $pharaoh-tdd)\n\n`,
 				);
 			}
-			if (kept.length)
-				process.stderr.write(`Pharaoh: kept your own Codex skills: ${kept.join(", ")}.\n`);
+			if (kept.length) writeStderr(`Pharaoh: kept your own Codex skills: ${kept.join(", ")}.\n`);
 		} catch (err) {
 			// ALLOWED-CATCH: a directory other tools share must not stop setup before the SC-6
 			// permission migration; the reason is printed even when silent.
 			const msg = err instanceof Error ? err.message : String(err);
 			const message = `Pharaoh: couldn't install Codex skills — ${msg}`;
 			errors.push(message);
-			process.stderr.write(message + "\n");
+			writeStderr(message + "\n");
 		}
 		installed = true;
 	}
 
 	// ── Neither detected ──
 	if (!installed && !silent) {
-		process.stderr.write(
+		writeStderr(
 			[
 				"Pharaoh: no supported skill platform detected.",
 				"",
