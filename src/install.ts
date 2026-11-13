@@ -27,6 +27,7 @@ import {
 	NPX_COMMAND,
 	printLines,
 	resolveSseUrl,
+	showProgress,
 	tokenToCredentials,
 } from "./helpers.js";
 import type { ClientId, ClientOutcome, LaunchConfig } from "./install-types.js";
@@ -293,7 +294,10 @@ interface InstallDependencies {
 	discover: () => ClientTarget[];
 	migrations: typeof legacyMigrations;
 	authenticate: typeof authenticateInstall;
-	runtime: () => Promise<LaunchConfig>;
+	/** Prepare the runtime; `onInstall` fires only when a version has to be downloaded. */
+	runtime: (onInstall: (version: string) => void) => Promise<LaunchConfig>;
+	/** Show a transient progress line; the returned function erases it. */
+	progress: (label: string) => () => void;
 	configure: typeof configureClients;
 	ask: (question: string) => Promise<boolean | null>;
 	choose: (question: string, count: number) => Promise<number | null>;
@@ -334,7 +338,8 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		discover: discoverClients,
 		migrations: legacyMigrations,
 		authenticate: authenticateInstall,
-		runtime: () => ensureRuntime({ onDiagnostic: printLines }),
+		runtime: (onInstall) => ensureRuntime({ onDiagnostic: printLines, onInstall }),
+		progress: showProgress,
 		configure: configureClients,
 		ask: (question) => askYesNo(question),
 		choose: (question, count) => askChoice(question, count),
@@ -402,7 +407,18 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			options.server,
 			runtimeInstallations,
 		);
-		const launch = await dependencies.runtime();
+		// A new version downloads for several seconds after "Signed in"; say so instead of
+		// looking frozen. The line is erased before anything else prints.
+		let stopProgress = () => {};
+		let launch: LaunchConfig;
+		try {
+			launch = await dependencies.runtime((version) => {
+				stopProgress();
+				stopProgress = dependencies.progress(`Installing Pharaoh ${version} (once per update)…`);
+			});
+		} finally {
+			stopProgress();
+		}
 		const configuredLaunch =
 			options.server === DEFAULT_SERVER
 				? launch

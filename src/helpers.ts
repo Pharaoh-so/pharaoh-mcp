@@ -21,6 +21,36 @@ export function printLines(...lines: string[]): void {
 	process.stderr.write(`${lines.join("\n")}\n`);
 }
 
+const PROGRESS_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const PROGRESS_FRAME_MS = 80;
+
+/**
+ * Show a one-line spinner while a slow step runs, on a terminal only. Piped, CI and dumb
+ * terminals get nothing, so their output keeps only the summary lines.
+ * @param label - What is happening, after the spinner.
+ * @param stream - Where to draw it; stderr, like every other installer line.
+ * @returns A function that stops the spinner and erases its line (safe to call twice).
+ */
+export function showProgress(
+	label: string,
+	stream: Pick<NodeJS.WriteStream, "isTTY" | "write"> = process.stderr,
+): () => void {
+	if (!stream.isTTY || process.env.TERM === "dumb") return () => {};
+	let frame = 0;
+	const draw = () =>
+		stream.write(`\r${PROGRESS_FRAMES[frame++ % PROGRESS_FRAMES.length]} ${label}`);
+	draw();
+	const timer = setInterval(draw, PROGRESS_FRAME_MS);
+	timer.unref();
+	let running = true;
+	return () => {
+		if (!running) return;
+		running = false;
+		clearInterval(timer);
+		stream.write("\r\x1b[2K");
+	};
+}
+
 /** How long to read and drop input that was typed before a question showed. */
 const TYPE_AHEAD_MS = 50;
 

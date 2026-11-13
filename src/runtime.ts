@@ -1,5 +1,9 @@
 /** Prepare an exact-version runtime whose path survives npm cache eviction. */
-import { type ExecFileSyncOptionsWithStringEncoding, execFileSync } from "node:child_process";
+import {
+	type ExecFileSyncOptionsWithStringEncoding,
+	execFile,
+	execFileSync,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
@@ -19,6 +23,7 @@ import {
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { LaunchConfig } from "./install-types.js";
 import { localAnalyzerInstallStatus } from "./local/worker-host.js";
 import { getPackageVersion, PACKAGE_NAME } from "./version.js";
@@ -53,6 +58,8 @@ export interface RuntimeOptions {
 	/** Atomic filesystem seam for publication failure fixtures. */
 	rename?: (from: string, to: string) => void;
 	onDiagnostic?: (message: string) => void;
+	/** Called once, just before a fresh install or repair downloads `version`; never when the runtime is current. */
+	onInstall?: (version: string) => void;
 	lockTimeoutMs?: number;
 	/** Preserve npm's relative TLS paths when installation moves to neutral staging. */
 	sourceCwd?: string;
@@ -121,6 +128,30 @@ export function resolveLaunchNode(options: RuntimeOptions = {}): string {
 
 function runner(options: RuntimeOptions): RuntimeRunner {
 	return options.run ?? ((file, args, settings) => execFileSync(file, args, settings));
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Run the runtime's npm install without blocking the event loop, so the installer can draw
+ * progress while it downloads. A fixture runner keeps its synchronous seam.
+ */
+async function runInstallCommand(
+	options: RuntimeOptions,
+	file: string,
+	args: readonly string[],
+	settings: ExecFileSyncOptionsWithStringEncoding,
+): Promise<void> {
+	if (options.run) {
+		options.run(file, args, settings);
+		return;
+	}
+	// execFile pipes every stream, so close stdin to match the synchronous "ignore":
+	// an npm prompt then ends at once instead of waiting out the timeout.
+	const { stdio: _pipes, ...asyncSettings } = settings;
+	const install = execFileAsync(file, [...args], asyncSettings);
+	install.child.stdin?.end();
+	await install;
 }
 
 /** Whether an npm setting names a registry, proxy, TLS or credential value a user configures. */
@@ -464,6 +495,7 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 				// Build a complete replacement before moving the damaged runtime aside.
 			}
 		}
+		options.onInstall?.(version);
 		staging = mkdtempSync(join(root, `.stage-${version}-`));
 		privateDirectory(staging);
 		writeFileSync(join(staging, ".runtime-stage.json"), JSON.stringify({ pid: process.pid }), {
@@ -478,7 +510,8 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 		});
 		writeFileSync(emptyConfig, "", { mode: 0o600 });
 		try {
-			runner(options)(
+			await runInstallCommand(
+				options,
 				command,
 				[
 					npm,
