@@ -191,6 +191,16 @@ export async function requestMemory(
 		);
 	}
 	if (!response.ok) {
+		if (response.status === 403) {
+			// The repo's plan keeps memories without giving them back: show Pharaoh's one line.
+			const body = await responseJson(response).catch(() => null);
+			const locked = body?.error === "locked" && typeof body.message === "string";
+			throw new PilotError(
+				locked ? body.message.slice(0, 500) : "Pharaoh project memory is temporarily unavailable.",
+				true,
+				locked ? 403 : undefined,
+			);
+		}
 		await response.body?.cancel();
 		// The shared credential file can now name a different OAuth session. Do
 		// not reuse an already prepared operation under newly loaded credentials.

@@ -685,7 +685,9 @@ export function turnStore(home = homedir(), now = Date.now) {
 		startCapture(token, target, memorySession, send) {
 			return withTurn(token, target, (key, state) => {
 				if (
-					state.phase !== "recalled" ||
+					// A turn on a plan that keeps memories without giving them back never
+					// recalls, so it captures from pending (execute-turn.mjs).
+					!["pending", "recalled"].includes(state.phase) ||
 					state.readOnly ||
 					!memorySession ||
 					state.memorySession !== memorySession

@@ -29,7 +29,12 @@ import {
 	flushDiagnosticQueue,
 } from "../project-memory/diagnostics-collector.mjs";
 import { executeTurn } from "../project-memory/execute-turn.mjs";
-import { memoryCue, refreshAnchoredMemory, worktreeCue } from "../project-memory/graph-cues.mjs";
+import {
+	memoryCue,
+	refreshAnchoredMemory,
+	retrievalLocked,
+	worktreeCue,
+} from "../project-memory/graph-cues.mjs";
 import {
 	conversationMemoryBinding,
 	markSessionLocal,
@@ -37,7 +42,7 @@ import {
 	sessionLocalSensitivity,
 	turnStore,
 } from "../project-memory/local.mjs";
-import { requestMemory } from "../project-memory/memory-api.mjs";
+import { PilotError, requestMemory } from "../project-memory/memory-api.mjs";
 import {
 	memoryDiagnosticsForClient,
 	memoryHookStateForClient,
@@ -51,7 +56,7 @@ import {
 	ensureMemoryHooks,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
-import { legacyMemoryHooksMayRun } from "../project-memory/user-target.mjs";
+import { legacyMemoryHooksMayRun, memoryClientRoot } from "../project-memory/user-target.mjs";
 import type { Backend, DownstreamClient } from "../src/backend.js";
 import { type Credentials, writeCredentials } from "../src/credentials.js";
 import { askYesNoInTerminal, tokenToCredentials } from "../src/helpers.js";
@@ -140,6 +145,21 @@ function configure(options: Partial<Parameters<typeof syncMemoryHooks>[0]> = {})
 		...options,
 	});
 }
+
+/** Pharaoh's last answer about giving this sign-in's memories back, fresh, so the hook starts no fetch. */
+async function retrieval(binding: string, locked = false) {
+	const directory = memoryClientRoot(home);
+	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	await refreshAnchoredMemory(repo, {
+		directory,
+		binding,
+		request: async () => {
+			if (locked) throw new PilotError("This needs Pro.", true, 403);
+			return { records: [] };
+		},
+	});
+}
+const SESSION = "5a0f3d1e-6c2b-4e8a-9f71-0b3c2d4e5f60";
 
 function hookCommand(settings: string, event: string): string {
 	const hooks = JSON.parse(readFileSync(settings, "utf8")).hooks[event];
@@ -593,6 +613,25 @@ it("shows kept memory about an edited file once, with its reason, and nothing ot
 	// Five minutes on, the list is deleted, refetched and not shown.
 	expect(edit("src/recovery.ts", { now: Date.now() + 300_000 }, "second")).toBeUndefined();
 	expect(launched).toHaveLength(4);
+	// A locked plan keeps nothing to show and silences the reminder. Its answer outlives the
+	// placeholder that replaces a stale list and a failed check; only Pharaoh's next answer changes it.
+	const locked = () => retrievalLocked(repo, { binding: "fixture", stateDirectory });
+	const answer = async (response: Response) => {
+		fetcher.mockResolvedValueOnce(response);
+		await refresh();
+	};
+	expect(locked()).toBe(false);
+	await answer(
+		Response.json({ error: "locked", memories: 3, message: "This needs Pro." }, { status: 403 }),
+	);
+	expect(locked()).toBe(true);
+	expect(edit("src/recovery.ts", {}, "after-lock")).toBeUndefined();
+	expect(edit("src/recovery.ts", { now: Date.now() + 600_000 }, "later")).toBeUndefined();
+	await answer(new Response(null, { status: 503 }));
+	expect(locked()).toBe(true);
+	expect(retrievalLocked(repo, { binding: "another sign-in", stateDirectory })).toBe(false);
+	await answer(Response.json({ records: [] }));
+	expect(locked()).toBe(false);
 	resetHookPreferences(false, home);
 	expect(kept()).toEqual([]);
 });
@@ -1016,7 +1055,7 @@ it("disables quietly with unrelated linked settings and fails for known linked h
 	expect(readFileSync(external, "utf8")).toBe(managed);
 }, 15_000);
 
-it("opts in to one MCP reminder per client and scopes it to eligible worktrees", () => {
+it("opts in to one MCP reminder per client and scopes it to eligible worktrees", async () => {
 	const claude = join(home, ".claude/settings.json");
 	const codex = join(home, ".codex/hooks.json");
 	expect(configure({ enable: true })).toEqual([]);
@@ -1039,6 +1078,13 @@ it("opts in to one MCP reminder per client and scopes it to eligible worktrees",
 		expect(prompt(file, worktree, {}, "Stop")).toBe("");
 		expect(prompt(file, home)).toBe("");
 	}
+	// Once Pharaoh says the plan keeps memories without giving them back: no reminder at all.
+	writeCredentials(
+		{ ...credentials, project_memory_session: SESSION },
+		join(home, ".pharaoh/credentials.json"),
+	);
+	await retrieval(SESSION, true);
+	expect(prompt(codex, worktree)).toBe("");
 	// A similarly named origin without the mapped object must not enroll.
 	const spoof = join(home, "spoof");
 	execFileSync("git", ["init", "-q", spoof]);

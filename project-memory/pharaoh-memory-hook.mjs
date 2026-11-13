@@ -113,8 +113,11 @@ try {
 			}
 			if (skipMemoryPrompt(input.prompt)) process.exit(0);
 			// The records that cite a file are fetched ahead of the first edit, for its memory cue.
-			(await import("./graph-cues.mjs")).primeAnchoredMemory(eligible.repo, cue);
-			result = memoryReminder(eligible.repo, conversationMemoryBinding(client, input.session_id));
+			const { primeAnchoredMemory, retrievalLocked } = await import("./graph-cues.mjs");
+			primeAnchoredMemory(eligible.repo, cue);
+			// A plan that keeps memories without giving them back gets no reminder; capture ran above.
+			if (!retrievalLocked(eligible.repo, cue))
+				result = memoryReminder(eligible.repo, conversationMemoryBinding(client, input.session_id));
 		} else if (!capture) {
 			const { memoryCue, worktreeCue } = await import("./graph-cues.mjs");
 			const outputs = [
