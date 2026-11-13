@@ -320,7 +320,16 @@ function anchoredMemory(directory, repo, binding, now) {
 	}
 }
 
-function writeAnchoredMemory(directory, repo, binding, records, shown, now) {
+/**
+ * A refresh must end, and write its verdict, before the detached sender's own
+ * 10-second exit (diagnostics-sender.mjs) can cut it off.
+ */
+const ANCHORED_TIMEOUT_MS = 8_000;
+
+/** The verdict a kept list carries forward: what Pharaoh last said about giving memories back. */
+const verdictOf = (cache) => (cache?.retrieval ? { retrieval: cache.retrieval } : {});
+
+function writeAnchoredMemory(directory, repo, binding, records, shown, now, verdict) {
 	atomicWrite(
 		memoryCache(directory, repo),
 		JSON.stringify({
@@ -330,6 +339,7 @@ function writeAnchoredMemory(directory, repo, binding, records, shown, now) {
 			fetchedAt: now,
 			records,
 			shown,
+			...verdict,
 		}),
 	);
 }
@@ -338,19 +348,48 @@ function writeAnchoredMemory(directory, repo, binding, records, shown, now) {
  * Fetch the records that cite a file and keep them, owner-private, for five
  * minutes. The request names the repo only. A refusal or failure leaves an
  * empty list, so a repo without memory access is not asked again until it expires.
+ * The list also keeps Pharaoh's last answer about giving memories back:
+ * "allowed" when it answered, "locked" when the repo's plan keeps memories
+ * without giving them back. A failed request keeps the answer before it.
  */
 export async function refreshAnchoredMemory(
 	repo,
 	{ directory, binding, request, now = Date.now() },
 ) {
 	let records = [];
+	let retrieval = "allowed";
 	try {
-		({ records } = await request("anchored", { repo }));
-	} catch {
+		({ records } = await request("anchored", { repo }, { timeoutMs: ANCHORED_TIMEOUT_MS }));
+	} catch (error) {
 		// Keep the empty list.
+		retrieval = error?.status === 403 ? "locked" : undefined;
 	}
-	const shown = anchoredMemory(directory, repo, binding, now)?.shown ?? {};
-	writeAnchoredMemory(directory, repo, binding, records, shown, now);
+	const kept = anchoredMemory(directory, repo, binding, now);
+	writeAnchoredMemory(
+		directory,
+		repo,
+		binding,
+		records,
+		kept?.shown ?? {},
+		now,
+		retrieval ? { retrieval } : verdictOf(kept),
+	);
+}
+
+/**
+ * Whether Pharaoh last said this repo's plan keeps memories without giving
+ * them back, for this sign-in. The prompt reminder and the pilot's recall
+ * lines stay out then; with no answer yet, or after a failed check, they run
+ * and the server decides (VISION.md § Memory saves what a turn proved).
+ *
+ * @param {string} repo - The checkout's GitHub repo
+ * @param {{binding?: string, stateDirectory: string, now?: number}} options - The sign-in and the hook state directory
+ * @returns {boolean} True when the last answer was "locked"
+ */
+export function retrievalLocked(repo, { binding, stateDirectory, now = Date.now() }) {
+	return (
+		Boolean(binding) && anchoredMemory(stateDirectory, repo, binding, now)?.retrieval === "locked"
+	);
 }
 
 /**
@@ -381,7 +420,15 @@ export function primeAnchoredMemory(
 	try {
 		rmSync(memoryCache(stateDirectory, repo), { force: true });
 		// An empty placeholder stops later hook events from starting a second fetch.
-		writeAnchoredMemory(stateDirectory, repo, binding, [], cache?.shown ?? {}, now);
+		writeAnchoredMemory(
+			stateDirectory,
+			repo,
+			binding,
+			[],
+			cache?.shown ?? {},
+			now,
+			verdictOf(cache),
+		);
 		launch(repo);
 	} catch {
 		// Memory cues are advisory.
@@ -439,6 +486,7 @@ export function memoryCue(
 			cache.records,
 			shown,
 			cache.fetchedAt,
+			verdictOf(cache),
 		);
 	} catch {
 		return;

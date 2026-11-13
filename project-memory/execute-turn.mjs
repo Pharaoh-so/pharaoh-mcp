@@ -264,7 +264,9 @@ export async function executeTurn(
 	try {
 		result = await send(payload);
 	} catch (error) {
-		store.transition(token, target, ["recalling"], "failed");
+		// A plan that keeps memories without giving them back refused the recall:
+		// the turn may still capture. Any other failure closes it.
+		store.transition(token, target, ["recalling"], error?.status === 403 ? "pending" : "failed");
 		throw error;
 	}
 	const pairs =

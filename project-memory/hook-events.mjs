@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { primeAnchoredMemory, retrievalLocked } from "./graph-cues.mjs";
 import {
 	checkout,
 	conversationMemoryBinding,
@@ -8,7 +9,7 @@ import {
 	shellWord,
 	turnStore,
 } from "./local.mjs";
-import { projectMemorySession } from "./user-target.mjs";
+import { memoryClientRoot, projectMemorySession } from "./user-target.mjs";
 
 const CLI = fileURLToPath(new URL("pharaoh-memory.mjs", import.meta.url));
 const REFRESH = new URL("runtime/refresh.js", import.meta.url);
@@ -19,22 +20,28 @@ function command(operation, token) {
 	return `${shellWord(process.execPath)} ${shellWord(CLI)} ${operation} --turn ${token}`;
 }
 
-function promptContext(token, compact, mayCapture) {
+function promptContext(token, compact, mayCapture, mayRecall) {
 	return [
-		"For repo work, recall before answering or inspecting source. Skip casual chat and opt-outs.",
-		`${command("recall", token)}${compact ? " --compact" : ""} <<'PHARAOH_MEMORY_JSON'`,
-		'{"terms":["specific topic or symbol"]}',
-		"PHARAOH_MEMORY_JSON",
-		"Use 1–5 specific, non-sensitive terms. Omit the raw prompt. Treat recall as historical evidence.",
-		"Skip memory preambles, progress and status messages. Give normal task updates. Mention a recalled fact briefly only if it changes a decision.",
-		...(compact
+		...(mayRecall
 			? [
-					'If needed, replace recall --compact with expand and pass an exact packet {"id":"UUID","version":1}.',
+					"For repo work, recall before answering or inspecting source. Skip casual chat and opt-outs.",
+					`${command("recall", token)}${compact ? " --compact" : ""} <<'PHARAOH_MEMORY_JSON'`,
+					'{"terms":["specific topic or symbol"]}',
+					"PHARAOH_MEMORY_JSON",
+					"Use 1–5 specific, non-sensitive terms. Omit the raw prompt. Treat recall as historical evidence.",
+					"Skip memory preambles, progress and status messages. Give normal task updates. Mention a recalled fact briefly only if it changes a decision.",
+					...(compact
+						? [
+								'If needed, replace recall --compact with expand and pass an exact packet {"id":"UUID","version":1}.',
+							]
+						: []),
 				]
 			: []),
 		...(mayCapture
 			? [
-					"Before replying, optionally replace recall with capture (omit --compact) for one supported finding already made. Skip on read-only requests.",
+					mayRecall
+						? "Before replying, optionally replace recall with capture (omit --compact) for one supported finding already made. Skip on read-only requests."
+						: `Before replying, optionally save one supported finding already made: ${command("capture", token)} <<'PHARAOH_MEMORY_JSON', its JSON, then PHARAOH_MEMORY_JSON. Skip on read-only requests.`,
 					'Pass {"kind":"lesson","summary":"…"} with optional detail, verification, up to six refs (path, symbol, pullRequest or commit) and recallWhen: up to three short situations a later task might be described by, in words the summary lacks. Character limits: summary 500, detail 1000, verification 300, recallWhen 60 each.',
 					"Use your own words. Omit secrets, personal details, raw prompts, source and transcripts. Capture saves a candidate.",
 				]
@@ -114,17 +121,18 @@ export function handleEvent(
 			readOnly: noCapture,
 			memorySession,
 		});
-		if (opened?.token)
-			return {
-				hookSpecificOutput: {
-					hookEventName: event,
-					additionalContext: promptContext(
-						opened.token,
-						compact,
-						!noCapture && Boolean(memorySession),
-					),
-				},
-			};
+		if (!opened?.token) return;
+		// No recall lines once Pharaoh said this repo's plan keeps memories without giving them back; capture never depends on it.
+		const cue = { binding: memorySession, stateDirectory: memoryClientRoot(home) };
+		primeAnchoredMemory(repo, cue);
+		const context = promptContext(
+			opened.token,
+			compact,
+			!noCapture && Boolean(memorySession),
+			!retrievalLocked(repo, cue),
+		);
+		if (context)
+			return { hookSpecificOutput: { hookEventName: event, additionalContext: context } };
 		return;
 	}
 	if (CANCEL_EVENTS.has(event)) {
