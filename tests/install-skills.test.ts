@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configureClients, verifiedCodingClients } from "../src/client-install.js";
-import { askChoice, askYesNo, parseArgs } from "../src/helpers.js";
+import { askYesNo, parseArgs, pickOption } from "../src/helpers.js";
 import {
 	allowReadTools,
 	CODEX_SKILLS,
@@ -1390,17 +1390,33 @@ describe("the Pharaoh-first line in ~/.claude/CLAUDE.md (interactive setup only)
 		expect(await reply("\n", false, false)).toBe(false);
 		expect(await reply("N\n")).toBe(false);
 		expect(await reply("maybe\n", true)).toBe(null);
-		// The numbered pick: Enter is 1, a listed number picks it, n skips, others ask again.
-		const pick = async (input: string) => {
+	});
+
+	it("pickOption: arrows and Enter pick, a number picks at once, n skips, and the menu erases itself", async () => {
+		const options = ["Claude Code", "Codex", "Skip"];
+		const pick = async (keys: string) => {
 			const stdin = new PassThrough();
-			const answer = askChoice("Start which? ", 2, stdin, new PassThrough());
-			stdin.end(input);
-			return answer;
+			const drawn: string[] = [];
+			const stdout = new PassThrough();
+			stdout.on("data", (chunk: Buffer) => drawn.push(chunk.toString()));
+			const answer = pickOption("Try Pharaoh in:", options, stdin, stdout);
+			stdin.write(keys);
+			setImmediate(() => stdin.end());
+			return { answer: await answer, drawn: drawn.join("") };
 		};
-		expect(await pick("\n")).toBe(1);
-		expect(await pick("3\n2\n")).toBe(2);
-		expect(await pick("no\n")).toBe(0);
-		expect(await pick("1.5\n")).toBe(null);
+		expect((await pick("\r")).answer).toBe(0);
+		expect((await pick("\x1b[B\r")).answer).toBe(1);
+		// Up from the first option wraps to the last.
+		expect((await pick("\x1b[A\r")).answer).toBe(2);
+		expect((await pick("jj\r")).answer).toBe(2);
+		expect((await pick("2")).answer).toBe(1);
+		expect((await pick("n")).answer).toBe(-1);
+		// A number past the list and stray keys pick nothing; ended input is no answer.
+		expect((await pick("9x")).answer).toBe(null);
+		const { drawn } = await pick("\x1b[B\r");
+		expect(drawn).toContain("❯ Codex");
+		// Erased back to the title's first column, with the cursor shown again.
+		expect(drawn.endsWith("\x1b[3A\r\x1b[0J\x1b[?25h")).toBe(true);
 	});
 
 	it("askYesNo on a terminal drops an Enter pressed before the question showed", async () => {

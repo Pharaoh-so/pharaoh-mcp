@@ -3,6 +3,7 @@
  * Separated from index.ts so tests can import without triggering main().
  */
 import { randomUUID } from "node:crypto";
+import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import type { TokenResponse } from "./auth.js";
 import type { Credentials } from "./credentials.js";
@@ -131,28 +132,79 @@ export function askYesNo(
 	});
 }
 
+const HIDE_CURSOR = "\x1b[?25l";
+const SHOW_CURSOR = "\x1b[?25h";
+
 /**
- * Ask for one of `count` numbered options. Enter picks 1; a number from 1 to
- * `count` picks that option; `n` or `no` skips. Anything else asks again.
- * Ctrl-C and typed-ahead keys behave as in askYesNo.
+ * Let the person pick one of `options` from a menu: ↑/↓ (or k/j) move, Enter picks, a
+ * number picks that option at once, and n, q or Esc picks nothing. Ctrl-C exits (130).
+ * Keys typed before the menu showed are dropped, as in askYesNo. The menu erases itself
+ * once a choice is made, so the caller prints the one line that stays.
  *
- * @param question - The prompt, ending in something like `[1] `.
- * @param count - How many options were listed (1-based).
- * @param input - Where the answer is read (defaults to stdin).
- * @param output - Where the prompt is written (defaults to stderr).
- * @returns The chosen option's 1-based number, 0 for a skip, or null when input ended first.
+ * @param title - The line above the options.
+ * @param options - The labels, in order; the first starts highlighted.
+ * @param input - Where keys are read (defaults to stdin).
+ * @param output - Where the menu is drawn (defaults to stderr).
+ * @returns The chosen option's 0-based index, -1 for no choice, or null when input ended first.
  */
-export function askChoice(
-	question: string,
-	count: number,
+export async function pickOption(
+	title: string,
+	options: readonly string[],
 	input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
 	output: NodeJS.WritableStream = process.stderr,
 ): Promise<number | null> {
-	return askLine(question, input, output, (answer) => {
-		if (answer === "") return 1;
-		if (answer === "n" || answer === "no") return 0;
-		const picked = /^\d+$/.test(answer) ? Number(answer) : 0;
-		return picked >= 1 && picked <= count ? picked : undefined;
+	const resumeProgress = pauseProgress();
+	try {
+		if (input.isTTY) await dropTypedAhead(input);
+		return await readPick(title, options, input, output);
+	} finally {
+		resumeProgress();
+	}
+}
+
+/** Draw the menu, redraw it in place on each move, and erase it when a key settles it. */
+function readPick(
+	title: string,
+	options: readonly string[],
+	input: NodeJS.ReadableStream,
+	output: NodeJS.WritableStream,
+): Promise<number | null> {
+	const raw = input as Partial<NodeJS.ReadStream>;
+	let selected = 0;
+	const menu = () =>
+		[title, ...options.map((label, i) => `${i === selected ? "❯" : " "} ${label}`)].join("\n");
+	// From the last option back to the title's first column, then clear everything below.
+	const erase = `\x1b[${options.length}A\r\x1b[0J`;
+	output.write(`${HIDE_CURSOR}${menu()}`);
+	return new Promise((resolve) => {
+		const finish = (choice: number | null) => {
+			input.off("keypress", onKey);
+			input.off("end", onEnd);
+			raw.setRawMode?.(false);
+			input.pause();
+			output.write(`${erase}${SHOW_CURSOR}`);
+			resolve(choice);
+		};
+		const onKey = (text: string | undefined, key: { name?: string; ctrl?: boolean } = {}) => {
+			if (key.ctrl && key.name === "c") {
+				output.write(`${erase}${SHOW_CURSOR}`);
+				process.exit(130);
+			}
+			if (key.name === "up" || text === "k" || key.name === "down" || text === "j") {
+				const step = key.name === "up" || text === "k" ? -1 : 1;
+				selected = (selected + step + options.length) % options.length;
+				output.write(`${erase}${menu()}`);
+			} else if (key.name === "return" || key.name === "enter") finish(selected);
+			else if (key.name === "escape" || text === "n" || text === "q") finish(-1);
+			else if (text && /^[1-9]$/.test(text) && Number(text) <= options.length)
+				finish(Number(text) - 1);
+		};
+		const onEnd = () => finish(null);
+		emitKeypressEvents(input);
+		raw.setRawMode?.(true);
+		input.on("keypress", onKey);
+		input.on("end", onEnd);
+		input.resume();
 	});
 }
 
