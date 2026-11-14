@@ -26,7 +26,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
+import { readPointer, withActivateLockSync } from "../runtime/launcher-v1.mjs";
 import { ensurePharaohHome } from "./credentials.js";
 import { writeStderr } from "./helpers.js";
 import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
@@ -162,11 +162,32 @@ function claudeMarketplaceDir(home: string): string {
  * @returns Number of skills in the plugin.
  */
 function writeClaudeMarketplace(home: string): number {
-	const root = claudeMarketplaceDir(home);
-	const plugin = join(root, "pharaoh");
 	const version = getPackageVersion();
 	const skillCount = getSourceSkillNames(BUNDLED_SKILLS_DIR).length;
-	if (installedPluginVersion(plugin) === version) return skillCount;
+	if (installedPluginVersion(join(claudeMarketplaceDir(home), "pharaoh")) === version)
+		return skillCount;
+	// Behind the stable launcher, only the version current.json names writes the plugin, and
+	// under the lock that activation takes, so an older proxy starting late never overwrites a
+	// newer plugin. A busy lock skips; the next start writes it.
+	const runtimes = join(home, ".pharaoh", "runtimes", "mcp");
+	if (existsSync(join(runtimes, "current.json"))) {
+		withActivateLockSync(runtimes, () => {
+			if (readPointer(runtimes, "current.json")?.version === version) publishClaudePlugin(home);
+		});
+		return skillCount;
+	}
+	publishClaudePlugin(home);
+	return skillCount;
+}
+
+/** Build the plugin beside the live one and swap it in, keeping the old one until the new one is live. */
+function publishClaudePlugin(home: string): void {
+	const root = claudeMarketplaceDir(home);
+	const plugin = join(root, "pharaoh");
+	const previous = `${plugin}.prev`;
+	const version = getPackageVersion();
+	// A swap cut short left the old plugin aside: put it back first.
+	if (!existsSync(plugin) && existsSync(previous)) renameSync(previous, plugin);
 
 	const manifest = JSON.parse(
 		readFileSync(join(PKG_ROOT, ".claude-plugin", "plugin.json"), "utf-8"),
@@ -182,8 +203,10 @@ function writeClaudeMarketplace(home: string): number {
 	);
 	cpSync(BUNDLED_SKILLS_DIR, join(staging, "skills"), { recursive: true });
 	cpSync(BUNDLED_HOOKS_DIR, join(staging, "hooks"), { recursive: true });
-	rmSync(plugin, { recursive: true, force: true });
+	rmSync(previous, { recursive: true, force: true });
+	if (existsSync(plugin)) renameSync(plugin, previous);
 	renameSync(staging, plugin);
+	rmSync(previous, { recursive: true, force: true });
 
 	mkdirSync(join(root, ".claude-plugin"), { recursive: true });
 	writeFileSync(
@@ -201,7 +224,6 @@ function writeClaudeMarketplace(home: string): number {
 			"\t",
 		),
 	);
-	return skillCount;
 }
 
 /** Version in an installed plugin's manifest, or null when there's no readable plugin. */
@@ -958,6 +980,27 @@ export type AllowReadToolsResult =
 	| "runtime-hooks-only"
 	| "error";
 
+/** Handlers Pharaoh's setup writes without asking: runtime, saved-worktree and update-notice hooks. */
+const PHARAOH_SETUP_HOOK = /--pharaoh-(?:runtime|local-worktree|update-notice)-v1/;
+
+/** Whether every handler in a settings file's `hooks` is one Pharaoh's setup wrote. */
+function onlyPharaohHooks(hooks: unknown): boolean {
+	if (!hooks || typeof hooks !== "object") return false;
+	return Object.values(hooks).every(
+		(groups) =>
+			Array.isArray(groups) &&
+			groups.every(
+				(group) =>
+					Array.isArray(group?.hooks) &&
+					group.hooks.every((handler: { command?: unknown; args?: unknown }) =>
+						PHARAOH_SETUP_HOOK.test(
+							`${handler?.command ?? ""} ${Array.isArray(handler?.args) ? handler.args.join(" ") : ""}`,
+						),
+					),
+			),
+	);
+}
+
 /**
  * Add `PHARAOH_ALLOW_RULES` to `permissions.allow` in ~/.claude/settings.json,
  * replacing the blanket `mcp__pharaoh` rule an earlier version wrote. Runs
@@ -977,11 +1020,10 @@ export function allowReadTools(home = homedir()): AllowReadToolsResult {
 	let settings: ClaudeSettings;
 	try {
 		settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as ClaudeSettings;
-		if (settings.hooks && Object.keys(settings).length === 1) {
-			const remainingHooks = updateRuntimeHooks(settings, "claude-code", null).hooks;
-			// A runtime-generated settings file does not opt a person into tool permissions.
-			if (remainingHooks && Object.keys(remainingHooks).length === 0) return "runtime-hooks-only";
-		}
+		// A settings file holding only the hooks Pharaoh's setup writes on its own (runtime,
+		// saved-worktree, update notice) does not opt a person into tool permissions.
+		if (settings.hooks && Object.keys(settings).length === 1 && onlyPharaohHooks(settings.hooks))
+			return "runtime-hooks-only";
 	} catch {
 		// ALLOWED-CATCH: a file we cannot safely interpret is a file we must not rewrite
 		return "error";

@@ -1,10 +1,14 @@
 /**
  * Keeps the stored project-memory hint in step with the account's access now,
  * for sign-ins from before memory existed. A read-only server call: no token
- * rotates, and only the memory fields of the credentials file ever change.
+ * rotates, and only the memory fields of the credentials file ever change. The
+ * same daily call also brings npm's latest proxy release, which the
+ * session-start update notice reads (runtime/update-notice.mjs).
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { readUpdateState, writeUpdateState } from "../runtime/update-notice.mjs";
 import {
 	acquireCredentialsLock,
 	CREDENTIALS_PATH,
@@ -13,6 +17,7 @@ import {
 	writeCredentials,
 } from "./credentials.js";
 import { DEFAULT_SERVER, validMemoryHint } from "./helpers.js";
+import { getPackageVersion } from "./version.js";
 
 /** Re-check a complete hint once a day; after a failed or incomplete check, wait an hour. */
 const RECHECK_MS = 24 * 3_600_000;
@@ -68,22 +73,31 @@ export async function updateMemoryHint(
 ): Promise<Credentials | null> {
 	if (server !== DEFAULT_SERVER) return null;
 	const now = Date.now();
-	const before = await withLock(path, () => {
+	const directory = dirname(path);
+	const claimed = await withLock(path, () => {
 		const creds = readCredentials(path);
 		if (!creds || new URL(creds.sse_url).origin !== DEFAULT_SERVER) return null;
 		const checked = Date.parse(creds.project_memory_checked_at ?? "") || 0;
-		if (!force && (now - checked < RECHECK_MS || now < blockedUntil(path))) return null;
+		const released = Date.parse(String(readUpdateState(directory)?.release_checked_at ?? "")) || 0;
+		const releaseDue = !(now - released < RECHECK_MS);
+		if (!force && ((now - checked < RECHECK_MS && !releaseDue) || now < blockedUntil(path)))
+			return null;
 		// One check at a time across every proxy sharing this file. The claim is short,
 		// so a check cut short (its session ended) doesn't hold the next one off for an hour.
 		holdOff(path, now + CLAIM_MS);
-		return creds;
+		// Claimed before asking, so a failed or concurrent check never asks again the same day.
+		if (releaseDue)
+			writeUpdateState({ release_checked_at: new Date(now).toISOString() }, directory);
+		return { creds, releaseDue };
 	});
-	if (!before) return null;
+	if (!claimed) return null;
+	const { creds: before, releaseDue } = claimed;
 	// A check of many repos completes over several calls: follow the server's retry hint.
 	let body: {
 		project_memory?: unknown;
 		project_memory_checked?: unknown;
 		project_memory_retry_after_ms?: unknown;
+		proxy_release?: { latest?: unknown };
 	};
 	let partial: Credentials | null = null;
 	const failed = () => {
@@ -91,8 +105,11 @@ export async function updateMemoryHint(
 		return partial;
 	};
 	for (let round = 1; ; round++) {
+		// Only the first call of a check that claimed the day's release asks for it.
+		const asksRelease = round === 1 && releaseDue;
 		try {
-			const res = await fetch(`${server}/device/project-memory`, {
+			const query = asksRelease ? `?proxy=${encodeURIComponent(getPackageVersion())}` : "";
+			const res = await fetch(`${server}/device/project-memory${query}`, {
 				headers: { Authorization: `Bearer ${before.access_token}` },
 				redirect: "error",
 				signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -102,6 +119,9 @@ export async function updateMemoryHint(
 		} catch {
 			return failed();
 		}
+		const latest = body?.proxy_release?.latest;
+		if (asksRelease && typeof latest === "string" && /^\d+\.\d+\.\d+$/.test(latest))
+			await withLock(path, () => writeUpdateState({ latest }, directory));
 		const wait = Number(body?.project_memory_retry_after_ms);
 		if (body?.project_memory_checked === true) break;
 		// Proven repos turn their hooks on now; the check carries on for the rest.
@@ -124,6 +144,21 @@ export async function updateMemoryHint(
 	}
 	if (body?.project_memory_checked !== true) return failed();
 	return store(path, before, validMemoryHint(body.project_memory), true, now);
+}
+
+/**
+ * Record the installed proxy version for the session-start update notice, under
+ * the credentials lock the daily check writes under too.
+ *
+ * @param version - The version the installer registered
+ * @param path - Credentials file; the notice's state file sits beside it
+ * @returns true when recorded
+ */
+export async function recordInstalledVersion(
+	version: string,
+	path = CREDENTIALS_PATH,
+): Promise<boolean> {
+	return (await withLock(path, () => writeUpdateState({ version }, dirname(path)))) === true;
 }
 
 /**

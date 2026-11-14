@@ -1,13 +1,27 @@
 /** Installer orchestration against real isolated client configurations. */
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/runtime-client.mjs";
-import { updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
+import { syncUpdateNoticeHook, updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
+import {
+	copyUpdateNoticeHook,
+	readUpdateState,
+	updateNotice,
+	writeUpdateState,
+} from "../runtime/update-notice.mjs";
 import { pollOnce, requestDeviceCode } from "../src/auth.js";
 import type { Credentials } from "../src/credentials.js";
 import { askYesNo, printLines, showProgress } from "../src/helpers.js";
@@ -16,6 +30,7 @@ import {
 	canStartAgent,
 	codexHookUntrusted,
 	type InstallOptions,
+	installUpdateNotice,
 	runInstall,
 	startAgent,
 } from "../src/install.js";
@@ -118,6 +133,7 @@ describe("NPX developer install", () => {
 				},
 				write: (...lines) => output.push(...lines),
 				latest: async () => null,
+				updateNotice: (clients, node) => installUpdateNotice(clients, node, { home, env: {} }),
 				...overrides.dependencies,
 			},
 		};
@@ -210,12 +226,24 @@ describe("NPX developer install", () => {
 		const startAgent = vi.fn(async () => true);
 		const dependencies = { ask, choose, startAgent };
 		expect(await runInstall(options({ dependencies }, ["claude", "codex"]))).toBe(0);
-		// The whole summary: who's connected, then one command per agent.
-		expect(output).toHaveLength(3);
-		expect(output.slice(1)).toEqual([
+		// The whole summary: who's connected, the hook Codex has to trust, then one command per agent.
+		expect(output).toHaveLength(4);
+		expect(output.slice(2)).toEqual([
 			`Start: claude "${SETUP_TOOL_PROMPT}"`,
 			`Start: codex "${SETUP_TOOL_PROMPT}"`,
 		]);
+		// An agent updating an existing sign-in is told to restart, not to start another agent.
+		output.length = 0;
+		const reused = async () => ({ credentials: CREDENTIALS, reused: true as const });
+		expect(
+			await runInstall(
+				options({ dependencies: { ...dependencies, authenticate: reused } }, ["claude", "codex"]),
+			),
+		).toBe(0);
+		expect(output.at(-1)).toBe(
+			`Restart Claude Code and Codex to use Pharaoh ${getPackageVersion()}.`,
+		);
+		expect(output.filter((line) => line.startsWith("Start:"))).toEqual([]);
 		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
 		expect([ask, choose, startAgent].map((fn) => fn.mock.calls.length)).toEqual([0, 0, 0]);
 		const tty = { isTTY: true };
@@ -257,6 +285,10 @@ describe("NPX developer install", () => {
 		// Trusting Pharaoh's position is enough: the user's own untrusted hook isn't ours to raise.
 		const trusted = `[hooks.state."${hooks}:pre_tool_use:1:0"]\ntrusted_hash = "sha256:fixture"\n`;
 		writeFileSync(join(codex, "config.toml"), trusted);
+		// The update notice the install added is Pharaoh's too, until it's trusted.
+		expect(codexHookUntrusted(codex)).toBe(true);
+		const notice = `[hooks.state."${hooks}:session_start:0:0"]\ntrusted_hash = "sha256:fixture"\n`;
+		writeFileSync(join(codex, "config.toml"), trusted + notice);
 		expect(codexHookUntrusted(codex)).toBe(false);
 		expect(codexHookUntrusted(join(home, "missing"))).toBe(false);
 	});
@@ -368,7 +400,16 @@ describe("NPX developer install", () => {
 		expect(await runInstall(install)).toBe(0);
 		expect(enableRuntime).toHaveBeenCalledTimes(2);
 		expect(permissionChecks).toEqual(["no-settings", "runtime-hooks-only"]);
+		// The update notice the second install added doesn't opt the person in either.
+		expect(JSON.stringify(JSON.parse(readFileSync(settings, "utf8")).hooks.SessionStart)).toContain(
+			"--pharaoh-update-notice-v1",
+		);
+		expect(allowReadTools(home)).toBe("runtime-hooks-only");
 		expect(JSON.parse(readFileSync(settings, "utf8"))).not.toHaveProperty("permissions");
+		// Nor do saved-worktree hooks alone.
+		const worktree = { type: "command", command: "'node' 'hook.mjs' --pharaoh-local-worktree-v1" };
+		writeFileSync(settings, JSON.stringify({ hooks: { Stop: [{ hooks: [worktree] }] } }));
+		expect(allowReadTools(home)).toBe("runtime-hooks-only");
 	});
 
 	it("keeps a Claude project override added during sign-in out of automatic analytics", async () => {
@@ -509,6 +550,47 @@ describe("NPX developer install", () => {
 			`${server}/device/token`,
 			expect.objectContaining({ redirect: "error" }),
 		);
+	});
+
+	/** Breaks when: a managed install still registers its versioned path (every update would rewrite
+	 * client settings, and Codex would ask to trust the hooks again). */
+	it("registers the stable launcher and points it at the installed version", async () => {
+		const root = join(home, ".pharaoh", "runtimes", "mcp");
+		const pkg = join(root, "0.3.83", "node_modules", "@pharaoh-so", "mcp");
+		mkdirSync(join(pkg, "dist"), { recursive: true });
+		mkdirSync(join(pkg, "runtime"));
+		writeFileSync(join(pkg, "package.json"), '{"name":"@pharaoh-so/mcp","version":"0.3.83"}');
+		writeFileSync(join(pkg, "dist", "index.js"), "");
+		const launcherSource = readFileSync(join(__dirname, "../runtime/launcher-v1.mjs"));
+		writeFileSync(join(pkg, "runtime", "launcher-v1.mjs"), launcherSource);
+		writeFileSync(
+			join(root, "0.3.83", ".pharaoh-runtime.json"),
+			'{"package":"@pharaoh-so/mcp","version":"0.3.83"}',
+		);
+		writeFileSync(join(root, "current.json"), '{"version":"0.3.81"}');
+		writeFileSync(join(root, "pending.json"), '{"version":"0.3.82"}');
+		const status = await runInstall(
+			options({
+				dependencies: {
+					runtime: async () => ({
+						command: process.execPath,
+						args: [join(pkg, "dist", "index.js")],
+					}),
+				},
+			}),
+		);
+		expect(status).toBe(0);
+		const launcher = join(root, "launcher-v1.mjs");
+		expect(readFileSync(launcher)).toEqual(launcherSource);
+		expect(JSON.parse(readFileSync(join(root, "current.json"), "utf8"))).toMatchObject({
+			version: "0.3.83",
+			previous: "0.3.81",
+		});
+		// A staged update no newer than what was just installed is dropped.
+		expect(existsSync(join(root, "pending.json"))).toBe(false);
+		const claude = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh;
+		expect(claude.args).toEqual([launcher]);
+		expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain(launcher);
 	});
 
 	it("prepares the runtime before any client configuration changes", async () => {
@@ -666,6 +748,125 @@ describe("NPX developer install", () => {
 			stderr.mockRestore();
 			vi.unstubAllEnvs();
 		}
+	});
+
+	/** Breaks when: an install leaves a coding client without the update notice, writes it before Windows' private-path check is ready, moves it between installs, drops a person's own hook, or cleanup leaves it. */
+	it("places one session-start update notice per coding client, the same command on every install", async () => {
+		const claude = join(home, ".claude", "settings.json");
+		const codex = join(home, ".codex", "hooks.json");
+		const own = { hooks: [{ type: "command", command: "own-hook" }] };
+		writeFileSync(claude, JSON.stringify({ hooks: { SessionStart: [own] } }));
+		// On Windows the analyzer lookup sets up the private-path check hook settings need.
+		const order: string[] = [];
+		const dependencies = {
+			localAnalyzer: () => {
+				order.push("analyzer");
+				return undefined;
+			},
+			updateNotice: async (clients: Array<"claude-code" | "codex">, node: string) => {
+				order.push("notice");
+				await installUpdateNotice(clients, node, { home, env: {} });
+			},
+		};
+		expect(await runInstall(options({ dependencies }, ["claude", "codex"]))).toBe(0);
+		expect(order).toEqual(["analyzer", "notice"]);
+		const sessionStart = (path: string) =>
+			JSON.parse(readFileSync(path, "utf8")).hooks?.SessionStart;
+		const hook = join(home, ".pharaoh", "update-notice-hook.mjs");
+		expect(sessionStart(claude)).toEqual([
+			own,
+			{
+				hooks: [
+					{
+						type: "command",
+						command: `'${process.execPath}' '${hook}' 'claude-code' --pharaoh-update-notice-v1`,
+						timeout: 3,
+					},
+				],
+			},
+		]);
+		expect(sessionStart(codex)).toHaveLength(1);
+		expect(readUpdateState(join(home, ".pharaoh"))).toEqual({ version: getPackageVersion() });
+		// A hook the person added after ours doesn't move ours: Codex records trust by position.
+		const later = { hooks: [{ type: "command", command: "later-hook" }] };
+		const settings = JSON.parse(readFileSync(claude, "utf8"));
+		settings.hooks.SessionStart.push(later);
+		writeFileSync(claude, JSON.stringify(settings));
+		const before = [readFileSync(claude, "utf8"), readFileSync(codex, "utf8")];
+		expect(await runInstall(options({}, ["claude", "codex"]))).toBe(0);
+		expect([readFileSync(claude, "utf8"), readFileSync(codex, "utf8")]).toEqual(before);
+		for (const client of ["claude-code", "codex"] as const)
+			syncUpdateNoticeHook(client, null, { home, env: {} });
+		expect(sessionStart(claude)).toEqual([own, later]);
+		expect(sessionStart(codex)).toBeUndefined();
+	});
+
+	/** Breaks when: the notice shows the person more than one line a day, misses an install that is behind, speaks when current, or fails a session start. */
+	it("tells a behind install once a day and gives its agent the command at every session start", async () => {
+		const directory = join(home, ".pharaoh");
+		expect(updateNotice("codex", { directory })).toBeNull();
+		writeUpdateState({ version: "0.3.84", latest: "0.3.84" }, directory);
+		expect(updateNotice("codex", { directory })).toBeNull();
+		writeUpdateState({ latest: "0.3.86" }, directory);
+		const noon = new Date(2030, 0, 2, 12).getTime();
+		expect(updateNotice("claude-code", { directory, now: noon })).toEqual({
+			systemMessage: "Pharaoh 0.3.86 is available — you're on 0.3.84.",
+			hookSpecificOutput: {
+				hookEventName: "SessionStart",
+				additionalContext:
+					"Pharaoh 0.3.86 is available; this machine has 0.3.84. If the person asks to update Pharaoh, run `npx @pharaoh-so/mcp@latest install` (and the `--migrate-legacy` command it prints, if it prints one), then tell them to restart Claude Code to use the new version.",
+			},
+		});
+		// Later that day, in either client, the agent still knows; the person isn't told again.
+		expect(updateNotice("codex", { directory, now: noon + 3_600_000 })).toEqual({
+			hookSpecificOutput: {
+				hookEventName: "SessionStart",
+				additionalContext: expect.stringContaining("restart Codex"),
+			},
+		});
+		// As clients run it: the stable copy, ten session starts at once on a new day, one line.
+		const hook = copyUpdateNoticeHook(directory) ?? "";
+		const start = () =>
+			new Promise<string>((resolve) => {
+				let stdout = "";
+				const child = spawn(process.execPath, [hook, "codex", "--pharaoh-update-notice-v1"], {
+					env: { HOME: home },
+				});
+				child.stdout.on("data", (chunk) => {
+					stdout += chunk;
+				});
+				child.on("close", (code) => resolve(code === 0 ? stdout : `exit ${code}`));
+			});
+		const starts = (await Promise.all(Array.from({ length: 10 }, start))).map((out) =>
+			JSON.parse(out),
+		);
+		expect(starts.filter((out) => out.systemMessage)).toHaveLength(1);
+		expect(starts.every((out) => out.hookSpecificOutput.additionalContext)).toBe(true);
+		writeFileSync(join(directory, "update-notice.json"), "{not json");
+		expect(
+			spawnSync(process.execPath, [hook, "codex", "--pharaoh-update-notice-v1"], {
+				env: { HOME: home },
+				encoding: "utf8",
+			}),
+		).toMatchObject({ status: 0, stdout: "" });
+	});
+
+	/** Breaks when: an install updated through the launcher is judged by the version install recorded
+	 * (stale after an update), is told to reinstall instead of pharaoh_update, or is nagged about a
+	 * release it already accepted. */
+	it("judges a launcher install by what the launcher runs, and names pharaoh_update", () => {
+		const directory = join(home, ".pharaoh");
+		const runtimes = join(directory, "runtimes", "mcp");
+		mkdirSync(runtimes, { recursive: true });
+		writeUpdateState({ version: "0.3.84", latest: "0.3.86" }, directory);
+		writeFileSync(join(runtimes, "current.json"), '{"version":"0.3.86"}');
+		expect(updateNotice("codex", { directory })).toBeNull();
+		writeFileSync(join(runtimes, "current.json"), '{"version":"0.3.85"}');
+		expect(updateNotice("codex", { directory })?.hookSpecificOutput.additionalContext).toBe(
+			"Pharaoh 0.3.86 is available; this machine has 0.3.85. If the person asks to update Pharaoh, call pharaoh_update: it checks the release's npm signature and build provenance, and the new version runs when they next start Codex.",
+		);
+		writeFileSync(join(runtimes, "pending.json"), '{"version":"0.3.86"}');
+		expect(updateNotice("codex", { directory })).toBeNull();
 	});
 
 	it("keeps a legacy pin without consent, then migrates on the explicit opt-in", async () => {

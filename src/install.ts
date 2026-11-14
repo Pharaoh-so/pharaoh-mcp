@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -10,8 +11,9 @@ import {
 	type RuntimeDeviceApproval,
 	type RuntimeEnrollmentIntent,
 } from "../runtime/runtime-client.mjs";
-import { syncLocalWorktreeHooks } from "../runtime/runtime-hooks.mjs";
+import { syncLocalWorktreeHooks, syncUpdateNoticeHook } from "../runtime/runtime-hooks.mjs";
 import { RUNTIME_CLIENTS } from "../runtime/runtime-native.mjs";
+import { copyUpdateNoticeHook } from "../runtime/update-notice.mjs";
 import {
 	pollForToken,
 	printActivationPrompt,
@@ -33,8 +35,9 @@ import {
 } from "./helpers.js";
 import type { ClientId, ClientOutcome, LaunchConfig } from "./install-types.js";
 import { installedLocalAnalyzer } from "./local/worker-host.js";
+import { recordInstalledVersion } from "./memory-hint.js";
 import { loadAndRefresh } from "./refresh.js";
-import { ensureRuntime, RuntimeSetupError, registryKey } from "./runtime.js";
+import { adoptLauncher, ensureRuntime, RuntimeSetupError, registryKey } from "./runtime.js";
 import { describeRuntimeDisable, enableInstalledRuntime } from "./runtime-command.js";
 import {
 	type ClientTarget,
@@ -175,8 +178,9 @@ async function chooseAgent(
 /** The part of Codex's hooks.json the trust check reads: event → groups → handlers. */
 type CodexHooks = Record<string, Array<{ hooks?: Array<{ command?: unknown; args?: unknown }> }>>;
 
-/** Pharaoh's hook commands: project memory, saved-worktree and runtime hooks. */
-const PHARAOH_HOOK = /pharaoh-project-memory:|--pharaoh-(?:local-worktree|runtime)-v1/;
+/** Pharaoh's hook commands: project memory, saved-worktree, runtime and update-notice hooks. */
+const PHARAOH_HOOK =
+	/pharaoh-project-memory:|--pharaoh-(?:local-worktree|runtime|update-notice)-v1/;
 
 /**
  * Whether Codex has a Pharaoh hook it hasn't trusted yet: a hooks.json entry with
@@ -236,6 +240,36 @@ function sameOrigin(left: string, right: string): boolean {
 interface InstallAuthResult {
 	credentials: Credentials;
 	runtimeApprovals?: RuntimeDeviceApproval[];
+	/** The saved sign-in was still good, so this run updates an existing setup. */
+	reused?: true;
+}
+
+/**
+ * Place the session-start update notice for these clients: the hook at its
+ * stable path, the installed version beside it, and one SessionStart handler per
+ * client. Never throws; a client whose hooks can't be written goes without.
+ * @param clients - Coding clients this install connected
+ * @param node - The Node executable their Pharaoh registration runs
+ * @param options.home - Home directory (tests)
+ * @param options.env - Environment for CLAUDE_CONFIG_DIR / CODEX_HOME (tests)
+ */
+export async function installUpdateNotice(
+	clients: readonly ("claude-code" | "codex")[],
+	node: string,
+	{ home = homedir(), env = process.env }: { home?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<void> {
+	const directory = join(home, ".pharaoh");
+	const hook = clients.length ? copyUpdateNoticeHook(directory) : null;
+	if (!hook) return;
+	if (!(await recordInstalledVersion(getPackageVersion(), join(directory, "credentials.json"))))
+		return;
+	for (const client of clients) {
+		try {
+			syncUpdateNoticeHook(client, hook, { node, home, env });
+		} catch {
+			// Disabled or unreadable hook settings: this client has no notice, and nothing else changes.
+		}
+	}
 }
 
 /** Keep working credentials until a new device authorization has actually succeeded. */
@@ -253,7 +287,7 @@ async function authenticateInstall(
 				current.creds.repos.length,
 			);
 			// Which repos have memory is checked in the background at the next session start.
-			return { credentials: current.creds };
+			return { credentials: current.creds, reused: true };
 		}
 		if (current && current.action !== "reauth") {
 			throw new Error(
@@ -305,6 +339,8 @@ interface InstallDependencies {
 	) => Promise<LaunchConfig>;
 	/** A transient progress line naming the current step. */
 	progress: () => Progress;
+	/** Puts the runtime behind the stable launcher; null keeps the exact-version launch (Windows). */
+	launcher: (launch: LaunchConfig) => Promise<string | null>;
 	configure: typeof configureClients;
 	ask: (question: string) => Promise<boolean | null>;
 	/** Pick one of `options` from a menu: its 0-based index, -1 for none, null on ended input. */
@@ -312,6 +348,8 @@ interface InstallDependencies {
 	startAgent: (agent: AgentLaunch) => Promise<boolean>;
 	write: (...lines: string[]) => void;
 	latest: typeof fetchLatestVersion;
+	updateNotice: typeof installUpdateNotice;
+	localAnalyzer: typeof installedLocalAnalyzer;
 	freshRuntimeClients: typeof freshRuntimeClients;
 	verifiedRuntimeClients: typeof verifiedCodingClients;
 	runtimeIntent: typeof automaticRuntimeIntent;
@@ -350,12 +388,15 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		runtime: (onInstall, onDiagnostic, signal) =>
 			ensureRuntime({ onDiagnostic, onInstall, signal }),
 		progress: () => showProgress(),
+		launcher: (launch) => adoptLauncher(launch),
 		configure: configureClients,
 		ask: (question) => askYesNo(question),
 		choose: (title, labels) => pickOption(title, labels),
 		startAgent,
 		write: printLines,
 		latest: fetchLatestVersion,
+		updateNotice: installUpdateNotice,
+		localAnalyzer: installedLocalAnalyzer,
 		freshRuntimeClients,
 		verifiedRuntimeClients: verifiedCodingClients,
 		runtimeIntent: automaticRuntimeIntent,
@@ -440,7 +481,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				"https://pharaoh.so/docs/use-pharaoh/what-we-measure#optional-runtime-analytics",
 			);
 		}
-		const { credentials, runtimeApprovals } = await dependencies.authenticate(
+		const { credentials, runtimeApprovals, reused } = await dependencies.authenticate(
 			options.server,
 			runtimeInstallations,
 		);
@@ -451,10 +492,13 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		if (installing && !runtimeReady) progress.step(`Installing Pharaoh ${installing}`);
 		const launch = await runtime;
 		if (targets.length) progress.step(`Connecting ${listNames(targets)}`);
+		// Registrations and hooks name the launcher, so a later update changes no client setting.
+		const launcher = await dependencies.launcher(launch);
+		const runLaunch = launcher ? { command: launch.command, args: [launcher] } : launch;
 		const configuredLaunch =
 			options.server === DEFAULT_SERVER
-				? launch
-				: { ...launch, args: [...launch.args, "--server", options.server] };
+				? runLaunch
+				: { ...runLaunch, args: [...runLaunch.args, "--server", options.server] };
 		const outcomes = dependencies.configure(targets, configuredLaunch, { migrateLegacy });
 		const codingClients = outcomes
 			.filter(
@@ -474,8 +518,19 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			notes.push(`Pharaoh: optional client setup could not finish. Retry ${INSTALL_COMMAND}.`);
 		}
 		const managedProxyRoot = dirname(dirname(launch.args[0]));
-		if (options.server === DEFAULT_SERVER && installedLocalAnalyzer(managedProxyRoot)) {
-			const hookPath = join(managedProxyRoot, "runtime", "local-worktree-hook.mjs");
+		// Looked up first: on Windows it also sets up the private-path check every hook settings write needs.
+		const analyzer =
+			options.server === DEFAULT_SERVER ? dependencies.localAnalyzer(managedProxyRoot) : undefined;
+		if (options.server === DEFAULT_SERVER)
+			await dependencies.updateNotice(
+				codingClients.filter(
+					(client): client is "claude-code" | "codex" =>
+						client === "claude-code" || client === "codex",
+				),
+				configuredLaunch.command,
+			);
+		if (analyzer) {
+			const hookPath = launcher ?? join(managedProxyRoot, "runtime", "local-worktree-hook.mjs");
 			const verified = dependencies.verifiedRuntimeClients({
 				runningLaunch: configuredLaunch,
 				rejectProjectOverrides: true,
@@ -483,7 +538,10 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			for (const client of verified) {
 				if (!codingClients.includes(client)) continue;
 				try {
-					syncLocalWorktreeHooks(client, hookPath, { node: configuredLaunch.command });
+					syncLocalWorktreeHooks(client, hookPath, {
+						node: configuredLaunch.command,
+						viaLauncher: launcher !== null,
+					});
 				} catch {
 					write(
 						`${LABELS[client]}: saved-worktree hooks could not be configured. Hosted queries remain available.`,
@@ -568,6 +626,11 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				"No agent connected; your existing choices were kept.",
 				`Shell queries: ${NPX_COMMAND} get_codebase_map --repo <name>`,
 			);
+			return status;
+		}
+		// An agent that ran this update tells the person to restart; starting another agent is a first-setup step.
+		if (reused && !(options.interactive ?? canStartAgent())) {
+			write(`Restart ${listNames(connected)} to use Pharaoh ${getPackageVersion()}.`);
 			return status;
 		}
 		const agents: AgentLaunch[] = targets.flatMap((target) =>

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "72d21a1ecd232870bb68adf304185c4feec302f8",
-  "payloadSha256": "f7cf7f5aa79acbe51bcc600a98477494a53d70d1ff4a7e2737c79dce93563736",
+  "commit": "0daf44da049950c37762a1f935446fc59874a1e0",
+  "payloadSha256": "b507a404134b3a3243ec972abc64d49e22305fa31115db6d936b45e5a0fbac3a",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,12 +11,12 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "873a3de259d419240df44adf1b470703d02964603a3c87355957b126d7ebe18f",
+      "sha256": "47b36c96c7f42d6fe8133b822c727707e49886afb543a2e53184467ce313e5ff",
       "mode": "100644"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "45a892d9ee9ba6f0b13978a5fa1c5b8a8d0659e871cad515e193935b24a351ba",
+      "sha256": "a9a802d818ab5ab8d1b84bc7127927946ebc00ac07ad09f55e6e13450a767e39",
       "mode": "100644"
     },
     {
@@ -51,7 +51,7 @@
     },
     {
       "path": "inspect-tools.json",
-      "sha256": "63f160e93c72378341cef18968c7cd305dc275128d91c656afaa08f8c29c3bfb",
+      "sha256": "76574929db19a473825cdaf6885cb4b5c75748401042b6f4423dc6c6c16facc9",
       "mode": "100644"
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "6e533a270eb013be135c94739dc3cab134e6e5756f5c463309a7b223973958cf",
+      "sha256": "8bd2ebddf4e15362787724d368298d258644d18725fb99015610c7e01ad9e005",
       "mode": "100644"
     },
     {
@@ -106,7 +106,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "17fd2490ecb708e51ea1c86982fa332a41c30aa91998520aa2b2bdac451ec0fa",
+      "sha256": "7b94f0493ccbe0fa075f3fa1108405bbb88d3409be909f20a6f96f83a383593f",
       "mode": "100644"
     },
     {
@@ -240,13 +240,23 @@
       "mode": "100644"
     },
     {
+      "path": "runtime/launcher-v1.d.mts",
+      "sha256": "bb1eed5bc44c28fb09b94530eb0bad0c1fdc4d90931206ee58b5897e6776a97d",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/launcher-v1.mjs",
+      "sha256": "a62374fa0d2380040e1b7541a0a5d059a846ed007fd512dbd5dd7e4e96a4f4b7",
+      "mode": "100644"
+    },
+    {
       "path": "runtime/local-worktree-hook.d.mts",
       "sha256": "f76c54f6ff946a11e536947ec9f58ac4a2afec87268942f5e6346ee0db6e44fd",
       "mode": "100644"
     },
     {
       "path": "runtime/local-worktree-hook.mjs",
-      "sha256": "857887423302ea58277470f030a07cbac51fbf2e0914460c8afe9dae2c045a79",
+      "sha256": "579a20ae0c2f2550d921348bb685521e50525d2f4af6d49e6d758ce9fbbd49e8",
       "mode": "100644"
     },
     {
@@ -256,7 +266,7 @@
     },
     {
       "path": "runtime/runtime-bundle.mjs",
-      "sha256": "fdf7ef6f854f35703d11fbe57e8880cbdedbcce202c687a0da6315ef182c5b5a",
+      "sha256": "89942bb4c83190c367b3669ed6329560ded18a685182ed2604c3877617a18894",
       "mode": "100644"
     },
     {
@@ -286,12 +296,12 @@
     },
     {
       "path": "runtime/runtime-hooks.d.mts",
-      "sha256": "e537e0d6727fcb109fc7792307afbae40627a0926f3c396f18428d7f16d86039",
+      "sha256": "6775ded2a6fdfe6755ca0e42cc3f00f9020a3711b1bc9de9e137ef2ac8754661",
       "mode": "100644"
     },
     {
       "path": "runtime/runtime-hooks.mjs",
-      "sha256": "6a0ea9ec484ceddd74d62ee1f9664e993a46bf5dae65615c41eefe7b1720519a",
+      "sha256": "acfa6caaef855e013cefbd1fb459131e6a70fc6d305b18cc530f88f411ba8ccb",
       "mode": "100644"
     },
     {
@@ -322,6 +332,16 @@
     {
       "path": "runtime/runtime-storage.mjs",
       "sha256": "a9feeb4d191fe02183b1d9f7990da29b80a1cb77e8937217258916566326b15c",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/update-notice.d.mts",
+      "sha256": "b52a72eafce3192c0d384c2831067617c2cf0b1a52e0be313a9841e3f7370099",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/update-notice.mjs",
+      "sha256": "a0f72c9b44dfe0b0795d84d5d0b749a4dcebf59532ab48602c2f0380aa936273",
       "mode": "100644"
     },
     {
@@ -396,7 +416,7 @@
     },
     {
       "path": "src/client-install.ts",
-      "sha256": "542c0321f8d1c2b7e0e2e14bfc511ab11644df884102bb0dcef763774a01bee3",
+      "sha256": "e1832778580883f93fd448e6e9bc9e7d93ae7d38d7b2635bae09b92cdb5b939c",
       "mode": "100644"
     },
     {
@@ -416,12 +436,12 @@
     },
     {
       "path": "src/helpers.ts",
-      "sha256": "8439184b2765e787edc5980b999a35a68cfb728ca6633ddb0f40fa9563c24720",
+      "sha256": "db902b075332f57560231af64138301b6591e305011f9f40ae98d8ebcf398ac6",
       "mode": "100644"
     },
     {
       "path": "src/index.ts",
-      "sha256": "ccf741cd7acdc6b0807c6e62398bc0c1c65e28183058ec31f0c7cbb0063b81ab",
+      "sha256": "427003c651c315e757830e8c8439d2433b9db4f01594f85e3e596a80150bfa14",
       "mode": "100644"
     },
     {
@@ -431,7 +451,7 @@
     },
     {
       "path": "src/install-skills.ts",
-      "sha256": "14b69d51a1086d591bb26f7d77869d7e9b073ef1ffa112997a74d39e378abfed",
+      "sha256": "557ea74dccb8f1c0185f05f4d48cfd929fc3853d2221db91b12b6d12ed4ee877",
       "mode": "100644"
     },
     {
@@ -441,7 +461,7 @@
     },
     {
       "path": "src/install.ts",
-      "sha256": "287f2b4d3d6499683c74d47a7796405c98247b371fafa8c061afecc2649bd402",
+      "sha256": "2bd2c324403db277b98786bd84f6fbbecb17c2d142ca45cdbe1217b74d0313b5",
       "mode": "100644"
     },
     {
@@ -471,7 +491,7 @@
     },
     {
       "path": "src/local/runtime.ts",
-      "sha256": "b38e82e0a6faeddade4ac6690b4f2384879e9e588369fd2a2777bde33398a72e",
+      "sha256": "b4318986fed92e37667306258ceac7f1087c90e9680d42d4753a062aa82c6239",
       "mode": "100644"
     },
     {
@@ -491,12 +511,12 @@
     },
     {
       "path": "src/memory-hint.ts",
-      "sha256": "8afd12e87b7a984db9f2e2daacf9f6f17825df93b3ec2aa6748561fe8c3ba6d9",
+      "sha256": "73463d1ec3cb39d401250191eb65beef2807e62abe79f194c8f44f79d92347ac",
       "mode": "100644"
     },
     {
       "path": "src/proxy-server.ts",
-      "sha256": "0b3744c5f6522daad4a0ba40a79c8114cb0d6a4cb03d8278125c3a4570f32146",
+      "sha256": "a5ba95da3c100dfe6a5c0557b756349f3b6d8df508a2bb97208522d816caf9a7",
       "mode": "100644"
     },
     {
@@ -516,7 +536,7 @@
     },
     {
       "path": "src/runtime.ts",
-      "sha256": "906b221b127c0df6eab16c6b9afd0e8dab71c11aa646af57fe668ca8164cca8f",
+      "sha256": "63fc63e318d8b57878b8cff21cec01963eef01fe2c2ec6286d5b5bfbabaf04dc",
       "mode": "100644"
     },
     {
@@ -535,8 +555,13 @@
       "mode": "100644"
     },
     {
+      "path": "src/update.ts",
+      "sha256": "cd9d2f03edfe8435ab32152368235dd76cd4f8d560c68fd39f9b77a19e8e4898",
+      "mode": "100644"
+    },
+    {
       "path": "src/version.ts",
-      "sha256": "7ea2308b17982fd6534564cb274236eec1da5ed79ba1edb509610467aef66273",
+      "sha256": "dd7c3ab92a926050f0becaff96018805e5770982371a0e5f6c719bf912ae45aa",
       "mode": "100644"
     },
     {
@@ -556,7 +581,7 @@
     },
     {
       "path": "tests/client-install.test.ts",
-      "sha256": "a070668c6eec51feb945bfb49be4e9501d527c19b2146c0c0efbb49df2eb1fea",
+      "sha256": "e26f31a7ca22800cf594d00033f353c3d545cbd8bd0c274ddaec352277407b3b",
       "mode": "100644"
     },
     {
@@ -566,12 +591,12 @@
     },
     {
       "path": "tests/install-skills.test.ts",
-      "sha256": "aeb68047fc796218f7f1c7a517cb0de2a0ac386a929726b7cbd68d28ac602de9",
+      "sha256": "cb72875dd1bf2fa72d7261bce1fae8837ea6ec68655e9f715ec146562daabdb3",
       "mode": "100644"
     },
     {
       "path": "tests/install.test.ts",
-      "sha256": "6fb766da3d0403b73e9fb624b40f0b6e9eb8ea72effbca6821ebe63063da9812",
+      "sha256": "2fdb784eca76800a82620da7b771fc28ab1ca122e4fb592002fc52a43b6bc325",
       "mode": "100644"
     },
     {
@@ -586,7 +611,7 @@
     },
     {
       "path": "tests/local-dispatch.test.ts",
-      "sha256": "6d247c67bd47885e00da090c3389d11b5f3f39dd493bc55f4092c442a63c1a13",
+      "sha256": "b3329eedc4da925d977fbcc8e0c4be4f597f4e076fe1cac88b0ca8db25686130",
       "mode": "100644"
     },
     {
@@ -616,7 +641,7 @@
     },
     {
       "path": "tests/refresh.integration.test.ts",
-      "sha256": "ed7994d0d176935940f14ca15c9fdee35b33f210812b004425fc4f99167caba4",
+      "sha256": "04af3c4368909702493ada0710545c9acfa601534fd8952b4313a1e8912349b0",
       "mode": "100644"
     },
     {
@@ -631,17 +656,22 @@
     },
     {
       "path": "tests/runtime.test.ts",
-      "sha256": "de976e6ab25dd981c8f84558fca6342b1f946a413b7bb8e531c5ee2ce7abe182",
+      "sha256": "2d15bf27eff88e27bc0b4b33d346c6a85808957858bf4571d64c01d7cdda032e",
       "mode": "100644"
     },
     {
       "path": "tests/setup.test.ts",
-      "sha256": "9e487e564a4e17f12988a8910a1b68d8a26abc82ca2a469f4d6620a670b602e3",
+      "sha256": "9eaef4943e53307b5d2d63d2f67d90853de37f943b81b4e1079bdcb032329345",
       "mode": "100644"
     },
     {
       "path": "tests/skill-validation.test.ts",
       "sha256": "58014673ed44a96c104d5380182467f17807dd8e1bbac598016b8c9aced6dbff",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/update.test.ts",
+      "sha256": "bfb5b1c1bb81c0e62b4a433d6c56c890412feab28f02501d00424d52fb2c2210",
       "mode": "100644"
     },
     {

@@ -1194,7 +1194,12 @@ async function runHook(client) {
 		import("../dist/client-install.js"),
 		import("../dist/local/worker-host.js"),
 	]);
-	const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+	// What registrations name: the stable launcher when it started this hook, as for the proxy.
+	const launcher = globalThis[Symbol.for("pharaoh.launcher")]?.path;
+	const entry =
+		typeof launcher === "string"
+			? launcher
+			: fileURLToPath(new URL("../dist/index.js", import.meta.url));
 	const home = homedir();
 	const managed = verifiedCodingClients({
 		runningLaunch: { command: process.execPath, args: [entry] },

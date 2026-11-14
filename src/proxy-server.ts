@@ -297,6 +297,12 @@ export class ProxyServer {
 			let args = req.params.arguments ?? {};
 			if (name === LOCAL_READINESS.name)
 				return this.localBlast?.checkReadiness?.(args) ?? localRefusal("unverified_worktree");
+			// The hosted tool describes; this proxy verifies and stages the update itself (update.ts).
+			if (name === "pharaoh_update") {
+				const { updateFromTool } = await import("./update.js");
+				const { text, isError } = await updateFromTool(extra.signal);
+				return { isError, content: [{ type: "text", text }] };
+			}
 			const route = selectBlastRoute(
 				name,
 				args,

@@ -36,6 +36,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readUpdateState, writeUpdateState } from "../runtime/update-notice.mjs";
 import {
 	type Credentials,
 	readCredentials,
@@ -45,6 +46,7 @@ import {
 import { DEFAULT_SERVER } from "../src/helpers.js";
 import { updateMemoryHint } from "../src/memory-hint.js";
 import { loadAndRefresh, originBoundRefresh, refreshIfNeeded } from "../src/refresh.js";
+import { getPackageVersion } from "../src/version.js";
 
 interface TestServer {
 	url: string;
@@ -795,7 +797,7 @@ describe("updateMemoryHint", () => {
 		await Promise.all([1, 2, 3].map(() => updateMemoryHint(DEFAULT_SERVER, { path })));
 		expect(fetch).toHaveBeenCalledTimes(1);
 		expect(fetch.mock.calls[0]).toEqual([
-			"https://mcp.pharaoh.so/device/project-memory",
+			`https://mcp.pharaoh.so/device/project-memory?proxy=${getPackageVersion()}`,
 			expect.objectContaining({ headers: { Authorization: "Bearer phat_0" } }),
 		]);
 		const stored = readCredentials(path);
@@ -820,6 +822,52 @@ describe("updateMemoryHint", () => {
 			cleared?.project_memory_session,
 			cleared?.access_token,
 		]).toEqual([undefined, undefined, "phat_0"]);
+	});
+
+	/** Breaks when: the session-start notice loses npm's latest, or the release is asked for more than once a day. */
+	it("asks for the newest release on the first call of one check a day, and keeps it beside the credentials", async () => {
+		const url = (fetch: ReturnType<typeof vi.fn>) => fetch.mock.calls.map(([called]) => called);
+		const paced = vi
+			.fn()
+			.mockImplementationOnce(
+				answer({
+					project_memory_status: "unavailable",
+					project_memory_retry_after_ms: 1,
+					proxy_release: { latest: "0.3.90" },
+				}),
+			)
+			.mockImplementationOnce(answer({ project_memory_checked: true }));
+		vi.stubGlobal("fetch", paced);
+		await updateMemoryHint(DEFAULT_SERVER, { path });
+		const plain = "https://mcp.pharaoh.so/device/project-memory";
+		expect(url(paced)).toEqual([`${plain}?proxy=${getPackageVersion()}`, plain]);
+		expect(readUpdateState(dir)).toMatchObject({ latest: "0.3.90" });
+		// The same day, a forced memory check and a failed one never ask again.
+		const failing = vi.fn(async () => {
+			throw new Error("offline");
+		});
+		vi.stubGlobal("fetch", failing);
+		writeUpdateState(
+			{ release_checked_at: new Date(Date.now() - 25 * 3_600_000).toISOString() },
+			dir,
+		);
+		await updateMemoryHint(DEFAULT_SERVER, { path, force: true });
+		writeFileSync(`${path}.memory-check`, String(Date.now() - 1));
+		await updateMemoryHint(DEFAULT_SERVER, { path, force: true });
+		expect(url(failing)).toEqual([`${plain}?proxy=${getPackageVersion()}`, plain]);
+		// A day on, a release that's due runs a check even though memory isn't due.
+		const next = vi.fn(
+			answer({ project_memory_checked: true, proxy_release: { latest: "0.3.91" } }),
+		);
+		vi.stubGlobal("fetch", next);
+		writeFileSync(`${path}.memory-check`, String(Date.now() - 1));
+		writeUpdateState(
+			{ release_checked_at: new Date(Date.now() - 25 * 3_600_000).toISOString() },
+			dir,
+		);
+		await updateMemoryHint(DEFAULT_SERVER, { path });
+		expect(url(next)).toEqual([`${plain}?proxy=${getPackageVersion()}`]);
+		expect(readUpdateState(dir)).toMatchObject({ latest: "0.3.91" });
 	});
 
 	/** Breaks when: the installer's wait lets Node exit mid-await (it did in the 0.3.80 candidate). */

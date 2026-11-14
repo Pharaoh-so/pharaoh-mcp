@@ -652,6 +652,31 @@ describe("verified coding clients for automatic startup assets", () => {
 				requiredProxy: { ...requiredProxy, server: "https://other.example" },
 			}),
 		).toEqual([]);
+		// Through the stable launcher, the version current.json names is the one checked.
+		const runtimes = join(realpathSync(home), ".pharaoh", "runtimes", "mcp");
+		write(
+			join(runtimes, "0.3.70", ".pharaoh-runtime.json"),
+			'{"package":"@pharaoh-so/mcp","version":"0.3.70"}',
+		);
+		const launcher = {
+			command: launch.command,
+			args: [join(runtimes, "launcher-v1.mjs"), "--server", server],
+		};
+		configureClients([code()], launcher, options);
+		write(join(runtimes, "current.json"), '{"version":"0.3.69"}');
+		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual([]);
+		write(join(runtimes, "current.json"), '{"version":"0.3.70"}');
+		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual(["claude-code"]);
+		// The proxy and its saved-worktree hook check themselves as the launcher that started them
+		// (runningEntry): as their own versioned entry they would never count as managed.
+		write(launch.command, "fixture-node");
+		const running = (entry: string) => ({ command: launch.command, args: [entry] });
+		expect(verifiedCodingClients({ ...options, runningLaunch: running(launcher.args[0]) })).toEqual(
+			["claude-code"],
+		);
+		expect(
+			verifiedCodingClients({ ...options, runningLaunch: running(next.config.args[0]) }),
+		).toEqual([]);
 	});
 
 	it.skipIf(process.platform === "win32")(
