@@ -14,5 +14,12 @@ export function updateRuntimeHooks(
 export function syncLocalWorktreeHooks(
 	client: "claude-code" | "codex",
 	hookPath: string | null,
-	options?: { node?: string; settingsPath?: string },
+	options?: { node?: string; settingsPath?: string; viaLauncher?: boolean },
+): void;
+
+/** Add or remove the session-start update notice's one SessionStart handler. */
+export function syncUpdateNoticeHook(
+	client: "claude-code" | "codex",
+	hookPath: string | null,
+	options?: { node?: string; settingsPath?: string; home?: string; env?: NodeJS.ProcessEnv },
 ): void;

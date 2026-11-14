@@ -13,6 +13,7 @@ const FILES = [
 	"runtime-native.mjs",
 	"runtime-metadata.mjs",
 	"runtime-storage.mjs",
+	"update-notice.mjs",
 ];
 
 /** Install the content-addressed, owner-private observer and return its executable path. */

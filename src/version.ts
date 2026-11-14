@@ -23,6 +23,32 @@ export const UPGRADE_COMMAND = `npx ${PACKAGE_NAME}@latest install`;
 /** Where the npm registry reports the newest published version. */
 const REGISTRY_LATEST_URL = `https://registry.npmjs.org/${PACKAGE_NAME.replace("/", "%2F")}/latest`;
 
+/** What the stable launcher (runtime/launcher-v1.mjs) records about the process it started. */
+export interface LauncherInfo {
+	/** The launcher file client registrations name. */
+	path: string;
+	/** The runtimes directory (~/.pharaoh/runtimes/mcp). */
+	root: string;
+	/** The version it selected. */
+	version: string;
+}
+
+/** The launcher that started this process, or undefined when a registration ran this version directly. */
+function launcherInfo(): LauncherInfo | undefined {
+	const info = (globalThis as Record<symbol, unknown>)[Symbol.for("pharaoh.launcher")];
+	return info && typeof info === "object" ? (info as LauncherInfo) : undefined;
+}
+
+/**
+ * The launch entry client registrations name for this process: the stable launcher that
+ * started it, or this version's own entry when a registration runs it directly.
+ *
+ * @param selfEntry - This version's dist/index.js
+ */
+export function runningEntry(selfEntry: string): string {
+	return launcherInfo()?.path ?? selfEntry;
+}
+
 /** Read the mcp-proxy package version from package.json. */
 export function getPackageVersion(): string {
 	try {

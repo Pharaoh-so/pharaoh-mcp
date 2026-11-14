@@ -20,6 +20,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { LAUNCHER_NAME, readPointer, usableVersion } from "../runtime/launcher-v1.mjs";
 import { DEFAULT_SERVER } from "./helpers.js";
 import type {
 	ClientId,
@@ -864,10 +865,17 @@ function supportsRegisteredProxy(
 	home: string,
 	required: { minimumVersion: string; server: string },
 ): boolean {
-	const [entry, flag, configuredServer, ...rest] = launch.args;
+	const [registered, flag, configuredServer, ...rest] = launch.args;
 	if (flag !== undefined && (flag !== "--server" || !configuredServer || rest.length)) return false;
 	if (new URL(configuredServer ?? DEFAULT_SERVER).origin !== new URL(required.server).origin)
 		return false;
+	// A registration through the stable launcher runs the version current.json names.
+	const runtimes = join(realpathSync(home), ".pharaoh", "runtimes", "mcp");
+	const entry =
+		registered === join(runtimes, LAUNCHER_NAME)
+			? (usableVersion(runtimes, readPointer(runtimes, "current.json")?.version) ?? "")
+			: registered;
+	if (!entry) return false;
 	const packageRoot = dirname(dirname(entry));
 	const pkg = json(snapshot(join(packageRoot, "package.json")).text);
 	const version = pkg.version;

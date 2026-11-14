@@ -105,9 +105,9 @@ describe("saved-worktree routing", () => {
 	});
 
 	it("rejects selectors above the analyzer's 512-character limit during routing", () => {
-		expect(selectBlastRoute(name, { ...query, entity: "a".repeat(512) }, local, noMarker).kind).toBe(
-			"local",
-		);
+		expect(
+			selectBlastRoute(name, { ...query, entity: "a".repeat(512) }, local, noMarker).kind,
+		).toBe("local");
 		expect(selectBlastRoute(name, { ...query, entity: "a".repeat(513) }, local, noMarker)).toEqual({
 			kind: "refused",
 			code: "invalid_local_request",
@@ -187,6 +187,7 @@ describe("saved-worktree routing", () => {
 		}
 	});
 
+	/** Also breaks when: pharaoh_update is forwarded to the hosted server instead of answered here. */
 	it("keeps readiness local and continues to serve ordinary hosted recon", async () => {
 		const forwarded: string[] = [];
 		const proxy = new ProxyServer({
@@ -207,6 +208,12 @@ describe("saved-worktree routing", () => {
 				arguments: { challenge: "a".repeat(43) },
 			});
 			expect(status.isError).toBe(true);
+			expect(forwarded).toEqual([]);
+			// The proxy verifies and stages updates itself (here its child can't run); the hosted tool is never asked.
+			const update = await client.callTool({ name: "pharaoh_update", arguments: {} });
+			expect(update.content).toEqual([
+				{ type: "text", text: expect.stringContaining("Pharaoh did not stage the update") },
+			]);
 			expect(forwarded).toEqual([]);
 			for (const claim of [{ scope: "local" }, { local_context: "unverified" }]) {
 				const refused = await client.callTool({

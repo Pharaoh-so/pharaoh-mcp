@@ -1,7 +1,7 @@
 {
 	"name": "@pharaoh-so/mcp",
 	"mcpName": "so.pharaoh/pharaoh",
-	"version": "0.3.83",
+	"version": "0.3.84",
 	"description": "Pharaoh developer install for Claude Code, Codex and Claude Desktop: architecture tools, shell queries and agent workflows.",
 	"type": "module",
 	"main": "dist/index.js",
@@ -65,6 +65,7 @@
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "^1.26.0",
+		"sigstore": "3.1.0",
 		"smol-toml": "1.9.0"
 	},
 	"optionalDependencies": {

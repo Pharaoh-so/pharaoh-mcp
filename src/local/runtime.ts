@@ -19,6 +19,7 @@ import {
 import { runtimeClient } from "../../runtime/runtime-native.mjs";
 import { verifiedCodingClients } from "../client-install.js";
 import { type Credentials, readCredentials } from "../credentials.js";
+import { runningEntry } from "../version.js";
 import { createLocalAuthorization, LocalAuthorizationError } from "./authorization.js";
 import { type LocalBlastRuntime, type LocalDelivery, localRefusal } from "./contracts.js";
 import type { BlastRoute, CheckoutEvidence, VerifiedCheckout } from "./dispatch.js";
@@ -153,7 +154,8 @@ export function createLocalBlastRuntime(
 ): LocalBlastRuntime | undefined {
 	const analyzer = installedLocalAnalyzer();
 	if (!analyzer) return undefined;
-	const entry = fileURLToPath(new URL("../index.js", import.meta.url));
+	// What registrations name: the launcher when one started this proxy (binds the hook's grants too).
+	const entry = runningEntry(fileURLToPath(new URL("../index.js", import.meta.url)));
 	const claimedSignIns = new WeakMap<VerifiedCheckout, Credentials>();
 	let generation: LocalRuntimeGeneration | undefined;
 	const managedClients = () =>

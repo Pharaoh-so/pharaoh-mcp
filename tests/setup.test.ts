@@ -242,7 +242,7 @@ it("explicit reset continues independent cleanup when the private installation r
 it.each([
 	"--clean",
 	"--logout",
-])("%s ignores unrelated malformed hooks without runtime enrollment", (flag) => {
+])("%s ignores unrelated malformed hooks without runtime enrollment, and removes the update notice hook", (flag) => {
 	const home = mkdtempSync(join(tmpdir(), "pharaoh-clean-without-runtime-"));
 	try {
 		const codex = join(home, ".codex");
@@ -250,6 +250,17 @@ it.each([
 		mkdirSync(join(home, "empty-path"));
 		const hooks = join(codex, "hooks.json");
 		writeFileSync(hooks, "{unrelated malformed configuration");
+		const claude = join(home, ".claude", "settings.json");
+		mkdirSync(join(home, ".claude"));
+		const keep = { hooks: [{ type: "command", command: "keep-this-hook" }] };
+		const notice =
+			"'node' 'launcher-v1.mjs' 'hook' 'notice' 'claude-code' --pharaoh-update-notice-v1";
+		writeFileSync(
+			claude,
+			JSON.stringify({
+				hooks: { SessionStart: [{ hooks: [{ type: "command", command: notice }] }, keep] },
+			}),
+		);
 		const tsx = createRequire(import.meta.url).resolve("tsx/cli");
 		const result = spawnSync(process.execPath, [tsx, join(PKG_ROOT, "src/index.ts"), flag], {
 			encoding: "utf8",
@@ -264,6 +275,7 @@ it.each([
 		expect(result.status, result.stderr).toBe(0);
 		expect(result.stderr).not.toContain("runtime revocation");
 		expect(readFileSync(hooks, "utf8")).toBe("{unrelated malformed configuration");
+		expect(JSON.parse(readFileSync(claude, "utf8")).hooks).toEqual({ SessionStart: [keep] });
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

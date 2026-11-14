@@ -320,6 +320,7 @@ export function printUsage(): void {
 	printLines(
 		"Usage: pharaoh-mcp [options]",
 		"       pharaoh-mcp install [--migrate-legacy] [options]",
+		"       pharaoh-mcp update   Verify the newest release and stage it for your next session",
 		"       pharaoh-mcp <tool> --repo <name> [flags] [--json] (use <tool> --help)",
 		"",
 		"Options:",

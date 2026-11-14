@@ -42,7 +42,7 @@ import { updateMemoryHint } from "./memory-hint.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { type ProxyServer, startInAuthRequiredMode, startInSseMode } from "./proxy-server.js";
 import { loadAndRefresh } from "./refresh.js";
-import { getPackageVersion } from "./version.js";
+import { getPackageVersion, runningEntry } from "./version.js";
 
 const BANNER = [
 	"",
@@ -117,12 +117,20 @@ async function cleanupClientRegistrations(reset: boolean): Promise<boolean> {
 		(process.platform === "win32" &&
 			Boolean((await import("./local/worker-host.js")).installedLocalAnalyzer()));
 	if (localCleanupSupported) {
-		const { syncLocalWorktreeHooks } = await import("../runtime/runtime-hooks.mjs");
+		const { syncLocalWorktreeHooks, syncUpdateNoticeHook } = await import(
+			"../runtime/runtime-hooks.mjs"
+		);
 		for (const client of ["claude-code", "codex"] as const) {
 			try {
 				syncLocalWorktreeHooks(client, null);
 			} catch {
 				printLines("Pharaoh: saved-worktree hook cleanup needs attention.");
+				provenanceFailed = true;
+			}
+			try {
+				syncUpdateNoticeHook(client, null);
+			} catch {
+				printLines("Pharaoh: update notice hook cleanup needs attention.");
 				provenanceFailed = true;
 			}
 		}
@@ -144,6 +152,11 @@ async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	const explicitInstall = args[0] === "install";
 	if (explicitInstall) args.shift();
+	if (!explicitInstall && args[0] === "update") {
+		const { runUpdateCommand } = await import("./update.js");
+		process.exitCode = await runUpdateCommand(args.slice(1));
+		return;
+	}
 	if (!explicitInstall && args[0] && !args[0].startsWith("-")) {
 		const { runCli } = await import("./cli.js");
 		return runCli(args);
@@ -334,7 +347,10 @@ async function main(): Promise<void> {
 	try {
 		const { verifiedCodingClients } = await import("./setup.js");
 		const clients = verifiedCodingClients({
-			runningLaunch: { command: process.execPath, args: [fileURLToPath(import.meta.url)] },
+			runningLaunch: {
+				command: process.execPath,
+				args: [runningEntry(fileURLToPath(import.meta.url))],
+			},
 		});
 		if (clients.length) runInstallSkills(undefined, { clients });
 	} catch (err) {

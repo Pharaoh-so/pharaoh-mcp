@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { RUNTIME_TOOL_NAMES, runtimeUuid } from "./runtime-native.mjs";
 import { ensurePrivateDirectory, privatePath } from "./runtime-storage.mjs";
+import { UPDATE_NOTICE_HOOK, UPDATE_NOTICE_MARKER } from "./update-notice.mjs";
 
 const MARKER = "--pharaoh-runtime-v1";
 const OWNED = / --pharaoh-runtime-v1(?: '[0-9a-f-]{36}')?$/;
@@ -205,40 +206,47 @@ const LOCAL_MCP_TOOLS =
 	"^mcp__pharaoh__(?:get_blast_radius|pharaoh_local_worktree_status|pharaoh_memory_(?:recall|expand|capture|feedback))$";
 const powerShellWord = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
-function ownsLocalHandler(handler) {
+/** A handler this hook family wrote: its command ends with the marker, or (Windows) its args do. */
+function ownsHandler(handler, marker, script) {
 	return (
-		String(handler?.command ?? "").endsWith(` ${LOCAL_MARKER}`) ||
+		String(handler?.command ?? "").endsWith(` ${marker}`) ||
 		(Array.isArray(handler?.args) &&
 			handler.args.length === 3 &&
-			handler.args[2] === LOCAL_MARKER &&
-			String(handler.args[0]).endsWith("local-worktree-hook.mjs"))
+			handler.args[2] === marker &&
+			String(handler.args[0]).endsWith(script))
 	);
 }
 
-function localHandler(client, hookPath, node) {
+/**
+ * One hook handler. `mode` runs the stable launcher's hook mode instead of a script directly
+ * (`hookPath` is then the launcher), so the command never changes when Pharaoh updates.
+ */
+function markedHandler(client, hookPath, node, marker, mode = []) {
 	const base = { type: "command", timeout: 3 };
 	if (process.platform === "win32" && client === "claude-code")
-		return { ...base, command: node, args: [hookPath, client, LOCAL_MARKER] };
-	const command = `${[node, hookPath, client].map(shellWord).join(" ")} ${LOCAL_MARKER}`;
+		return { ...base, command: node, args: [hookPath, client, marker] };
+	const command = `${[node, hookPath, ...mode, client].map(shellWord).join(" ")} ${marker}`;
 	if (process.platform === "win32")
 		return {
 			...base,
 			command,
-			commandWindows: `& ${[node, hookPath, client].map(powerShellWord).join(" ")} ${LOCAL_MARKER}`,
+			commandWindows: `& ${[node, hookPath, client].map(powerShellWord).join(" ")} ${marker}`,
 		};
 	return { ...base, command };
 }
 
-/** Merge or remove only Pharaoh's local-readiness hooks; native trust remains with the client. */
-export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
-	const path = options.settingsPath ?? runtimeSettingsPath(client, options);
+/**
+ * Read a client's user hook settings with this family's handlers taken out.
+ * @returns The settings as read, their hooks without ours, and whether any were removed
+ */
+function settingsWithoutHandlers(client, path, adding, marker, script) {
 	const { config, exists, identity } = readHookSettings(
 		client,
 		path,
-		hookPath ? undefined : LOCAL_MARKER,
+		adding ? undefined : marker,
 		true,
 	);
-	if (hookPath && client === "claude-code" && config.disableAllHooks === true)
+	if (adding && client === "claude-code" && config.disableAllHooks === true)
 		throw new Error("Claude Code hooks are disabled.");
 	if (
 		config.hooks !== undefined &&
@@ -252,15 +260,35 @@ export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
 		if (!Array.isArray(groups)) throw new Error("Invalid native hook configuration.");
 		hooks[event] = groups.flatMap((group) => {
 			if (!Array.isArray(group?.hooks)) throw new Error("Invalid native hook configuration.");
-			const kept = group.hooks.filter((handler) => !ownsLocalHandler(handler));
+			const kept = group.hooks.filter((handler) => !ownsHandler(handler, marker, script));
 			if (kept.length === group.hooks.length) return [group];
 			changed = true;
 			return kept.length ? [{ ...group, hooks: kept }] : [];
 		});
 		if (groups.length && !hooks[event].length) delete hooks[event];
 	}
+	return { config, exists, identity, hooks, changed };
+}
+
+/** Merge or remove only Pharaoh's local-readiness hooks; native trust remains with the client. */
+export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
+	const path = options.settingsPath ?? runtimeSettingsPath(client, options);
+	const { config, exists, identity, hooks, ...removal } = settingsWithoutHandlers(
+		client,
+		path,
+		Boolean(hookPath),
+		LOCAL_MARKER,
+		"local-worktree-hook.mjs",
+	);
+	let changed = removal.changed;
 	if (hookPath) {
-		const handler = localHandler(client, hookPath, options.node ?? process.execPath);
+		const handler = markedHandler(
+			client,
+			hookPath,
+			options.node ?? process.execPath,
+			LOCAL_MARKER,
+			options.viaLauncher === true ? ["hook", "local-worktree"] : [],
+		);
 		const events =
 			client === "claude-code"
 				? [
@@ -290,6 +318,54 @@ export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
 		changed = true;
 	}
 	if (!changed) return;
+	writeHookSettings(
+		path,
+		config,
+		{ ...config, hooks },
+		exists,
+		identity,
+		process.platform === "win32",
+	);
+}
+
+/**
+ * Add or remove the session-start update notice (runtime/update-notice.mjs): one
+ * SessionStart handler, beside every unrelated hook. Codex asks the person to
+ * trust it once; the command stays the same across updates.
+ * @param {"claude-code" | "codex"} client
+ * @param {string | null} hookPath - The hook's stable copy, or null to remove it
+ * @param {{ node?: string, settingsPath?: string, home?: string, env?: NodeJS.ProcessEnv }} [options]
+ */
+export function syncUpdateNoticeHook(client, hookPath, options = {}) {
+	const path = options.settingsPath ?? runtimeSettingsPath(client, options);
+	const { config, exists, identity, hooks, changed } = settingsWithoutHandlers(
+		client,
+		path,
+		Boolean(hookPath),
+		UPDATE_NOTICE_MARKER,
+		UPDATE_NOTICE_HOOK,
+	);
+	if (hookPath) {
+		const handler = markedHandler(
+			client,
+			hookPath,
+			options.node ?? process.execPath,
+			UPDATE_NOTICE_MARKER,
+		);
+		// Already in place: keep its position, since Codex records trust by position.
+		const owned = Object.values(config.hooks ?? {})
+			.flat()
+			.flatMap((group) => group.hooks)
+			.filter((entry) => ownsHandler(entry, UPDATE_NOTICE_MARKER, UPDATE_NOTICE_HOOK));
+		const current = JSON.stringify(handler);
+		if (
+			owned.length === 1 &&
+			JSON.stringify(owned[0]) === current &&
+			config.hooks.SessionStart?.some((group) => group.hooks.includes(owned[0]))
+		)
+			return;
+		hooks.SessionStart = [...(hooks.SessionStart ?? []), { hooks: [handler] }];
+	} else if (!changed) return;
 	writeHookSettings(
 		path,
 		config,

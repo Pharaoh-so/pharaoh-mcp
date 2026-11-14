@@ -462,6 +462,31 @@
           "resourceUri": "ui://pharaoh/trace/v1.1.html"
         }
       }
+    },
+    {
+      "name": "pharaoh_update",
+      "title": "Update Pharaoh",
+      "description": "Update the npx proxy to the newest Pharaoh release, with the user's consent.\n\nCALL THIS WHEN:\n• The user asks to update Pharaoh, or accepts a notice that a new Pharaoh version is available\n\nRETURNS: On the npx proxy, whether the newest release passed verification (npm's registry signature and its build provenance) and is staged; it becomes active at the next session start. On a hosted connection, that it is already current.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "title": "Update Pharaoh",
+        "openWorldHint": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://pharaoh/trace/v1.1.html"
+        }
+      }
     }
   ]
 }

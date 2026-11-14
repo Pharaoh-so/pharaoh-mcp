@@ -20,11 +20,22 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import {
+	LAUNCHER_NAME,
+	newerVersion,
+	readPointer,
+	removePointer,
+	usableVersion,
+	withActivateLock,
+	writePointer,
+} from "../runtime/launcher-v1.mjs";
 import type { LaunchConfig } from "./install-types.js";
 import { localAnalyzerInstallStatus } from "./local/worker-host.js";
 import { getPackageVersion, PACKAGE_NAME } from "./version.js";
 
 const RECOVERY = "npx @pharaoh-so/mcp@latest install";
+/** The npm registry the updater installs from; a user's mirror or registry setting is never used. */
+export const NPM_REGISTRY = "https://registry.npmjs.org/";
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const LOCK_TIMEOUT_MS = 150_000;
 /** All npm time for one runtime install, retry included; below LOCK_TIMEOUT_MS, so lock waiters outlast it. */
@@ -37,6 +48,25 @@ export class RuntimeSetupError extends Error {
 		super(message);
 		this.name = "RuntimeSetupError";
 	}
+}
+
+/** npm refused a package whose tarball is not on the registry, before downloading it. */
+export class OffRegistryTarballError extends RuntimeSetupError {
+	constructor(message: string) {
+		super(message);
+		this.name = "OffRegistryTarballError";
+	}
+}
+
+/**
+ * Whether npm stopped because a tarball lives outside the registry: npm 12 refuses
+ * "remote" packages by default (EALLOWREMOTE) before fetching them, which is the verdict
+ * the update's lockfile check reaches on older npm after the download.
+ * @param error - What the npm process rejected with (its stderr is read, never shown).
+ */
+export function refusedRemoteTarball(error: unknown): boolean {
+	const stderr = (error as { stderr?: unknown } | null | undefined)?.stderr;
+	return typeof stderr === "string" && /\bEALLOWREMOTE\b/.test(stderr);
 }
 
 /** Process seam for fixtures; production always invokes an absolute executable. */
@@ -163,6 +193,14 @@ export function registryKey(key: string): boolean {
 	);
 }
 
+/**
+ * An npm setting for the network path (proxy, trust anchors, client certificates) rather than a
+ * registry or a credential. strict-ssl is left out: the updater always checks TLS.
+ */
+function transportKey(key: string): boolean {
+	return /^(?:https?-proxy|proxy|noproxy|cafile|ca(?:\[\])?|cert|key|certfile|keyfile)$/i.test(key);
+}
+
 /** Settings whose value is a file path, resolved before npm runs from the neutral stage. */
 function tlsPathKey(key: string): boolean {
 	return /(?:^|:)(?:cafile|certfile|keyfile|cache)$/i.test(key);
@@ -192,14 +230,17 @@ function settingPath(key: string, value: string, options: RuntimeOptions): strin
 	}
 }
 
-/** Keep registry credentials while preventing inherited install or loader redirection. */
-function npmEnvironment(options: RuntimeOptions): NodeJS.ProcessEnv {
+/**
+ * Keep registry credentials while preventing inherited install or loader redirection.
+ * `keep` narrows which npm settings pass (the updater keeps only the network path).
+ */
+function npmEnvironment(options: RuntimeOptions, keep = registryKey): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
 	for (const [key, value] of Object.entries(options.env ?? process.env)) {
 		// npmrc token interpolation uses ordinary variables such as NPM_TOKEN.
 		if (/^npm_config_/i.test(key)) {
 			const setting = key.replace(/^npm_config_/i, "");
-			if (!registryKey(setting)) continue;
+			if (!keep(setting)) continue;
 		}
 		if (/^(?:NODE_OPTIONS|NODE_PATH|LD_PRELOAD|DYLD_.+)$/i.test(key)) continue;
 		const setting = key.replace(/^npm_config_/i, "");
@@ -212,10 +253,13 @@ function npmEnvironment(options: RuntimeOptions): NodeJS.ProcessEnv {
 	return env;
 }
 
-function npmSettings(options: RuntimeOptions): ExecFileSyncOptionsWithStringEncoding {
+function npmSettings(
+	options: RuntimeOptions,
+	keep = registryKey,
+): ExecFileSyncOptionsWithStringEncoding {
 	return {
 		cwd: options.cwd ?? options.home ?? homedir(),
-		env: npmEnvironment(options),
+		env: npmEnvironment(options, keep),
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "pipe"],
 		timeout: 15_000,
@@ -432,7 +476,12 @@ async function acquireLock(
 	fail("Another Pharaoh installation is still preparing the runtime.");
 }
 
-async function registryConfig(options: RuntimeOptions, npm: string, node: string): Promise<string> {
+async function registryConfig(
+	options: RuntimeOptions,
+	npm: string,
+	node: string,
+	keep = registryKey,
+): Promise<string> {
 	const env = options.env ?? process.env;
 	const home = options.home ?? homedir();
 	let global = environmentValue(env, "npm_config_globalconfig");
@@ -451,7 +500,7 @@ async function registryConfig(options: RuntimeOptions, npm: string, node: string
 		if (!isAbsolute(file) || !existsSync(file)) continue;
 		for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
 			const match = /^\s*([^;#=][^=]*?)\s*=(.*)$/.exec(line);
-			if (!match || !registryKey(match[1].trim())) continue;
+			if (!match || !keep(match[1].trim())) continue;
 			const key = match[1].trim();
 			if (!tlsPathKey(key)) {
 				lines.push(line);
@@ -489,6 +538,35 @@ function removeAbandonedStages(root: string): void {
 			// An unrecognized directory is preserved rather than treated as installer output.
 		}
 	}
+}
+
+/** npm install of one exact version into a private prefix: no scripts, no audit, no global config. */
+function installArgs(
+	npm: string,
+	version: string,
+	staging: string,
+	extra: readonly string[],
+	npmrc: string,
+	emptyConfig: string,
+): string[] {
+	return [
+		npm,
+		"install",
+		`${PACKAGE_NAME}@${version}`,
+		"--prefix",
+		staging,
+		"--global=false",
+		"--workspaces=false",
+		"--ignore-scripts",
+		"--omit=dev",
+		"--no-audit",
+		"--no-fund",
+		...extra,
+		"--userconfig",
+		npmrc,
+		"--globalconfig",
+		emptyConfig,
+	];
 }
 
 async function prepareRuntime(options: RuntimeOptions, version: string): Promise<LaunchConfig> {
@@ -538,25 +616,7 @@ async function prepareRuntime(options: RuntimeOptions, version: string): Promise
 			runNpm(
 				options,
 				command,
-				[
-					npm,
-					"install",
-					`${PACKAGE_NAME}@${version}`,
-					"--prefix",
-					prefix,
-					"--global=false",
-					"--workspaces=false",
-					"--ignore-scripts",
-					"--omit=dev",
-					"--no-audit",
-					"--no-fund",
-					"--package-lock=false",
-					...extra,
-					"--userconfig",
-					npmrc,
-					"--globalconfig",
-					emptyConfig,
-				],
+				installArgs(npm, version, prefix, ["--package-lock=false", ...extra], npmrc, emptyConfig),
 				{ ...npmSettings(options), cwd: prefix, timeout: deadline - Date.now() },
 			);
 		let cached = false;
@@ -632,4 +692,222 @@ export function ensureRuntime(options: RuntimeOptions = {}): Promise<LaunchConfi
 	).finally(() => pending.delete(key));
 	pending.set(key, preparation);
 	return preparation;
+}
+
+/** An npm run's exit code and stdout; a non-zero exit is an answer, not an error. */
+export interface NpmResult {
+	code: number;
+	stdout: string;
+}
+
+/** Process seam for the updater's asynchronous npm runs (fixtures). */
+export type AsyncRuntimeRunner = (
+	file: string,
+	args: readonly string[],
+	options: ExecFileSyncOptionsWithStringEncoding,
+) => Promise<NpmResult>;
+
+function runAsync(
+	file: string,
+	args: readonly string[],
+	settings: ExecFileSyncOptionsWithStringEncoding,
+): Promise<NpmResult> {
+	return new Promise((resolveRun, reject) => {
+		execFile(file, args, { ...settings, encoding: "utf8" }, (error, stdout) => {
+			const code = (error as { code?: unknown } | null)?.code;
+			// A spawn failure or a timeout has no exit code: that is an error, not an answer.
+			if (error && typeof code !== "number") reject(error);
+			else resolveRun({ code: error ? (code as number) : 0, stdout: String(stdout) });
+		});
+	});
+}
+
+/** What a verifier gets: the staged install and npm in it, under the same pinned settings. */
+export interface VerifiedStage {
+	/** The private staging directory: an npm prefix with its package-lock.json. */
+	staging: string;
+	/** Run npm in the stage. */
+	npm: (args: readonly string[]) => Promise<NpmResult>;
+}
+
+/** Options for {@link stageVerifiedRuntime}; `registry` and `runAsync` exist for fixtures only. */
+export interface VerifiedRuntimeOptions extends RuntimeOptions {
+	version: string;
+	registry?: string;
+	runAsync?: AsyncRuntimeRunner;
+}
+
+/**
+ * Install one exact version from npm's registry into a private stage, have
+ * `verify` accept or reject it, and publish it as ~/.pharaoh/runtimes/mcp/<version>
+ * only if no such directory exists: an existing version directory is never
+ * replaced, so a running or active version is never touched. npm runs with the
+ * registry pinned (the user's registry, mirror and credential settings are
+ * dropped; proxy and TLS settings stay), scripts off, and a lockfile, which is
+ * the record of where every package came from. Any rejection or failure removes
+ * the stage.
+ *
+ * @param options - The version, plus runtime fixtures
+ * @param verify - Throws to reject the stage; may write files into it (the receipt)
+ * @returns The published version directory
+ */
+export async function stageVerifiedRuntime(
+	options: VerifiedRuntimeOptions,
+	verify: (stage: VerifiedStage) => Promise<void>,
+): Promise<string> {
+	const { version } = options;
+	if (!SEMVER.test(version) || version === "0.0.0") fail("Pharaoh could not read the version.");
+	const registry = options.registry ?? NPM_REGISTRY;
+	const root = runtimeRoot(options.home ?? homedir());
+	const command = resolveLaunchNode(options);
+	const lock = await acquireLock(root, options.lockTimeoutMs ?? LOCK_TIMEOUT_MS);
+	const destination = join(root, version);
+	let staging: string | undefined;
+	try {
+		removeAbandonedStages(root);
+		// The version current.json runs, or falls back to, is never replaced.
+		const protectedVersion = () => {
+			const active = readPointer(root, "current.json");
+			return version === active?.version || version === active?.previous;
+		};
+		if (entryExists(destination) && protectedVersion())
+			fail("Pharaoh already has this version installed.");
+		staging = mkdtempSync(join(root, `.stage-${version}-`));
+		privateDirectory(staging);
+		const stage = staging;
+		writeFileSync(join(stage, ".runtime-stage.json"), JSON.stringify({ pid: process.pid }), {
+			mode: 0o600,
+		});
+		writeFileSync(join(stage, "package.json"), '{"private":true}\n', { mode: 0o600 });
+		const settings = { ...options, cwd: stage, sourceCwd: options.sourceCwd ?? process.cwd() };
+		const npm = await resolveNpmCli(settings);
+		const npmrc = join(stage, ".npmrc");
+		const emptyConfig = join(stage, ".empty-npmrc");
+		writeFileSync(
+			npmrc,
+			`${await registryConfig(settings, npm, command, transportKey)}registry=${registry}\n`,
+			{ mode: 0o600 },
+		);
+		writeFileSync(emptyConfig, "", { mode: 0o600 });
+		const pinned = ["--registry", registry, "--strict-ssl=true"];
+		// A tarball that fails its integrity check fails again: retry the network briefly, not for minutes.
+		const retries = [
+			"--fetch-retries=1",
+			"--fetch-retry-mintimeout=1000",
+			"--fetch-retry-maxtimeout=5000",
+		];
+		const npmEnv = { ...npmSettings(settings, transportKey), cwd: stage, timeout: 120_000 };
+		options.onInstall?.(version);
+		try {
+			await runNpm(
+				options,
+				command,
+				installArgs(
+					npm,
+					version,
+					stage,
+					["--package-lock=true", ...pinned, ...retries],
+					npmrc,
+					emptyConfig,
+				),
+				npmEnv,
+			);
+		} catch (error) {
+			if (refusedRemoteTarball(error))
+				throw new OffRegistryTarballError("The package did not come from its registry tarball.");
+			fail("Pharaoh could not install the update from npm's registry.");
+		}
+		const run = options.runAsync ?? runAsync;
+		// Where the bytes came from is checked first; a well-formed runtime from elsewhere is still refused.
+		await verify({
+			staging: stage,
+			npm: (args) =>
+				run(
+					command,
+					[npm, ...args, ...pinned, "--userconfig", npmrc, "--globalconfig", emptyConfig],
+					npmEnv,
+				),
+		});
+		for (const name of [".npmrc", ".empty-npmrc", ".runtime-stage.json"])
+			rmSync(join(stage, name), { force: true });
+		writeFileSync(
+			join(stage, ".pharaoh-runtime.json"),
+			JSON.stringify({ package: PACKAGE_NAME, version }),
+			{ mode: 0o600 },
+		);
+		validateRuntime(stage, version);
+		lock.assertHeld();
+		// An existing directory reached here only because it is damaged or unverified (install
+		// made it, or its receipt changed): set it aside for this verified copy, as install does.
+		const rename = options.rename ?? renameSync;
+		let aside: string | undefined;
+		if (entryExists(destination)) {
+			if (protectedVersion()) fail("Pharaoh already has this version installed.");
+			aside = join(root, `.invalid-${version}-${randomUUID()}`);
+			rename(destination, aside);
+		}
+		try {
+			rename(stage, destination);
+		} catch (error) {
+			if (aside && !entryExists(destination)) rename(aside, destination);
+			throw error;
+		}
+		staging = undefined;
+		if (aside) rmSync(aside, { recursive: true, force: true });
+		return destination;
+	} finally {
+		if (staging) rmSync(staging, { recursive: true, force: true });
+		lock.release();
+	}
+}
+
+/**
+ * Put a managed runtime behind the stable launcher: copy this package's
+ * launcher-v1.mjs beside the version directories (when it differs) and point
+ * current.json at the version, under .activate-lock. A staged update no newer
+ * than it is dropped. Registrations and hooks then name the launcher, and later
+ * updates only move current.json. POSIX only.
+ *
+ * @param launch - The exact-version launch ensureRuntime returned
+ * @param platform - Fixtures
+ * @returns The launcher's path, or null (Windows, or not a managed runtime)
+ */
+export async function adoptLauncher(
+	launch: LaunchConfig,
+	platform: NodeJS.Platform = process.platform,
+): Promise<string | null> {
+	if (platform === "win32") return null;
+	const entry = launch.args[0];
+	const versionDir = dirname(dirname(dirname(dirname(dirname(entry)))));
+	const root = dirname(versionDir);
+	const version = basename(versionDir);
+	if (basename(root) !== "mcp" || usableVersion(root, version) !== entry) return null;
+	const launcher = join(root, LAUNCHER_NAME);
+	// This package's own copy: install runs the version it installs, and older versions have none.
+	const source = readFileSync(new URL(`../runtime/${LAUNCHER_NAME}`, import.meta.url));
+	if (!isFile(launcher) || !readFileSync(launcher).equals(source)) {
+		const temporary = join(root, `.${LAUNCHER_NAME}.${randomUUID()}.tmp`);
+		try {
+			writeFileSync(temporary, source, { mode: 0o600, flag: "wx" });
+			renameSync(temporary, launcher);
+		} finally {
+			rmSync(temporary, { force: true });
+		}
+	}
+	const adopted = await withActivateLock(
+		root,
+		() => {
+			const current = readPointer(root, "current.json");
+			writePointer(root, "current.json", {
+				version,
+				previous: current?.version === version ? current?.previous : current?.version,
+				appliedAt: new Date().toISOString(),
+			});
+			const pending = readPointer(root, "pending.json");
+			if (pending && !newerVersion(pending.version, version)) removePointer(root, "pending.json");
+		},
+		{ waitMs: 5_000 },
+	);
+	if (!adopted.held) fail("Another Pharaoh update is being applied.");
+	return launcher;
 }

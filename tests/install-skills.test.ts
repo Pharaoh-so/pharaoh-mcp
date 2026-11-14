@@ -125,6 +125,31 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		expect(existsSync(join(pluginDir(home), ".mcp.json"))).toBe(false);
 	});
 
+	/** Breaks when: a proxy that isn't the current version (an older one starting late) writes the
+	 * plugin behind the launcher, or a write ignores the lock that version switches take. */
+	it("writes the plugin behind the launcher only as the current version, and never while a switch holds the lock", () => {
+		const runtimes = join(home, ".pharaoh", "runtimes", "mcp");
+		mkdirSync(runtimes, { recursive: true });
+		writeFileSync(join(runtimes, "current.json"), '{"version":"0.0.1"}');
+		runInstallSkills(home, NO_CLI);
+		expect(existsSync(pluginDir(home))).toBe(false);
+		writeFileSync(
+			join(runtimes, "current.json"),
+			JSON.stringify({ version: readPackageVersion() }),
+		);
+		mkdirSync(join(runtimes, ".activate-lock"));
+		writeFileSync(
+			join(runtimes, ".activate-lock", "owner.json"),
+			JSON.stringify({ pid: process.pid, token: "switching" }),
+		);
+		runInstallSkills(home, NO_CLI);
+		expect(existsSync(pluginDir(home))).toBe(false);
+		rmSync(join(runtimes, ".activate-lock"), { recursive: true });
+		runInstallSkills(home, NO_CLI);
+		expect(existsSync(join(pluginDir(home), "skills", "pharaoh", "SKILL.md"))).toBe(true);
+		expect(existsSync(`${pluginDir(home)}.prev`)).toBe(false);
+	});
+
 	it("installs the plugin through the claude CLI", () => {
 		const claude = recordingClaude();
 
