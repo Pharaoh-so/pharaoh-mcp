@@ -50,6 +50,14 @@ function chat(): ClientTarget {
 	};
 }
 
+/** Install's runtimes folder: the stable launcher, or one exact version's entry. */
+function managed(version?: string): string {
+	const root = join(home, ".pharaoh", "runtimes", "mcp");
+	return version
+		? join(root, version, "node_modules", "@pharaoh-so", "mcp", "dist", "index.js")
+		: join(root, "launcher-v1.mjs");
+}
+
 /** The fixed Windows query is faked; no PowerShell or customer application is launched. */
 function windowsOptions(
 	packages: unknown,
@@ -428,6 +436,52 @@ describe("registration ownership", () => {
 		write(code().path, JSON.stringify({ mcpServers: { pharaoh: launch } }));
 		expect(configureClients([code()], launch, options)[0].status).toBe("preserved-custom");
 	});
+
+	it("moves an unrecorded exact-version runtime pin to the launcher, keeping other entries", () => {
+		const launcher = { command: launch.command, args: [managed()] };
+		const pinned = { command: launch.command, args: [managed("0.3.69")] };
+		const other = { command: "other", args: ["--flag"] };
+		write(chat().path, JSON.stringify({ mcpServers: { other, pharaoh: pinned }, preferences: {} }));
+		expect(configureClients([chat()], launcher, options)[0].status).toBe("configured");
+		expect(JSON.parse(readFileSync(chat().path, "utf8"))).toEqual({
+			mcpServers: { other, pharaoh: launcher },
+			preferences: {},
+		});
+		// Node that moved still migrates, here to an exact-version launch (Windows has no launcher).
+		const exact = { command: join(home, "nvm", "node"), args: [managed("0.3.85")] };
+		write(code().path, JSON.stringify({ mcpServers: { pharaoh: pinned } }));
+		expect(configureClients([code()], exact, options)[0].status).toBe("configured");
+		// A wrapper, an added setting, another server or another runtimes folder stays the user's.
+		for (const pharaoh of [
+			{ ...pinned, command: join(home, "corp-wrapper") },
+			{ ...pinned, env: { DEBUG: "1" } },
+			{ ...pinned, args: [...pinned.args, "--server", "https://self-hosted.example"] },
+			{ ...pinned, args: [pinned.args[0].replace(".pharaoh", "elsewhere")] },
+		]) {
+			const text = JSON.stringify({ mcpServers: { pharaoh } });
+			write(code().path, text);
+			expect(configureClients([code()], launcher, options)[0].status).toBe("preserved-custom");
+			expect(readFileSync(code().path, "utf8")).toBe(text);
+		}
+	});
+
+	it("tells the person to quit an open Claude Desktop, which saves its loaded settings back", () => {
+		expect(configureClients([chat()], launch, options)[0]).toEqual({
+			client: "claude-desktop",
+			path: chat().path,
+			status: "configured",
+			created: true,
+		});
+		const execute: NonNullable<ClientInstallOptions["execute"]> = (command, args) => {
+			expect([command, ...args]).toEqual(["/usr/bin/pgrep", "-a", "-x", "Claude"]);
+			return "813\n";
+		};
+		const upgraded = { ...launch, args: [join(home, "runtime-next", "dist", "index.js")] };
+		expect(configureClients([chat()], upgraded, { ...options, execute })[0]).toMatchObject({
+			status: "configured",
+			detail: expect.stringContaining("Quit Claude Desktop"),
+		});
+	});
 });
 
 describe("desktop-only Codex TOML", () => {
@@ -462,26 +516,37 @@ describe("desktop-only Codex TOML", () => {
 	});
 });
 
-describe("CLI-backed Codex", () => {
-	it("uses the verified CLI and reads back the enabled launch", () => {
-		const calls: string[][] = [];
-		let registered: LaunchConfig | null = null;
-		const execute: NonNullable<ClientInstallOptions["execute"]> = (_command, args) => {
-			calls.push([...args]);
-			if (args[1] === "get") {
-				if (!registered)
-					throw Object.assign(new Error("missing"), {
-						stderr: "No MCP server named 'pharaoh' found.",
-					});
-				return JSON.stringify({ enabled: true, transport: { type: "stdio", ...registered } });
-			}
-			registered = { command: args[4], args: args.slice(5) };
+/** A fake Codex CLI: `get` reports the registration, `add` rewrites its table after `rest`. */
+function codexCli(start: LaunchConfig | null, rest = "") {
+	const calls: string[][] = [];
+	let registered = start;
+	const save = () => {
+		if (registered)
 			write(
 				codex().path,
-				`[mcp_servers.pharaoh]\ncommand = ${JSON.stringify(registered.command)}\nargs = ${JSON.stringify(registered.args)}\n`,
+				`${rest}[mcp_servers.pharaoh]\ncommand = ${JSON.stringify(registered.command)}\nargs = ${JSON.stringify(registered.args)}\n`,
 			);
-			return "";
-		};
+	};
+	save();
+	const execute: NonNullable<ClientInstallOptions["execute"]> = (_command, args) => {
+		calls.push([...args]);
+		if (args[1] === "get") {
+			if (!registered)
+				throw Object.assign(new Error("missing"), {
+					stderr: "No MCP server named 'pharaoh' found.",
+				});
+			return JSON.stringify({ enabled: true, transport: { type: "stdio", ...registered } });
+		}
+		registered = { command: args[4], args: args.slice(5) };
+		save();
+		return "";
+	};
+	return { calls, execute };
+}
+
+describe("CLI-backed Codex", () => {
+	it("uses the verified CLI and reads back the enabled launch", () => {
+		const { calls, execute } = codexCli(null);
 		expect(
 			configureClients([{ ...codex(), cli: "codex" }], launch, { ...options, execute })[0].status,
 		).toBe("configured");
@@ -490,6 +555,21 @@ describe("CLI-backed Codex", () => {
 			["mcp", "add", "pharaoh", "--", launch.command, ...launch.args],
 			["mcp", "get", "pharaoh", "--json"],
 		]);
+	});
+
+	it("moves an unrecorded exact-version runtime pin to the launcher", () => {
+		const launcher = { command: launch.command, args: [managed()] };
+		const { execute } = codexCli(
+			{ command: launch.command, args: [managed("0.3.82")] },
+			'[mcp_servers.other]\ncommand = "other"\n\n',
+		);
+		expect(
+			configureClients([{ ...codex(), cli: "codex" }], launcher, { ...options, execute })[0].status,
+		).toBe("configured");
+		expect(parseToml(readFileSync(codex().path, "utf8")).mcp_servers).toEqual({
+			other: { command: "other" },
+			pharaoh: launcher,
+		});
 	});
 
 	it("preserves an effective project registration before invoking add", () => {

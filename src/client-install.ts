@@ -18,7 +18,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { LAUNCHER_NAME, readPointer, usableVersion } from "../runtime/launcher-v1.mjs";
 import { DEFAULT_SERVER } from "./helpers.js";
@@ -52,6 +52,8 @@ const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 const BLOCK_START = "# pharaoh-mcp managed registration\n";
 const BLOCK_END = "# end pharaoh-mcp managed registration\n";
 const RECOVERY = "npx @pharaoh-so/mcp@latest install --migrate-legacy";
+const DESKTOP_OPEN =
+	"Quit Claude Desktop and run the install again: while it's open, it saves its earlier settings over this change.";
 
 // Composed platform contract, rather than a scan of possibly stale package folders:
 // Anthropic identifies its registered Windows app with Get-AppxPackage -Name Claude.
@@ -469,6 +471,72 @@ function legacy(value: unknown): value is LaunchConfig {
 	);
 }
 
+/** The runtimes folder and version of an exact-version entry: <root>/<x.y.z>/node_modules/@pharaoh-so/mcp/dist/index.js. */
+function versionEntry(entry: string): { root: string; version: string } | undefined {
+	const versionDir = dirname(dirname(dirname(dirname(dirname(entry)))));
+	const version = basename(versionDir);
+	const root = dirname(versionDir);
+	return /^\d+\.\d+\.\d+$/.test(version) &&
+		entry === join(root, version, "node_modules", PACKAGE_NAME, "dist", "index.js")
+		? { root, version }
+		: undefined;
+}
+
+/**
+ * A registration that runs one of install's own exact-version runtimes from the runtimes
+ * folder `launch` runs from, through Node, with `launch`'s server arguments and nothing
+ * added. Only install writes into that folder, so the entry is install's even when its
+ * receipt is missing (a check after `codex mcp add` failed, say). Left alone, it never
+ * updates. Node may have moved since (another nvm version), but a wrapper stays the user's.
+ */
+function managedPin(value: unknown, launch: LaunchConfig): boolean {
+	if (
+		!persistentLaunch(value) ||
+		Object.keys(value).some((key) => key !== "command" && key !== "args") ||
+		basename(value.command) !== basename(launch.command)
+	)
+		return false;
+	const target = launch.args[0];
+	const root = basename(target) === LAUNCHER_NAME ? dirname(target) : versionEntry(target)?.root;
+	return (
+		root !== undefined &&
+		versionEntry(value.args[0])?.root === root &&
+		canonical(value.args.slice(1)) === canonical(launch.args.slice(1))
+	);
+}
+
+/** Whether install may replace the current entry: none yet, its receipt, a consented legacy pin or a managed pin. */
+function replaceable(
+	current: unknown,
+	receipt: Receipt | undefined,
+	launch: LaunchConfig,
+	options: { migrateLegacy?: boolean },
+): boolean {
+	return (
+		current === undefined ||
+		receipt !== undefined ||
+		(options.migrateLegacy === true && legacy(current)) ||
+		managedPin(current, launch)
+	);
+}
+
+/**
+ * Whether the Claude Desktop app is open (macOS). An open Desktop writes the settings it
+ * loaded at launch back over its config file, `mcpServers` included, so a registration
+ * changed meanwhile reverts at its next save (seen in Desktop's "Config file written" log
+ * minutes after each install). `-a`: install often runs in Desktop's own terminal, and
+ * pgrep otherwise skips its ancestors.
+ */
+function desktopOpen(options: ClientInstallOptions): boolean {
+	if (settings(options).platform !== "darwin") return false;
+	try {
+		return /^\d+$/m.test(execute(options, "/usr/bin/pgrep", ["-a", "-x", "Claude"]));
+	} catch {
+		// Not running (pgrep exits 1) or no pgrep: nothing to warn about.
+		return false;
+	}
+}
+
 function parse(target: ClientTarget, contents: string | null): Document {
 	return target.client === "codex" ? toml(contents) : json(contents);
 }
@@ -685,18 +753,18 @@ function configureJson(
 	if (disabled(document, current))
 		return result(target, "preserved-disabled", "The disabled registration was kept.");
 	const receipt = owned(target, current, readProvenance(options).data);
-	if (current !== undefined && !receipt && !(options.migrateLegacy && legacy(current)))
+	if (!replaceable(current, receipt, launch, options))
 		return result(
 			target,
 			"preserved-custom",
 			"The existing registration was kept.",
 			legacy(current) ? RECOVERY : undefined,
 		);
-	const detail = [projectOverrides(document), desktopPrecedence(target, launch, options)]
-		.filter(Boolean)
-		.join(" ");
+	const notes = [projectOverrides(document), desktopPrecedence(target, launch, options)];
 	if (current !== undefined && canonical(current) === canonical(launch))
-		return result(target, "already-configured", detail);
+		return result(target, "already-configured", notes.filter(Boolean).join(" "));
+	if (target.client === "claude-desktop" && desktopOpen(options)) notes.push(DESKTOP_OPEN);
+	const detail = notes.filter(Boolean).join(" ");
 	const servers = entries(document, target.client);
 	servers.pharaoh = { command: launch.command, args: [...launch.args] };
 	document.mcpServers = servers;
@@ -742,7 +810,7 @@ function configureCodex(
 	if (disabled(document, current))
 		return result(target, "preserved-disabled", "The disabled Codex registration was kept.");
 	const receipt = owned(target, current, readProvenance(options).data);
-	if (current !== undefined && !receipt && !(options.migrateLegacy && legacy(current)))
+	if (!replaceable(current, receipt, launch, options))
 		return result(
 			target,
 			"preserved-custom",
