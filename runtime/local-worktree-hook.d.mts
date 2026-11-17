@@ -37,6 +37,32 @@ interface LocalWorktreeHookOptions {
 	now?: number;
 }
 
+/**
+ * The compiled analysis a hook command runs with. The hook loads it from this
+ * package's build (dist/local-host.js), so runtime/ imports nothing from src/.
+ */
+export interface LocalWorktreeAnalysis {
+	resolveLocalCheckout(cwd: string): CheckoutEvidence;
+	fingerprintLocalSources(
+		checkout: VerifiedCheckout,
+		reader: string,
+		paths: readonly string[],
+		deadline: number,
+		visit?: (path: string, bytes: Buffer) => void,
+	): ReadonlyMap<string, string | null> | undefined;
+	listLocalCheckoutPaths(
+		checkout: VerifiedCheckout,
+		reader: string,
+		deadline: number,
+	): readonly string[] | undefined;
+	isLocalSourcePath(path: string): boolean;
+	installedLocalAnalyzer(): { readonly reader: string } | undefined;
+	verifiedCodingClients(options: {
+		runningLaunch: { command: string; args: string[] };
+		rejectProjectOverrides: true;
+	}): ReadonlyArray<"claude-code" | "codex">;
+}
+
 /** Derive the opaque, local-only grant generation. */
 export function localWorktreeBinding(
 	client: string,

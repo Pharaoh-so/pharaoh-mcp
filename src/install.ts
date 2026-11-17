@@ -20,6 +20,12 @@ import {
 	printAuthSuccess,
 	requestDeviceCode,
 } from "./auth.js";
+import {
+	CLIENT_LABELS,
+	desktopRestartable,
+	listClients,
+	restartDesktop,
+} from "./client-install.js";
 import { type Credentials, readCredentials, saveAuthorizedCredentials } from "./credentials.js";
 import {
 	askYesNo,
@@ -54,12 +60,6 @@ import {
 	isNewerVersion,
 	UPGRADE_COMMAND,
 } from "./version.js";
-
-const LABELS: Record<ClientId, string> = {
-	"claude-code": "Claude Code",
-	codex: "Codex",
-	"claude-desktop": "Claude Desktop",
-};
 
 /** Statuses the summary reports on their own line; the rest fold into "Connected to …". */
 const PROBLEMS: Partial<Record<ClientOutcome["status"], string>> = {
@@ -130,12 +130,6 @@ export function startAgent(agent: AgentLaunch): Promise<boolean> {
 	});
 }
 
-/** "Claude Code", "Claude Code and Codex", "Claude Desktop, Claude Code and Codex". */
-function listNames(outcomes: readonly { client: ClientId }[]): string {
-	const names = outcomes.map((outcome) => LABELS[outcome.client]);
-	return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
-}
-
 /** The command a person can paste to start an agent with the setup prompt. */
 function agentCommand(agent: AgentLaunch): string {
 	return `${agent.command} ${agent.args.map((arg) => JSON.stringify(arg)).join(" ")}`;
@@ -167,7 +161,7 @@ async function chooseAgent(
 		write(...agents.map((agent) => `Start: ${agentCommand(agent)}`));
 		return null;
 	}
-	const labels = agents.map((agent) => LABELS[agent.client]);
+	const labels = agents.map((agent) => CLIENT_LABELS[agent.client]);
 	const picked = await choose(TRY_TITLE, [...labels, "Skip"]);
 	// Skip, n/Esc (-1) and an ended input (null) all start nothing.
 	if (picked === null || picked < 0 || picked >= agents.length) return null;
@@ -342,6 +336,14 @@ interface InstallDependencies {
 	/** Puts the runtime behind the stable launcher; null keeps the exact-version launch (Windows). */
 	launcher: (launch: LaunchConfig) => Promise<string | null>;
 	configure: typeof configureClients;
+	/** Whether Claude Desktop is open and this install doesn't run inside it. */
+	canRestartDesktop: () => boolean;
+	/** Quit Claude Desktop, register `launch`, reopen it; null when it didn't quit. */
+	restartDesktop: (
+		target: ClientTarget,
+		launch: LaunchConfig,
+		flags: { migrateLegacy: boolean },
+	) => Promise<ClientOutcome | null>;
 	ask: (question: string) => Promise<boolean | null>;
 	/** Pick one of `options` from a menu: its 0-based index, -1 for none, null on ended input. */
 	choose: (title: string, options: readonly string[]) => Promise<number | null>;
@@ -390,6 +392,8 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		progress: () => showProgress(),
 		launcher: (launch) => adoptLauncher(launch),
 		configure: configureClients,
+		canRestartDesktop: () => desktopRestartable(),
+		restartDesktop: (target, launch, flags) => restartDesktop(target, launch, flags),
 		ask: (question) => askYesNo(question),
 		choose: (title, labels) => pickOption(title, labels),
 		startAgent,
@@ -444,15 +448,18 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				write(describeRuntimeDisable(client, results[index]));
 			if (results.includes("not_saved")) return 1;
 		}
+		const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stderr.isTTY);
 		const targets = dependencies.discover();
 		const migrations = dependencies.migrations(targets);
 		let migrateLegacy = options.migrateLegacy === true;
 		if (migrations.length && !migrateLegacy) {
 			write("Existing pinned NPX connections:");
 			for (const item of migrations) {
-				write(`  ${LABELS[item.client]}: ${item.launch.command} ${item.launch.args.join(" ")}`);
+				write(
+					`  ${CLIENT_LABELS[item.client]}: ${item.launch.command} ${item.launch.args.join(" ")}`,
+				);
 			}
-			if (options.interactive ?? Boolean(process.stdin.isTTY && process.stderr.isTTY)) {
+			if (interactive) {
 				migrateLegacy =
 					(await dependencies.ask(
 						"Move these connections to Pharaoh's managed runtime? [Y/n] ",
@@ -491,7 +498,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		progress = dependencies.progress();
 		if (installing && !runtimeReady) progress.step(`Installing Pharaoh ${installing}`);
 		const launch = await runtime;
-		if (targets.length) progress.step(`Connecting ${listNames(targets)}`);
+		if (targets.length) progress.step(`Connecting ${listClients(targets)}`);
 		// Registrations and hooks name the launcher, so a later update changes no client setting.
 		const launcher = await dependencies.launcher(launch);
 		const runLaunch = launcher ? { command: launch.command, args: [launcher] } : launch;
@@ -500,6 +507,26 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				? runLaunch
 				: { ...runLaunch, args: [...runLaunch.args, "--server", options.server] };
 		const outcomes = dependencies.configure(targets, configuredLaunch, { migrateLegacy });
+		// An open Desktop saves its earlier settings over the change; restarted, it keeps this one.
+		const opened = outcomes.findIndex((outcome) => outcome.desktopOpen);
+		const desktopTarget = targets.find((target) => target.client === "claude-desktop");
+		let desktopRestarted = false;
+		if (opened >= 0 && desktopTarget && interactive && dependencies.canRestartDesktop()) {
+			progress.stop();
+			if (
+				await dependencies.ask(
+					"Claude Desktop is open and saves its earlier settings over this change. Restart it now? [Y/n] ",
+				)
+			) {
+				progress.step("Restarting Claude Desktop");
+				// Desktop may write a legacy pin back as it quits; the consent to migrate it holds.
+				const restarted = await dependencies.restartDesktop(desktopTarget, configuredLaunch, {
+					migrateLegacy,
+				});
+				if (restarted) outcomes[opened] = restarted;
+				desktopRestarted = restarted !== null;
+			}
+		}
 		const codingClients = outcomes
 			.filter(
 				(outcome) =>
@@ -544,7 +571,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 					});
 				} catch {
 					write(
-						`${LABELS[client]}: saved-worktree hooks could not be configured. Hosted queries remain available.`,
+						`${CLIENT_LABELS[client]}: saved-worktree hooks could not be configured. Hosted queries remain available.`,
 					);
 				}
 			}
@@ -552,7 +579,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		// Existing setup decides Claude tool permissions before runtime hooks can create settings.json.
 		// Both clients publish through the same private runtime lock.
 		for (const { client } of runtimeInstallations) {
-			const label = LABELS[client];
+			const label = CLIENT_LABELS[client];
 			if (!outcomes.some((outcome) => outcome.client === client && outcome.created)) {
 				write(`${label}: runtime analytics skipped. Review the connection setup result below.`);
 				continue;
@@ -593,9 +620,9 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		// The summary: who's connected, a line per problem or needed action, then
 		// the next step as the last line. Everything else stays quiet.
 		const connected = outcomes.filter((outcome) => CONNECTED.has(outcome.status));
-		if (connected.length) write(`✓ Connected to ${listNames(connected)}`);
+		if (connected.length) write(`✓ Connected to ${listClients(connected)}`);
 		for (const outcome of outcomes) {
-			const label = LABELS[outcome.client];
+			const label = CLIENT_LABELS[outcome.client];
 			const problem = PROBLEMS[outcome.status];
 			// "…registration was kept." only restates the status; other details explain it.
 			const detail = outcome.detail && !/ was kept\.$/.test(outcome.detail) ? outcome.detail : "";
@@ -630,7 +657,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		}
 		// An agent that ran this update tells the person to restart; starting another agent is a first-setup step.
 		if (reused && !(options.interactive ?? canStartAgent())) {
-			write(`Restart ${listNames(connected)} to use Pharaoh ${getPackageVersion()}.`);
+			write(`Restart ${listClients(connected)} to use Pharaoh ${getPackageVersion()}.`);
 			return status;
 		}
 		const agents: AgentLaunch[] = targets.flatMap((target) =>
@@ -641,7 +668,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		const desktop = connected.find((outcome) => outcome.client === "claude-desktop");
 		const agent = await chooseAgent(
 			agents,
-			desktop ? (desktop.status === "configured" ? "restart" : "open") : null,
+			desktop ? (desktop.status === "configured" && !desktopRestarted ? "restart" : "open") : null,
 			options.interactive ?? canStartAgent(),
 			dependencies,
 		);

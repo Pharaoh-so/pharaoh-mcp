@@ -298,10 +298,7 @@ function confinedMetadata(
 	return offset === result.stdout.length ? entries : undefined;
 }
 
-/**
- * Fingerprint a small batch of eligible source paths without releasing their bytes.
- * @public Used by the packaged local-worktree hook through the compiled module.
- */
+/** Fingerprint a small batch of eligible source paths without releasing their bytes. */
 export function fingerprintLocalSources(
 	checkout: VerifiedCheckout,
 	reader: string,

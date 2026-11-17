@@ -271,6 +271,14 @@ function options(overrides: Partial<UpdateOptions> = {}): UpdateOptions {
 			env: { PATH: process.env.PATH, HOME: home },
 			runAsync: async () => ({ code: 0, stdout: '{"invalid":[],"missing":[]}' }),
 		},
+		// Client discovery sees only the fixture home: no real CLI, profile or Desktop.
+		clients: {
+			env: {},
+			platform: "darwin",
+			execute: () => {
+				throw new Error("No client CLI or Desktop in this fixture");
+			},
+		},
 		...overrides,
 	};
 }
@@ -321,6 +329,28 @@ it("stages a verified release for the next start, and the launcher runs it then"
 	expect(log().map((entry) => entry.event)).toEqual(["staged", "activated"]);
 	expect(await runUpdate("tool", options())).toEqual({ status: "current", version: NEXT });
 }, 60_000);
+
+/** Breaks when: an update leaves a client pinned to one version, which then never runs a newer one. */
+it("moves a registration pinned to one version onto the launcher, even with nothing newer", async () => {
+	const entry = join(root, CURRENT, "node_modules", "@pharaoh-so", "mcp", "dist", "index.js");
+	write(
+		join(home, ".claude.json"),
+		JSON.stringify({ mcpServers: { pharaoh: { command: process.execPath, args: [entry] } } }),
+	);
+	const result = await runUpdate(
+		"tool",
+		options({ fetchImpl: async () => Response.json({ version: CURRENT, dist: {} }) }),
+	);
+	expect(result).toMatchObject({
+		status: "current",
+		version: CURRENT,
+		clients: [{ client: "claude-code", status: "configured" }],
+	});
+	expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh).toEqual({
+		command: process.execPath,
+		args: [join(root, "launcher-v1.mjs")],
+	});
+});
 
 /** Breaks when: a version directory that is damaged, or that install made without a receipt,
  * blocks every later update to that version, as it did before the review's fix. */

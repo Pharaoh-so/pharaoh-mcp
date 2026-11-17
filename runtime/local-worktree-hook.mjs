@@ -1174,7 +1174,19 @@ export function localWorktreeShellReady(root, home = homedir()) {
 	}
 }
 
-async function runHook(client) {
+/**
+ * The compiled analysis a hook command runs with (src/local-host.ts), at its
+ * place in this package's build. runtime/ imports nothing from src/: the hook
+ * names only this file, and the LocalWorktreeAnalysis it exports is declared here.
+ */
+const ANALYSIS = new URL("../dist/local-host.js", import.meta.url);
+
+/**
+ * Answer one native hook event.
+ * @param {string} client
+ * @param {() => Promise<object>} loadAnalysis - Loads the LocalWorktreeAnalysis, only when the event needs it
+ */
+async function runHook(client, loadAnalysis) {
 	if (!CLIENTS.includes(client)) return;
 	const input = await readHookInput();
 	if (!input) return;
@@ -1182,15 +1194,14 @@ async function runHook(client) {
 		(input.hook_event_name === "PreToolUse" || input.hook_event_name === "PostToolUse") &&
 		!claimedTool(input);
 	if (save && !nativeEditPaths(input, client, false).length) return;
-	const [
-		{ resolveLocalCheckout, fingerprintLocalSources, listLocalCheckoutPaths },
-		{ verifiedCodingClients },
-		{ installedLocalAnalyzer },
-	] = await Promise.all([
-		import("../dist/local/scope.js"),
-		import("../dist/client-install.js"),
-		import("../dist/local/worker-host.js"),
-	]);
+	const {
+		resolveLocalCheckout,
+		fingerprintLocalSources,
+		listLocalCheckoutPaths,
+		isLocalSourcePath,
+		verifiedCodingClients,
+		installedLocalAnalyzer,
+	} = await loadAnalysis();
 	// What registrations name: the stable launcher when it started this hook, as for the proxy.
 	const launcher = globalThis[Symbol.for("pharaoh.launcher")]?.path;
 	const entry =
@@ -1212,7 +1223,7 @@ async function runHook(client) {
 	const saveOptions =
 		save && analyzer && binding
 			? {
-					isSourcePath: (await import("../dist/local/snapshot.js")).isLocalSourcePath,
+					isSourcePath: isLocalSourcePath,
 					readSourceFingerprints: (checkout, paths, visit) =>
 						fingerprintLocalSources(checkout, analyzer.reader, paths, deadline, visit),
 					visibleSourcePaths: (checkout) =>
@@ -1234,7 +1245,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
 	const [, , client, marker] = process.argv;
 	if (marker === MARKER) {
 		try {
-			await runHook(client);
+			await runHook(client, async () => (await import(ANALYSIS.href)).worktreeHookAnalysis);
 		} catch {
 			// Native payloads and local errors do not reach transcripts or diagnostics.
 		}

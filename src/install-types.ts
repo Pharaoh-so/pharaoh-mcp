@@ -24,6 +24,8 @@ export interface ClientOutcome {
 	path?: string;
 	detail?: string;
 	recovery?: string;
+	/** Claude Desktop was open when its registration changed: it may save its earlier settings back. */
+	desktopOpen?: true;
 }
 
 /** A client for which local configuration or an installed executable was found. */

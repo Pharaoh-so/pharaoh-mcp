@@ -57,6 +57,7 @@ import { claudePluginState, instructionStates } from "./install-skills.js";
 import { type LocalBlastRuntime, type LocalDelivery, localRefusal } from "./local/contracts.js";
 import { selectBlastRoute } from "./local/dispatch.js";
 import { createLocalBlastRuntime } from "./local/runtime.js";
+import { localHost } from "./local-host.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { registerTraceResource } from "./trace-resource.js";
 import { getPackageVersion } from "./version.js";
@@ -650,7 +651,7 @@ export async function startInAuthRequiredMode(
 		}
 		await opts.onAuthorized(creds);
 	});
-	const proxy = new ProxyServer(backend, undefined, createLocalBlastRuntime(server));
+	const proxy = new ProxyServer(backend, undefined, createLocalBlastRuntime(server, localHost()));
 	await proxy.start();
 	return { proxy, gateway };
 }
@@ -663,7 +664,7 @@ export async function startInSseMode(creds: Credentials): Promise<ProxyServer> {
 	const proxy = new ProxyServer(
 		createSseBackend(creds.sse_url, creds.access_token),
 		undefined,
-		createLocalBlastRuntime(new URL(creds.sse_url).origin),
+		createLocalBlastRuntime(new URL(creds.sse_url).origin, localHost()),
 	);
 	await proxy.start();
 	return proxy;

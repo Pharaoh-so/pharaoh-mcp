@@ -1,6 +1,6 @@
 /**
- * One-shot shell access to Pharaoh's six question tools. Uses the same proxy
- * dispatch as MCP clients without running interactive setup or installers.
+ * One-shot shell access to Pharaoh's six question tools and `pharaoh_setup`. Uses the
+ * same proxy dispatch as MCP clients without running interactive setup or installers.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -14,11 +14,13 @@ import { selectBlastRoute } from "./local/dispatch.js";
 import { createLocalBlastRuntime } from "./local/runtime.js";
 import { resolveLocalCheckout } from "./local/scope.js";
 import { localAnalyzerExpected } from "./local/worker-host.js";
+import { localHost } from "./local-host.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { createSseProxyServer } from "./proxy-server.js";
 import { originBoundRefresh, type RefreshFailureAction } from "./refresh.js";
 import { getPackageVersion } from "./version.js";
 
+const SETUP_TOOL = "pharaoh_setup";
 const CLI_TOOLS = [
 	"get_codebase_map",
 	"get_module_context",
@@ -26,6 +28,9 @@ const CLI_TOOLS = [
 	"get_blast_radius",
 	"get_unused_code",
 	"pharaoh_recon",
+	// An agent that just ran the installer can't load the new MCP server until its next
+	// session, so it runs setup from the shell.
+	SETUP_TOOL,
 ];
 const CALL_TIMEOUT_MS = 5 * 60_000;
 const SIGN_IN = `Pharaoh: not signed in. Run ${NPX_COMMAND} in a terminal to sign in.`;
@@ -212,8 +217,9 @@ function resultExitCode(name: string, result: CallToolResult): number {
 	if (errorCode === "sign_in_required") return EXIT.signIn;
 	if (result.isError) return EXIT.failure;
 	if (errorCode === PLAN_WALL_ERROR_CODE) return EXIT.plan;
-	if ((typeof errorCode === "string" && errorCode.length > 0) || guidance === true)
-		return EXIT.failure;
+	if (typeof errorCode === "string" && errorCode.length > 0) return EXIT.failure;
+	// Setup's report is guidance by design (never a counted answer); here it is the answer.
+	if (guidance === true) return name === SETUP_TOOL ? EXIT.answer : EXIT.failure;
 	// Older servers expose the plan refusal only in the first text block.
 	const firstText = result.content.find((block) => block.type === "text");
 	return name !== "get_codebase_map" && firstText?.text.startsWith(LEGACY_PLAN_WALL_PREFIX)
@@ -245,7 +251,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		const { args, server, asJson } = parse(argv, schema);
 		const localCapable =
 			name === "get_blast_radius" && args.scope !== "hosted" && localAnalyzerExpected();
-		const runtime = localCapable ? createLocalBlastRuntime(server) : undefined;
+		const runtime = localCapable ? createLocalBlastRuntime(server, localHost()) : undefined;
 		const route = selectBlastRoute(
 			name,
 			args,

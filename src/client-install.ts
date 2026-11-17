@@ -54,6 +54,23 @@ const BLOCK_END = "# end pharaoh-mcp managed registration\n";
 const RECOVERY = "npx @pharaoh-so/mcp@latest install --migrate-legacy";
 const DESKTOP_OPEN =
 	"Quit Claude Desktop and run the install again: while it's open, it saves its earlier settings over this change.";
+/** Claude Desktop's macOS bundle, which `osascript` asks to quit and `open` reopens. */
+const DESKTOP_BUNDLE = "com.anthropic.claudefordesktop";
+/** How long a restart waits for Desktop to close: it may ask the person to confirm. */
+const DESKTOP_QUIT_MS = 30_000;
+
+/** What the installer's and updater's summaries call each client. */
+export const CLIENT_LABELS: Record<ClientId, string> = {
+	"claude-code": "Claude Code",
+	codex: "Codex",
+	"claude-desktop": "Claude Desktop",
+};
+
+/** "Claude Code, Codex and Claude Desktop": the clients' names as a summary line lists them. */
+export function listClients(outcomes: readonly { client: ClientId }[]): string {
+	const names = outcomes.map((outcome) => CLIENT_LABELS[outcome.client]);
+	return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
+}
 
 // Composed platform contract, rather than a scan of possibly stale package folders:
 // Anthropic identifies its registered Windows app with Get-AppxPackage -Name Claude.
@@ -521,19 +538,22 @@ function replaceable(
 }
 
 /**
- * Whether the Claude Desktop app is open (macOS). An open Desktop writes the settings it
- * loaded at launch back over its config file, `mcpServers` included, so a registration
- * changed meanwhile reverts at its next save (seen in Desktop's "Config file written" log
- * minutes after each install). `-a`: install often runs in Desktop's own terminal, and
- * pgrep otherwise skips its ancestors.
+ * Claude Desktop's process IDs (macOS); none when it's closed. An open Desktop writes the
+ * settings it loaded at launch back over its config file, `mcpServers` included, so a
+ * registration changed meanwhile reverts at its next save (seen in Desktop's "Config file
+ * written" log minutes after each install). `-a`: install often runs in Desktop's own
+ * terminal, and pgrep otherwise skips its ancestors.
  */
-function desktopOpen(options: ClientInstallOptions): boolean {
-	if (settings(options).platform !== "darwin") return false;
+function desktopPids(options: ClientInstallOptions): number[] {
+	if (settings(options).platform !== "darwin") return [];
 	try {
-		return /^\d+$/m.test(execute(options, "/usr/bin/pgrep", ["-a", "-x", "Claude"]));
+		return execute(options, "/usr/bin/pgrep", ["-a", "-x", "Claude"])
+			.split("\n")
+			.filter((line) => /^\d+$/.test(line.trim()))
+			.map(Number);
 	} catch {
 		// Not running (pgrep exits 1) or no pgrep: nothing to warn about.
-		return false;
+		return [];
 	}
 }
 
@@ -763,7 +783,8 @@ function configureJson(
 	const notes = [projectOverrides(document), desktopPrecedence(target, launch, options)];
 	if (current !== undefined && canonical(current) === canonical(launch))
 		return result(target, "already-configured", notes.filter(Boolean).join(" "));
-	if (target.client === "claude-desktop" && desktopOpen(options)) notes.push(DESKTOP_OPEN);
+	const desktopOpen = target.client === "claude-desktop" && desktopPids(options).length > 0;
+	if (desktopOpen) notes.push(DESKTOP_OPEN);
 	const detail = notes.filter(Boolean).join(" ");
 	const servers = entries(document, target.client);
 	servers.pharaoh = { command: launch.command, args: [...launch.args] };
@@ -774,7 +795,8 @@ function configureJson(
 		throw new Error("The configuration update changed unrelated settings.");
 	remember(target, servers.pharaoh, options);
 	atomicReplace(target.path, before, next);
-	return result(target, "configured", detail, undefined, current === undefined);
+	const outcome = result(target, "configured", detail, undefined, current === undefined);
+	return desktopOpen ? { ...outcome, desktopOpen: true } : outcome;
 }
 
 function tomlBlock(launch: LaunchConfig): string {
@@ -842,8 +864,12 @@ function configureCodex(
 			throw new Error("The Codex configuration changed during installation.");
 		execute(options, target.cli, ["mcp", "add", "pharaoh", "--", launch.command, ...launch.args]);
 		const after = toml(snapshot(target.path).text);
+		const added = entry(after, target.client);
+		// The entry reads back as install wrote it, so it is install's even if a check below
+		// fails; without this receipt, later installs would keep it as the user's forever.
+		if (canonical(added) === canonical(launch)) remember(target, added, options);
 		if (
-			canonical(entry(after, target.client)) !== canonical(launch) ||
+			canonical(added) !== canonical(launch) ||
 			unrelated(after, target.client) !== unrelated(document, target.client)
 		)
 			throw new Error(
@@ -852,7 +878,6 @@ function configureCodex(
 		const raw = readCodex(target, options);
 		if (!raw || canonical(cliLaunch(raw)) !== canonical(launch) || raw.enabled === false)
 			throw new Error("Codex did not report an enabled matching stdio registration.");
-		remember(target, entry(after, target.client), options);
 		return result(target, "configured", undefined, undefined, current === undefined);
 	}
 	if (current !== undefined && canonical(current) === canonical(launch))
@@ -906,6 +931,116 @@ export function configureClients(
 			);
 		}
 	});
+}
+
+/**
+ * Move each Pharaoh registration that still runs one exact version from `launcher`'s
+ * runtimes folder onto `launcher`, keeping its Node and server arguments, under the
+ * rules install uses: its receipt, or a managed pin. Custom and disabled entries stay as
+ * they are, and a client without a Pharaoh registration gets none. `update` runs this, so
+ * every client follows later updates through the launcher.
+ *
+ * @param launcher - The stable launcher (<runtimes>/launcher-v1.mjs)
+ * @param options - Fixtures
+ * @returns An outcome for each pinned registration found
+ */
+export function moveToLauncher(
+	launcher: string,
+	options: ClientInstallOptions = {},
+): ClientOutcome[] {
+	return discoverClients(options).flatMap((target) => {
+		let current: unknown;
+		try {
+			current = entry(parse(target, snapshot(target.path).text), target.client);
+		} catch {
+			// Unreadable settings are install's to report; update leaves them alone.
+			return [];
+		}
+		if (!persistentLaunch(current) || versionEntry(current.args[0])?.root !== dirname(launcher))
+			return [];
+		let receipt: Receipt | undefined;
+		try {
+			receipt = owned(target, current, readProvenance(options).data);
+		} catch {
+			return [];
+		}
+		// Without a receipt, the entry is install's only as install writes it: Node and the
+		// default server. A wrapper or another server stays the user's.
+		if (!receipt && !managedPin(current, { command: process.execPath, args: [launcher] }))
+			return [result(target, "preserved-custom", "The existing registration was kept.")];
+		const launch = { command: current.command, args: [launcher, ...current.args.slice(1)] };
+		return configureClients([target], launch, options);
+	});
+}
+
+/**
+ * Whether install can restart Claude Desktop: it is open, and this process doesn't run
+ * inside it. From Desktop's own terminal, quitting Desktop would end this install too.
+ *
+ * @param options - Fixtures
+ */
+export function desktopRestartable(options: ClientInstallOptions = {}): boolean {
+	const pids = desktopPids(options);
+	if (!pids.length) return false;
+	let parents: Map<number, number>;
+	try {
+		const table = execute(options, "/bin/ps", ["-A", "-o", "pid=,ppid="]);
+		parents = new Map(
+			table
+				.trim()
+				.split("\n")
+				.map((line) => line.trim().split(/\s+/).map(Number) as [number, number]),
+		);
+	} catch {
+		return false;
+	}
+	for (let pid = process.pid, hops = 0; pid > 1 && hops < 64; hops++) {
+		if (pids.includes(pid)) return false;
+		pid = parents.get(pid) ?? 0;
+	}
+	return true;
+}
+
+/**
+ * Restart Claude Desktop onto `launch`: ask macOS to quit it (as ⌘Q does, so Desktop may
+ * ask the person to confirm), register while it's closed, then open it again. It then
+ * starts on this registration and saves this one from then on.
+ *
+ * @param target - Claude Desktop's configuration
+ * @param launch - The registration to keep
+ * @param options - The install's consent to migrate a legacy pin, which Desktop may write
+ *   back as it quits; fixtures
+ * @returns The registration's outcome, or null when Desktop didn't quit
+ */
+export async function restartDesktop(
+	target: ClientTarget,
+	launch: LaunchConfig,
+	options: ClientInstallOptions & { migrateLegacy?: boolean } = {},
+): Promise<ClientOutcome | null> {
+	try {
+		execute(options, "/usr/bin/osascript", [
+			"-e",
+			`tell application id "${DESKTOP_BUNDLE}" to quit`,
+		]);
+	} catch {
+		// macOS refused (the terminal may not control other apps): the person quits it.
+		return null;
+	}
+	for (let waited = 0; desktopPids(options).length; waited += 250) {
+		if (waited >= DESKTOP_QUIT_MS) return null;
+		await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+	}
+	const [outcome] = configureClients([target], launch, options);
+	try {
+		execute(options, "/usr/bin/open", ["-b", DESKTOP_BUNDLE]);
+		return outcome;
+	} catch {
+		// Its registration is saved; the person opens Desktop themselves.
+		return {
+			...outcome,
+			detail: [outcome.detail, "Open Claude Desktop again."].filter(Boolean).join(" "),
+		};
+	}
 }
 
 function persistentLaunch(value: unknown): value is LaunchConfig {
