@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pharaoh-mcp` depends on `sigstore` 3.1.0, loaded only when an update runs.
 
 ### Fixed
+- `install` moves a Claude Code, Codex or Claude Desktop registration still pinned to one version folder (`~/.pharaoh/runtimes/mcp/0.3.82/…`) to the stable launcher, so it follows updates. Before, a pin without an install receipt was kept as your own setting and never updated. Codex moves when its CLI is installed. Your other MCP servers, and a Pharaoh entry you changed, stay as they are. When Claude Desktop is open on macOS, `install` says to quit it and run again: an open Desktop saves its earlier settings over the change.
 - `--undo-memory` keeps its receipt when Pharaoh answers with its rate limit or a stale sign-in, so running it again finishes the undo; before, those records were left saved and the receipt was gone.
 
 ### Added
