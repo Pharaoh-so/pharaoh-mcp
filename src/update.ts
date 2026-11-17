@@ -5,8 +5,10 @@
  * Installs npm's newest release into a private stage, accepts it only when it is
  * provably the registry's tarball built by Pharaoh's own publishing workflow, and
  * stages it (pending.json) for the stable launcher to apply at the next session
- * start. Nothing here changes the running proxy, current.json or any client's
- * settings, and any failed check leaves the current version active.
+ * start. Nothing here changes the running proxy or current.json, and any failed
+ * check leaves the current version active. The one client setting it changes is
+ * a Pharaoh registration still pinned to one version, which moves onto the
+ * launcher (moveToLauncher) so that client follows updates too.
  *
  * Verification:
  * - every package came from registry.npmjs.org (the lockfile's `resolved`), the
@@ -21,11 +23,12 @@
  */
 import { execFile } from "node:child_process";
 import { randomUUID, X509Certificate } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	LAUNCHER_NAME,
 	logUpdate,
 	newerVersion,
 	readPointer,
@@ -34,6 +37,8 @@ import {
 	withActivateLock,
 	writePointer,
 } from "../runtime/launcher-v1.mjs";
+import { CLIENT_LABELS, listClients, moveToLauncher } from "./client-install.js";
+import type { ClientInstallOptions, ClientOutcome } from "./install-types.js";
 import {
 	NPM_REGISTRY,
 	OffRegistryTarballError,
@@ -72,11 +77,15 @@ class UpdateRejected extends Error {
 }
 
 /** The update's outcome, as the CLI prints it and pharaoh_update returns it. */
-export type UpdateResult =
+export type UpdateResult = (
 	| { status: "staged"; version: string; from: string }
 	| { status: "current"; version: string }
 	| { status: "refused"; reason: string; message: string }
-	| { status: "rejected"; reason: string; version?: string; message: string };
+	| { status: "rejected"; reason: string; version?: string; message: string }
+) & {
+	/** Registrations that were pinned to one version, and what moving them onto the launcher did. */
+	clients?: ClientOutcome[];
+};
 
 /** A Sigstore bundle check: resolves when the bundle verifies under `options`, throws otherwise. */
 export type BundleVerifier = (bundle: unknown, options: Record<string, unknown>) => Promise<void>;
@@ -90,6 +99,8 @@ export interface UpdateOptions {
 	verifyBundle?: BundleVerifier;
 	/** Fixtures only: a local registry standing in for registry.npmjs.org. */
 	registry?: string;
+	/** Fixtures only: client discovery and commands for moving pinned registrations. */
+	clients?: ClientInstallOptions;
 	runtime?: RuntimeOptions & Pick<VerifiedRuntimeOptions, "runAsync">;
 }
 
@@ -388,7 +399,31 @@ export async function runUpdate(
 			reason: "no-launcher",
 			message: `Run ${MANUAL} once; from then on Pharaoh can update itself when you accept.`,
 		};
-	const from = current?.version as string;
+	const result = await stageNewest(source, root, current?.version as string, options);
+	// Even with nothing newer, a client pinned to one version would never run a newer one.
+	const clients = movePinnedClients(root, home, options);
+	return clients.length ? { ...result, clients } : result;
+}
+
+/** Move pinned registrations onto the launcher; a failure here never changes the update's outcome. */
+function movePinnedClients(root: string, home: string, options: UpdateOptions): ClientOutcome[] {
+	const launcher = join(root, LAUNCHER_NAME);
+	if (!existsSync(launcher)) return [];
+	try {
+		return moveToLauncher(launcher, { home, platform: options.platform, ...options.clients });
+	} catch {
+		return [];
+	}
+}
+
+/** Verify npm's newest release and stage it; `from` is the version current.json names. */
+async function stageNewest(
+	source: "tool" | "terminal",
+	root: string,
+	from: string,
+	options: UpdateOptions,
+): Promise<UpdateResult> {
+	const home = options.home ?? homedir();
 	const registry = options.registry ?? NPM_REGISTRY;
 	let version: string | undefined;
 	try {
@@ -464,6 +499,10 @@ export async function runUpdate(
  * @param result - What runUpdate returned
  */
 function describeUpdate(result: UpdateResult): string {
+	return [describeVersion(result), ...describeClients(result.clients)].join("\n");
+}
+
+function describeVersion(result: UpdateResult): string {
 	switch (result.status) {
 		case "staged":
 			return `Pharaoh ${result.version} passed verification (npm's registry signature and its build provenance from Pharaoh-so/pharaoh-mcp) and is staged. It becomes active when you start your next session; ${result.from} keeps running until then.`;
@@ -474,6 +513,24 @@ function describeUpdate(result: UpdateResult): string {
 		case "rejected":
 			return `Pharaoh did not stage ${result.version ?? "the update"}: ${result.message}`;
 	}
+}
+
+/** Which pinned clients now follow updates, and any that need the person: an open Desktop, a failed write. */
+function describeClients(clients: readonly ClientOutcome[] = []): string[] {
+	const moved = clients.filter((client) => client.status === "configured");
+	const attention = clients.filter(
+		(client) =>
+			client.detail &&
+			(client.desktopOpen || ["failed", "ambiguous", "unavailable"].includes(client.status)),
+	);
+	return [
+		...(moved.length
+			? [
+					`${listClients(moved)}: now start through Pharaoh's launcher and run the newest version from the next session.`,
+				]
+			: []),
+		...attention.map((client) => `${CLIENT_LABELS[client.client]}: ${client.detail}`),
+	];
 }
 
 /**

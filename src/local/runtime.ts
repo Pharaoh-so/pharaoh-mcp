@@ -1,6 +1,5 @@
 /** Coordinates the local authorization, capture, analysis and result lifetime. */
 
-import { fileURLToPath } from "node:url";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
 	consumeLocalWorktreeContext,
@@ -17,11 +16,15 @@ import {
 	verifyRuntimeSession,
 } from "../../runtime/local-worktree-hook.mjs";
 import { runtimeClient } from "../../runtime/runtime-native.mjs";
-import { verifiedCodingClients } from "../client-install.js";
-import { type Credentials, readCredentials } from "../credentials.js";
-import { runningEntry } from "../version.js";
+import type { Credentials } from "../credentials.js";
 import { createLocalAuthorization, LocalAuthorizationError } from "./authorization.js";
-import { type LocalBlastRuntime, type LocalDelivery, localRefusal } from "./contracts.js";
+import {
+	type LocalBlastRuntime,
+	type LocalDelivery,
+	type LocalHost,
+	type LocalSignIn,
+	localRefusal,
+} from "./contracts.js";
 import type { BlastRoute, CheckoutEvidence, VerifiedCheckout } from "./dispatch.js";
 import { formatLocalBlastRadius } from "./format.js";
 import { resolveLocalCheckout } from "./scope.js";
@@ -32,6 +35,7 @@ type Claimed = Extract<BlastRoute, { kind: "local" }>;
 
 async function answerLocal(
 	server: string,
+	signIn: LocalSignIn,
 	analyzer: LocalAnalyzer,
 	route: Claimed,
 	signal: AbortSignal,
@@ -46,7 +50,7 @@ async function answerLocal(
 	try {
 		signal.throwIfAborted();
 		const { checkout, query } = route;
-		authorization = createLocalAuthorization({ server, expectedSignIn });
+		authorization = createLocalAuthorization({ server, signIn, expectedSignIn });
 		permit = await authorization.reserve(checkout.repoSlug, signal);
 		// A stale capture never earns an answer. Try once more if a save races a query.
 		for (let attempt = 0; attempt < 2; attempt++) {
@@ -145,25 +149,23 @@ async function answerLocal(
 /**
  * Prepare the installed analyzer and bind native scope only after stdio negotiation.
  * @param server - Existing Pharaoh origin used for authorization metadata only
+ * @param host - The sign-in, launch entry and managed clients, from the composition root
  * @param invocation - Optional trusted CLI workspace evidence
  * @returns The local dispatcher when its exact installed assets are present
  */
 export function createLocalBlastRuntime(
 	server: string,
+	host: LocalHost,
 	invocation: CheckoutEvidence = { kind: "hosted-only" },
 ): LocalBlastRuntime | undefined {
 	const analyzer = installedLocalAnalyzer();
 	if (!analyzer) return undefined;
 	// What registrations name: the launcher when one started this proxy (binds the hook's grants too).
-	const entry = runningEntry(fileURLToPath(new URL("../index.js", import.meta.url)));
+	const { entry, signIn } = host;
 	const claimedSignIns = new WeakMap<VerifiedCheckout, Credentials>();
 	let generation: LocalRuntimeGeneration | undefined;
-	const managedClients = () =>
-		verifiedCodingClients({
-			runningLaunch: { command: process.execPath, args: [entry] },
-			rejectProjectOverrides: true,
-		});
-	const managed = (client: LocalRuntimeGeneration["client"]) => managedClients().includes(client);
+	const managed = (client: LocalRuntimeGeneration["client"]) =>
+		host.managedClients().includes(client);
 	const currentCheckout = (): CheckoutEvidence => {
 		try {
 			return resolveLocalCheckout(process.cwd());
@@ -174,14 +176,14 @@ export function createLocalBlastRuntime(
 	return {
 		invocation,
 		canDeferHostedStartup() {
-			return managedClients().length > 0 && currentCheckout().kind === "checkout";
+			return host.managedClients().length > 0 && currentCheckout().kind === "checkout";
 		},
 		connect(name) {
 			const client = runtimeClient(name);
 			if (!client || !managed(client)) return;
 			const evidence = currentCheckout();
 			if (evidence.kind === "checkout") {
-				const binding = localWorktreeBinding(client, entry, readCredentials());
+				const binding = localWorktreeBinding(client, entry, signIn.read());
 				generation = observeRuntimeGeneration(client, binding, evidence.checkout, {
 					resolveCheckout: resolveLocalCheckout,
 					memoryRuntime: nativeMemoryRuntimeBinding(client, entry),
@@ -196,7 +198,7 @@ export function createLocalBlastRuntime(
 				Object.keys(args).length === 1 &&
 				managed(client) &&
 				verifyRuntimeSession(generation, args.challenge, {
-					binding: localWorktreeBinding(client, entry, readCredentials()),
+					binding: localWorktreeBinding(client, entry, signIn.read()),
 				});
 			if (!verified) return localRefusal("unverified_worktree");
 			return {
@@ -219,7 +221,7 @@ export function createLocalBlastRuntime(
 		consume(name, token, args) {
 			const client = runtimeClient(name);
 			if (!client || client !== generation?.client || !managed(client)) return undefined;
-			const credentials = readCredentials();
+			const credentials = signIn.read();
 			if (!credentials) return undefined;
 			const checkout = consumeLocalWorktreeContext(token, args, {
 				client,
@@ -231,6 +233,14 @@ export function createLocalBlastRuntime(
 			return checkout;
 		},
 		answer: (route, signal, onDelivery) =>
-			answerLocal(server, analyzer, route, signal, onDelivery, claimedSignIns.get(route.checkout)),
+			answerLocal(
+				server,
+				signIn,
+				analyzer,
+				route,
+				signal,
+				onDelivery,
+				claimedSignIns.get(route.checkout),
+			),
 	};
 }

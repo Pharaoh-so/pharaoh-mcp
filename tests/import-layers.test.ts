@@ -1,17 +1,27 @@
 /**
- * No file in the package imports itself back through others. Codebase Health
- * counts every import inside a cycle, the way this reads them: type-only
- * imports skipped, literal dynamic imports kept, and `../dist/` read as `src/`.
+ * The package's imports run one way: no file imports itself back through
+ * others, and its directories import downward from src/ (the composition
+ * root) to src/local, runtime/ and project-memory/. Codebase Health counts
+ * every import inside a cycle, the way this reads them: type-only imports
+ * skipped, literal dynamic imports kept, and `../dist/` read as `src/`.
+ * runtime/ files run from installed hook commands, so the compiled code a hook
+ * needs is loaded by its place in the build (src/local-host.ts), never imported.
  *
- * Breaks when: a file imports one that imports it back, directly or around a loop.
+ * Breaks when:
+ * - a file imports one that imports it back, directly or around a loop
+ * - a file imports from a directory that imports it back
+ * - runtime/ reaches a new built file by path, or one whose source is gone
+ * - the hook reads an export or function the composition root doesn't provide
+ *   (the hook swallows its errors, so it would stop answering silently)
  */
-import { readdirSync, readFileSync } from "node:fs";
-import { join, posix, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, posix, resolve } from "node:path";
 import ts from "typescript";
 import { expect, it } from "vitest";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const DIRECTORIES = ["src", "src/local", "runtime", "project-memory", "hooks"];
+const BUILT = /^\.\.\/dist\/(.+)\.js$/;
 
 /** A package path as its source: built output read as src/, a `.js` import as its `.ts`. */
 function source(from: string, specifier: string): string {
@@ -20,11 +30,12 @@ function source(from: string, specifier: string): string {
 	return path.endsWith(".js") && path.startsWith("src/") ? path.replace(/\.js$/, ".ts") : path;
 }
 
-/** What one file imports at run time, as package paths. */
-function importsOf(file: string): string[] {
+/** What one file imports at run time, and the built files it loads by path. */
+function readFile(file: string): { imports: string[]; built: string[] } {
 	const text = readFileSync(join(ROOT, file), "utf8");
 	const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
 	const imports: string[] = [];
+	const built: string[] = [];
 	const literal = (node: ts.Node | undefined) =>
 		node && ts.isStringLiteral(node) ? node.text : undefined;
 	const visit = (node: ts.Node) => {
@@ -35,11 +46,15 @@ function importsOf(file: string): string[] {
 			specifier = literal(node.moduleSpecifier);
 		else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword)
 			specifier = literal(node.arguments[0]);
+		else if (ts.isNewExpression(node) && node.expression.getText() === "URL") {
+			const path = literal(node.arguments?.[0]);
+			if (path && BUILT.test(path)) built.push(source(file, path));
+		}
 		if (specifier?.startsWith(".")) imports.push(source(file, specifier));
 		ts.forEachChild(node, visit);
 	};
 	visit(tree);
-	return imports;
+	return { imports, built };
 }
 
 const files = DIRECTORIES.flatMap((directory) =>
@@ -47,7 +62,7 @@ const files = DIRECTORIES.flatMap((directory) =>
 		.filter((name) => /\.(?:ts|mjs)$/.test(name) && !name.endsWith(".d.mts"))
 		.map((name) => `${directory}/${name}`),
 );
-const imports = new Map(files.map((file) => [file, importsOf(file)]));
+const read = new Map(files.map((file) => [file, readFile(file)]));
 
 /** One cycle in `graph`, as the nodes around it back to the first; empty when there is none. */
 function cycle(graph: Map<string, Set<string>>): string[] {
@@ -75,8 +90,8 @@ function cycle(graph: Map<string, Set<string>>): string[] {
 /** The import graph with each file replaced by `group(file)`, without self-links. */
 function graphOf(group: (file: string) => string): Map<string, Set<string>> {
 	const graph = new Map<string, Set<string>>();
-	for (const [file, targets] of imports)
-		for (const target of targets) {
+	for (const [file, { imports }] of read)
+		for (const target of imports) {
 			const [from, to] = [group(file), group(target)];
 			if (from !== to) graph.set(from, (graph.get(from) ?? new Set()).add(to));
 		}
@@ -85,4 +100,44 @@ function graphOf(group: (file: string) => string): Map<string, Set<string>> {
 
 it("no file imports itself back through others", () => {
 	expect(cycle(graphOf((file) => file))).toEqual([]);
+});
+
+it("imports between directories run one way", () => {
+	expect(cycle(graphOf(dirname))).toEqual([]);
+});
+
+it("reaches the build by path only where runtime/ means to, and those sources exist", () => {
+	// The one deliberate exception to the import graph: the hook's analysis
+	// (src/local-host.ts), loaded by path, and the entry registrations name (src/index.ts).
+	const built = [...read.values()].flatMap((file) => file.built).sort();
+	expect(built).toEqual(["src/index.ts", "src/local-host.ts"]);
+	expect(built.filter((path) => !existsSync(join(ROOT, path)))).toEqual([]);
+});
+
+it("finds every function the hook command reads in the module it loads", async () => {
+	const hook = "runtime/local-worktree-hook.mjs";
+	const text = readFileSync(join(ROOT, hook), "utf8");
+	const tree = ts.createSourceFile(hook, text, ts.ScriptTarget.Latest, true);
+	let exported: string | undefined;
+	const names: string[] = [];
+	const visit = (node: ts.Node) => {
+		// `(await import(ANALYSIS.href)).<export>` and `const { ... } = await loadAnalysis()`
+		if (
+			ts.isPropertyAccessExpression(node) &&
+			/import\(ANALYSIS\.href\)/.test(node.expression.getText())
+		)
+			exported = node.name.text;
+		if (
+			ts.isVariableDeclaration(node) &&
+			ts.isObjectBindingPattern(node.name) &&
+			node.initializer?.getText() === "await loadAnalysis()"
+		)
+			for (const element of node.name.elements) names.push(element.name.getText());
+		ts.forEachChild(node, visit);
+	};
+	visit(tree);
+	expect(exported).toBe("worktreeHookAnalysis");
+	expect(names).toHaveLength(6);
+	const analysis = (await import("../src/local-host.js"))[exported as "worktreeHookAnalysis"];
+	expect(names.filter((name) => typeof Reflect.get(analysis, name) !== "function")).toEqual([]);
 });

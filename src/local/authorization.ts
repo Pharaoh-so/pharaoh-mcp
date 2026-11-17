@@ -1,7 +1,7 @@
 /** The local query is never an input to this transport. */
 import { randomUUID } from "node:crypto";
-import { type Credentials, readCredentials } from "../credentials.js";
-import { renewOriginBoundSignIn, sameCredentialSnapshot } from "../refresh.js";
+import type { Credentials } from "../credentials.js";
+import type { LocalSignIn } from "./contracts.js";
 
 const VERSION = 1;
 const PATH = "/api/local/v1";
@@ -32,7 +32,8 @@ export class LocalAuthorizationError extends Error {
 
 interface LocalAuthorizationOptions {
 	readonly server: string;
-	readonly credentialsPath?: string;
+	/** The saved sign-in this invocation reads, compares and renews. */
+	readonly signIn: LocalSignIn;
 	/** Credential snapshot verified by the native hook handoff, when present. */
 	readonly expectedSignIn?: Credentials;
 	readonly fetch?: typeof fetch;
@@ -139,12 +140,13 @@ function parsePermit(body: unknown, requestId: string, now: number): LocalPermit
  */
 export function createLocalAuthorization(options: LocalAuthorizationOptions) {
 	const server = origin(options.server);
-	const read = () => readCredentials(options.credentialsPath);
+	const { signIn } = options;
+	const read = () => signIn.read();
 	const fetchReceipt = options.fetch ?? fetch;
 	const now = options.now ?? Date.now;
 	const requestId = randomUUID();
 	let credentials = read();
-	if (options.expectedSignIn && !sameCredentialSnapshot(credentials, options.expectedSignIn)) {
+	if (options.expectedSignIn && !signIn.same(credentials, options.expectedSignIn)) {
 		throw new LocalAuthorizationError("sign_in_changed");
 	}
 	let refreshed = false;
@@ -153,7 +155,7 @@ export function createLocalAuthorization(options: LocalAuthorizationOptions) {
 
 	function currentCredentials(): Credentials {
 		if (!credentials) throw new LocalAuthorizationError("sign_in_required");
-		if (origin(credentials.sse_url) !== server || !sameCredentialSnapshot(read(), credentials)) {
+		if (origin(credentials.sse_url) !== server || !signIn.same(read(), credentials)) {
 			throw new LocalAuthorizationError("sign_in_changed");
 		}
 		return credentials;
@@ -217,14 +219,12 @@ export function createLocalAuthorization(options: LocalAuthorizationOptions) {
 			currentCredentials();
 			if (reply.status === 401 && !refreshed) {
 				refreshed = true;
-				const renewed = await renewOriginBoundSignIn(before, server, options.credentialsPath).catch(
-					() => null,
-				);
+				const renewed = await signIn.renew(before, server).catch(() => null);
 				requireActive(signal);
 				if (!renewed?.ok) {
 					const after = read();
 					const code =
-						after && !sameCredentialSnapshot(after, before)
+						after && !signIn.same(after, before)
 							? "sign_in_changed"
 							: !after || renewed?.action === "reauth"
 								? "sign_in_required"

@@ -15,9 +15,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	cleanupManagedClients,
 	configureClients,
+	desktopRestartable,
 	discoverClients,
 	freshRuntimeClients,
 	legacyMigrations,
+	moveToLauncher,
+	restartDesktop,
 	verifiedCodingClients,
 } from "../src/client-install.js";
 import type { ClientInstallOptions, ClientTarget, LaunchConfig } from "../src/install-types.js";
@@ -480,7 +483,71 @@ describe("registration ownership", () => {
 		expect(configureClients([chat()], upgraded, { ...options, execute })[0]).toMatchObject({
 			status: "configured",
 			detail: expect.stringContaining("Quit Claude Desktop"),
+			desktopOpen: true,
 		});
+	});
+
+	it("restarts an open Claude Desktop only from outside it, registering while it's closed", async () => {
+		const calls: string[] = [];
+		let open = true;
+		const desktop = (ps: string, quits = true, reopens = true): ClientInstallOptions => ({
+			...options,
+			execute: (command, args) => {
+				calls.push([command, ...args].join(" "));
+				if (command === "/usr/bin/pgrep") return open ? "813\n" : unavailable();
+				if (command === "/bin/ps") return ps;
+				if (command === "/usr/bin/osascript") open = !quits;
+				return (command === "/usr/bin/open" ? reopens : quits) ? "" : unavailable();
+			},
+		});
+		// Inside Desktop's own terminal, quitting Desktop would end this install too.
+		expect(desktopRestartable(desktop(`${process.pid} 900\n900 813\n813 1\n`))).toBe(false);
+		expect(desktopRestartable(desktop(`${process.pid} 900\n900 1\n`))).toBe(true);
+		// Desktop refused to quit (macOS denied the request, or the person cancelled).
+		expect(await restartDesktop(chat(), launch, desktop("", false))).toBeNull();
+		calls.length = 0;
+		expect(await restartDesktop(chat(), launch, desktop(""))).toMatchObject({
+			status: "configured",
+		});
+		expect(JSON.parse(readFileSync(chat().path, "utf8")).mcpServers.pharaoh).toEqual(launch);
+		expect(calls.filter((call) => !call.startsWith("/usr/bin/pgrep"))).toEqual([
+			'/usr/bin/osascript -e tell application id "com.anthropic.claudefordesktop" to quit',
+			"/usr/bin/open -b com.anthropic.claudefordesktop",
+		]);
+		// Registered, but Desktop didn't open again: the summary says to open it.
+		open = true;
+		expect((await restartDesktop(chat(), launch, desktop("", true, false)))?.detail).toContain(
+			"Open Claude Desktop",
+		);
+	});
+
+	it("moves only registrations pinned to one version onto the launcher, adding none", () => {
+		const exact = { command: launch.command, args: [managed("0.3.82")] };
+		expect(configureClients([code()], exact, options)[0].status).toBe("configured");
+		const custom = JSON.stringify({ mcpServers: { pharaoh: { ...exact, env: { DEBUG: "1" } } } });
+		write(chat().path, custom);
+		expect(
+			moveToLauncher(managed(), options).map(({ client, status }) => [client, status]),
+		).toEqual([
+			["claude-desktop", "preserved-custom"],
+			["claude-code", "configured"],
+		]);
+		expect(JSON.parse(readFileSync(code().path, "utf8")).mcpServers.pharaoh).toEqual({
+			command: launch.command,
+			args: [managed()],
+		});
+		expect(readFileSync(chat().path, "utf8")).toBe(custom);
+		expect(moveToLauncher(managed(), options)).toHaveLength(1);
+		// With no receipt, an entry run through a wrapper or another server stays the user's.
+		for (const pharaoh of [
+			{ ...exact, command: join(home, "corp-wrapper") },
+			{ ...exact, args: [...exact.args, "--server", "https://self-hosted.example"] },
+		]) {
+			const text = JSON.stringify({ mcpServers: { pharaoh } });
+			write(chat().path, text);
+			expect(moveToLauncher(managed(), options)[0].status).toBe("preserved-custom");
+			expect(readFileSync(chat().path, "utf8")).toBe(text);
+		}
 	});
 });
 
@@ -570,6 +637,24 @@ describe("CLI-backed Codex", () => {
 			other: { command: "other" },
 			pharaoh: launcher,
 		});
+	});
+
+	it("records its registration once it reads back, even when a later check fails", () => {
+		const { execute } = codexCli(null);
+		const target = { ...codex(), cli: "codex" };
+		// Codex saved an unrelated setting while `add` ran, so install can't vouch for the rest.
+		const changing: typeof execute = (command, args, flags) => {
+			const out = execute(command, args, flags);
+			if (args[1] === "add")
+				write(codex().path, `model = "changed"\n${readFileSync(codex().path, "utf8")}`);
+			return out;
+		};
+		expect(configureClients([target], launch, { ...options, execute: changing })[0].status).toBe(
+			"failed",
+		);
+		expect(configureClients([target], launch, { ...options, execute })[0].status).toBe(
+			"already-configured",
+		);
 	});
 
 	it("preserves an effective project registration before invoking add", () => {

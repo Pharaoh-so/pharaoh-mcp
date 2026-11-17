@@ -23,6 +23,7 @@ import {
 	writeUpdateState,
 } from "../runtime/update-notice.mjs";
 import { pollOnce, requestDeviceCode } from "../src/auth.js";
+import { restartDesktop } from "../src/client-install.js";
 import type { Credentials } from "../src/credentials.js";
 import { askYesNo, printLines, showProgress } from "../src/helpers.js";
 import {
@@ -35,6 +36,7 @@ import {
 	startAgent,
 } from "../src/install.js";
 import { allowReadTools } from "../src/install-skills.js";
+import type { ClientTarget, LaunchConfig } from "../src/install-types.js";
 import { RuntimeSetupError } from "../src/runtime.js";
 import {
 	configureClients,
@@ -269,6 +271,64 @@ describe("NPX developer install", () => {
 		expect(await runInstall(options({ interactive: true, dependencies }, ["claude"]))).toBe(0);
 		expect(choose).toHaveBeenCalledTimes(1);
 		expect(desktopLines()).toHaveLength(1);
+	});
+
+	it("restarts an open Claude Desktop onto the new registration, keeping the migration consent", async () => {
+		const config = join(
+			home,
+			"Library",
+			"Application Support",
+			"Claude",
+			"claude_desktop_config.json",
+		);
+		const legacy = JSON.stringify({
+			mcpServers: { pharaoh: { command: "npx", args: ["@pharaoh-so/mcp@0.3.50"] } },
+		});
+		mkdirSync(dirname(config), { recursive: true });
+		writeFileSync(config, legacy);
+		rmSync(join(home, ".claude"), { recursive: true });
+		rmSync(join(home, ".codex"), { recursive: true });
+		// An open Desktop, which writes the legacy pin it loaded back as it quits.
+		let open = true;
+		const desktop = {
+			home,
+			env: { PATH: "" },
+			platform: "darwin" as const,
+			execute: (command: string) => {
+				if (command === "/usr/bin/pgrep" && open) return "813\n";
+				if (command === "/usr/bin/osascript") {
+					open = false;
+					writeFileSync(config, legacy);
+				}
+				if (command === "/usr/bin/osascript" || command === "/usr/bin/open") return "";
+				throw new Error("Not running, and no client CLI in this fixture");
+			},
+		};
+		const ask = vi.fn(async () => true);
+		const dependencies = {
+			ask,
+			choose: vi.fn(async () => -1),
+			canRestartDesktop: () => true,
+			configure: ((targets, config, flags) =>
+				configureClients(targets, config, { ...desktop, ...flags })) as typeof configureClients,
+			restartDesktop: (target: ClientTarget, config: LaunchConfig, flags: object) =>
+				restartDesktop(target, config, { ...desktop, ...flags }),
+		};
+		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
+		expect(ask).toHaveBeenLastCalledWith(expect.stringContaining("Restart it now?"));
+		expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.pharaoh).toEqual(launch);
+		expect(output.join("\n")).toContain("Claude Desktop: open it and ask");
+		// Inside Desktop's own terminal it can't restart: no question, and the summary says what to do.
+		open = true;
+		writeFileSync(config, legacy);
+		output.length = 0;
+		ask.mockClear();
+		const inside = { ...dependencies, canRestartDesktop: () => false };
+		expect(await runInstall(options({ interactive: true, dependencies: inside }))).toBe(0);
+		expect(ask.mock.calls.map(([question]) => question)).not.toContainEqual(
+			expect.stringContaining("Restart"),
+		);
+		expect(output.join("\n")).toContain("Quit Claude Desktop and run the install again");
 	});
 
 	it("asks for the Codex hook trust only while a Pharaoh hook has no trust record", async () => {

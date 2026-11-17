@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { type Credentials, writeCredentials } from "../src/credentials.js";
 import { createLocalAuthorization } from "../src/local/authorization.js";
+import { savedSignIn } from "../src/local-host.js";
 import { renewOriginBoundSignIn } from "../src/refresh.js";
 
 const SERVER = "https://pharaoh.example";
@@ -49,7 +50,7 @@ function reservation(permitId = PERMIT, expiresAt = NOW + 60_000) {
 function authorize(fetchReceipt: typeof fetch, server = SERVER) {
 	return createLocalAuthorization({
 		server,
-		credentialsPath,
+		signIn: savedSignIn(credentialsPath),
 		fetch: fetchReceipt,
 		now: () => NOW,
 	});
@@ -192,7 +193,7 @@ it("refuses a confirmation after permit expiry before sending", async () => {
 	let now = NOW;
 	const client = createLocalAuthorization({
 		server: SERVER,
-		credentialsPath,
+		signIn: savedSignIn(credentialsPath),
 		fetch: fetchReceipt,
 		now: () => now,
 	});

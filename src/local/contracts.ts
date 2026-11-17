@@ -2,10 +2,34 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { LocalMemoryBinding } from "../../runtime/local-worktree-hook.mjs";
+import type { Credentials } from "../credentials.js";
+import type { RefreshOutcome } from "../refresh.js";
 import type { BlastRoute, CheckoutEvidence, VerifiedCheckout } from "./dispatch.js";
 
 /** Settle only after the answer was successfully written to its client. */
 export type LocalDelivery = (written: boolean) => Promise<void>;
+
+/** The saved Pharaoh sign-in, as the proxy reads and renews it. */
+export interface LocalSignIn {
+	/** The saved sign-in, or null when there is none. */
+	read(): Credentials | null;
+	/** Whether `current` is still exactly `original`: the same tokens for the same server. */
+	same(current: Credentials | null, original: Credentials): boolean;
+	/** Renew `creds` against `server` alone, only while the saved sign-in is still `creds`. */
+	renew(creds: Credentials, server: string): Promise<RefreshOutcome>;
+}
+
+/**
+ * What local answers need from the proxy around them. The composition root
+ * (src/local-host.ts) supplies it, so src/local imports nothing above it.
+ */
+export interface LocalHost {
+	readonly signIn: LocalSignIn;
+	/** The launch entry client registrations name: the launcher that started this process, or dist/index.js. */
+	readonly entry: string;
+	/** The coding clients whose registration runs exactly `entry`. */
+	managedClients(): ReadonlyArray<"claude-code" | "codex">;
+}
 
 /** Execution of an already-claimed local request. */
 export interface LocalBlastRuntime {

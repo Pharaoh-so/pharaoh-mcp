@@ -711,6 +711,28 @@ describe("auth-flow E2E", () => {
 			},
 			stdout: "Install the GitHub App first.\n",
 		},
+		// Breaks when pharaoh_setup leaves the shell tools or its guidance-flagged report exits
+		// as a failure: an agent that just installed Pharaoh runs setup this way.
+		{
+			name: "setup report is an answer",
+			args: ["pharaoh_setup", "--repo", "r"],
+			code: 0,
+			result: {
+				content: [{ type: "text", text: "Pharaoh is connected." }],
+				_meta: { guidance: true },
+			},
+			stdout: "Pharaoh is connected.\n",
+			received: { repo: "r" },
+		},
+		{
+			name: "setup with a refusal code exits one",
+			args: ["pharaoh_setup", "--repo", "r"],
+			code: 1,
+			result: {
+				content: [{ type: "text", text: "Install the GitHub App first." }],
+				_meta: { errorCode: "setup_required", guidance: true },
+			},
+		},
 		{
 			name: "guidance takes precedence over legacy plan wording",
 			code: 1,

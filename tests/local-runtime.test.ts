@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLocalAuthorization } from "../src/local/authorization.js";
-import type { LocalDelivery } from "../src/local/contracts.js";
+import type { LocalDelivery, LocalHost } from "../src/local/contracts.js";
 import { formatLocalBlastRadius } from "../src/local/format.js";
 import { createLocalBlastRuntime } from "../src/local/runtime.js";
 import { captureLocalSnapshot, type LocalSnapshot } from "../src/local/snapshot.js";
@@ -15,6 +15,13 @@ vi.mock("../src/local/worker-host.js", () => ({
 	installedLocalAnalyzer: vi.fn(),
 	runLocalAnalyzer: vi.fn(),
 }));
+
+// Authorization is mocked, so the answer path never reads the sign-in.
+const host: LocalHost = {
+	signIn: { read: () => null, same: () => false, renew: vi.fn() },
+	entry: "/managed/dist/index.js",
+	managedClients: () => [],
+};
 
 function snapshot(caller: string): LocalSnapshot {
 	return {
@@ -73,7 +80,7 @@ describe("saved-worktree delivery freshness", () => {
 			],
 		}));
 
-		const runtime = createLocalBlastRuntime("https://mcp.example.com");
+		const runtime = createLocalBlastRuntime("https://mcp.example.com", host);
 		if (!runtime) throw new Error("Missing staged local runtime");
 		const onDelivery = vi.fn<(settle: LocalDelivery) => void>();
 		const result = await runtime.answer(

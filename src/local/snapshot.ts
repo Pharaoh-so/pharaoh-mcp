@@ -76,10 +76,7 @@ function isSourceName(name: string): boolean {
 	return SOURCE_EXTENSIONS.has(posix.extname(name)) && !MINIFIED_NAME.test(name);
 }
 
-/**
- * Use the snapshot's same source eligibility rules for native save evidence.
- * @public Used by the packaged local-worktree hook through the compiled module.
- */
+/** Use the snapshot's same source eligibility rules for native save evidence. */
 export function isLocalSourcePath(path: string): boolean {
 	const name = eligibleName(path);
 	return Boolean(name && !CONFIG_NAME.test(name) && isSourceName(name));
