@@ -135,6 +135,13 @@ function agentCommand(agent: AgentLaunch): string {
 	return `${agent.command} ${agent.args.map((arg) => JSON.stringify(arg)).join(" ")}`;
 }
 
+/** What a computer with no supported client hears, instead of a sign-in it couldn't use. */
+const NO_AGENT_HERE = [
+	"Pharaoh: no Claude Code, Codex or Claude Desktop on this computer, so there's nothing to connect.",
+	"Running this for someone else? Run it on their computer instead.",
+	"Other ways to connect: https://pharaoh.so/docs",
+];
+
 /** The menu title for the first run; each connected agent CLI is an option, then Skip. */
 const TRY_TITLE = "Try Pharaoh in:";
 
@@ -291,11 +298,7 @@ async function authenticateInstall(
 	}
 
 	const device = await requestDeviceCode(server, runtimeInstallations);
-	printActivationPrompt(
-		device.user_code,
-		device.verification_uri,
-		device.verification_uri_complete,
-	);
+	printActivationPrompt(device);
 	const token = await pollForToken(server, device.device_code, device.interval);
 	// Validate the server binding before replacing credentials.
 	const sseUrl = resolveSseUrl(token.sse_url, server);
@@ -377,8 +380,8 @@ export interface InstallOptions {
 }
 
 /**
- * Prepare the pinned runtime while discovering and signing in, then configure every client
- * independently. A failed runtime never reaches a configuration writer, and an install that
+ * Discover the supported clients (none: stop before anything else), prepare the pinned
+ * runtime while signing in, then configure every client independently. A failed runtime never reaches a configuration writer, and an install that
  * stops early stops the runtime's preparation too. Partial successes are retained.
  * @returns A shell exit status; does not terminate the caller or mark onboarding complete.
  */
@@ -414,6 +417,13 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 	// unfinished runtime preparation stops (a finished one ignores this).
 	const preparation = new AbortController();
 	try {
+		// Nothing here to connect (an agent's cloud sandbox, say): stop before sign-in and before
+		// any download, and say so in words the agent relays (VISION.md § Two screens).
+		const targets = dependencies.discover();
+		if (!targets.length) {
+			write(...NO_AGENT_HERE);
+			return 1;
+		}
 		// The runtime and the newest version need no sign-in, so both start now and the
 		// install waits only for what's left. Until sign-in ends, the runtime's progress and
 		// notes are held back so the sign-in prompt stays clean.
@@ -449,7 +459,6 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			if (results.includes("not_saved")) return 1;
 		}
 		const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stderr.isTTY);
-		const targets = dependencies.discover();
 		const migrations = dependencies.migrations(targets);
 		let migrateLegacy = options.migrateLegacy === true;
 		if (migrations.length && !migrateLegacy) {
@@ -498,7 +507,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		progress = dependencies.progress();
 		if (installing && !runtimeReady) progress.step(`Installing Pharaoh ${installing}`);
 		const launch = await runtime;
-		if (targets.length) progress.step(`Connecting ${listClients(targets)}`);
+		progress.step(`Connecting ${listClients(targets)}`);
 		// Registrations and hooks name the launcher, so a later update changes no client setting.
 		const launcher = await dependencies.launcher(launch);
 		const runLaunch = launcher ? { command: launch.command, args: [launcher] } : launch;

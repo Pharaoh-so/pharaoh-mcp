@@ -209,39 +209,57 @@ export function openBrowser(url: string): void {
 	}
 }
 
+/** What the activation box shows from the server's device-code response. */
+type ActivationDevice = Pick<
+	DeviceCodeResponse,
+	"user_code" | "verification_uri" | "verification_uri_complete" | "expires_in"
+>;
+
+/** The link to open: the one with the code already in it when the server sent one. */
+function activationLink(device: ActivationDevice): string {
+	return device.verification_uri_complete || device.verification_uri;
+}
+
 /**
- * Print the device activation prompt to stderr.
- * Shows the user code and verification URI in a visible box,
- * and opens the verification URL in the default browser.
+ * The activation box's lines. It shows the link with the code already in it, since an agent
+ * often relays this text to a person whose browser didn't open, and tells whoever runs the
+ * command to keep it running: an agent that stops it early leaves the approval waiting for nothing.
+ * @param device - The server's device-code response: code, links and `expires_in`.
+ * @returns The box, one string per line, every framed line the same width.
  */
-export function printActivationPrompt(
-	userCode: string,
-	verificationUri: string,
-	verificationUriComplete?: string,
-): void {
-	// Auto-open browser with the complete URI (pre-fills the code)
-	openBrowser(verificationUriComplete ?? verificationUri);
-
-	const W = 48;
-	const pad = (s: string) => `│  ${s.padEnd(W - 2)}│`;
-	const empty = `│${" ".repeat(W)}│`;
-	const top = `┌${"─".repeat(W)}┐`;
-	const bot = `└${"─".repeat(W)}┘`;
-
-	const lines = [
+export function activationBox(device: ActivationDevice): string[] {
+	const wait =
+		device.expires_in > 0 ? ` (${Math.max(1, Math.round(device.expires_in / 60))} min)` : "";
+	const content = [
+		`Your code:  ${device.user_code}`,
 		"",
-		top,
-		empty,
-		pad(`Your code:  ${userCode}`),
-		empty,
-		pad("A browser window should open automatically."),
-		pad("If it didn't open, visit:"),
-		pad(verificationUri),
-		empty,
-		bot,
+		"A browser window should open automatically.",
+		"If it didn't open, visit:",
+		activationLink(device),
+		"",
+		`Keep this running until sign-in is approved${wait}.`,
+	];
+	const W = Math.max(48, ...content.map((line) => line.length + 4));
+	const pad = (s: string) => `│  ${s.padEnd(W - 2)}│`;
+	return [
+		"",
+		`┌${"─".repeat(W)}┐`,
+		pad(""),
+		...content.map(pad),
+		pad(""),
+		`└${"─".repeat(W)}┘`,
 		"",
 	];
-	process.stderr.write(`${lines.join("\n")}\n`);
+}
+
+/**
+ * Print the device activation prompt to stderr (activationBox) and open the
+ * activation link in the default browser.
+ * @param device - The server's device-code response.
+ */
+export function printActivationPrompt(device: ActivationDevice): void {
+	openBrowser(activationLink(device));
+	process.stderr.write(`${activationBox(device).join("\n")}\n`);
 }
 
 /**

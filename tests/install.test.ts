@@ -22,7 +22,7 @@ import {
 	updateNotice,
 	writeUpdateState,
 } from "../runtime/update-notice.mjs";
-import { pollOnce, requestDeviceCode } from "../src/auth.js";
+import { activationBox, pollOnce, requestDeviceCode } from "../src/auth.js";
 import { restartDesktop } from "../src/client-install.js";
 import type { Credentials } from "../src/credentials.js";
 import { askYesNo, printLines, showProgress } from "../src/helpers.js";
@@ -984,9 +984,45 @@ describe("NPX developer install", () => {
 		expect(active).toEqual([]);
 	});
 
-	it("supports shell-only sign-in without treating absent apps as errors", async () => {
-		expect(await runInstall(options({ dependencies: { discover: () => [] } }))).toBe(0);
-		expect(output.join("\n")).toContain("get_codebase_map --repo");
+	// Breaks when a computer with no coding agent (an agent's cloud sandbox) still gets a sign-in
+	// code and a runtime download, or stops being told to run the install on the person's own computer.
+	it("stops before sign-in and runtime work on a computer with no coding agent", async () => {
+		const started: string[] = [];
+		const code = await runInstall(
+			options({
+				dependencies: {
+					discover: () => [],
+					authenticate: async () => {
+						started.push("sign-in");
+						return { credentials: CREDENTIALS };
+					},
+					runtime: async () => {
+						started.push("runtime");
+						return launch;
+					},
+				},
+			}),
+		);
+		expect([code, started]).toEqual([1, []]);
+		expect(output.join("\n")).toContain("Run it on their computer instead");
+	});
+
+	// Breaks when the sign-in box shows the bare activation page instead of the link with the code
+	// in it, drops the code's lifetime, stops telling whoever runs it (often an agent) to keep it
+	// running until approval, or breaks its frame.
+	it("shows the link with the code and asks to keep running until approval", () => {
+		const box = activationBox({
+			user_code: "ABCD-1234",
+			verification_uri: "https://mcp.pharaoh.so/activate",
+			verification_uri_complete: "https://mcp.pharaoh.so/activate?code=ABCD-1234",
+			expires_in: 300,
+		});
+		const text = box.join("\n");
+		expect(text).toContain("https://mcp.pharaoh.so/activate?code=ABCD-1234");
+		expect(text).not.toMatch(/activate\s*│/);
+		expect(text).toContain("approved (5 min)");
+		const framed = box.filter((line) => line.length > 0);
+		expect(new Set(framed.map((line) => line.length)).size).toBe(1);
 	});
 
 	it("routes install --help before the question-tool CLI without starting sign-in", () => {
