@@ -242,7 +242,6 @@ test("the release handoff requires the complete allowlisted project memory packa
 	const packageFiles = ["project-memory"];
 	const runtimePaths = [
 		"bundle.mjs",
-		"client-settings.mjs",
 		"execute-turn.mjs",
 		"hook-config.mjs",
 		"hook-events.mjs",
@@ -366,6 +365,21 @@ test("memory capture runtime is an exact complete pair bound to verified source"
 	assert.throws(
 		() => verifyPackPaths([...complete, "project-memory/capture-credentials.json"]),
 		/Unexpected npm file: project-memory\/capture-credentials\.json/,
+	);
+});
+
+test("memory client settings ship only once the verified source declares them", () => {
+	const settings = "project-memory/client-settings.mjs";
+	// Before the sync that adds it, neither the source nor the pack has it.
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths([...paths, settings], [], [...paths, settings]);
+	assert.throws(
+		() => verifyPackPaths(paths, [], [...paths, settings]),
+		/Missing npm asset: project-memory\/client-settings\.mjs/,
+	);
+	assert.throws(
+		() => verifyPackPaths([...paths, settings], [], paths),
+		/Memory client settings are absent from the verified source/,
 	);
 });
 
