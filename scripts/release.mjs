@@ -47,6 +47,8 @@ const MEMORY_DIAGNOSTIC_PACK_PATHS = [
 	"project-memory/diagnostics-sender.mjs",
 ];
 const MEMORY_CAPTURE_PACK_PATHS = ["project-memory/capture.d.mts", "project-memory/capture.mjs"];
+// Split out of user-target.mjs (Pharaoh-so/pharaoh#1691): required once the verified source has it.
+const MEMORY_CLIENT_SETTINGS_PACK_PATHS = ["project-memory/client-settings.mjs"];
 const SETUP_PROMPT_PACK_PATHS = [
 	"dist/setup-prompt.generated.js",
 	"dist/setup-prompt.generated.d.ts",
@@ -163,6 +165,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
 				MEMORY_CAPTURE_PACK_PATHS.includes(path) ||
+				MEMORY_CLIENT_SETTINGS_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
 					path,
 				),
@@ -226,6 +229,13 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 			"Verified source must declare the complete memory capture runtime",
 		);
 	}
+	const settingsInPack = MEMORY_CLIENT_SETTINGS_PACK_PATHS.some((path) => paths.includes(path));
+	const settingsInSource = sourcePaths?.some((path) =>
+		MEMORY_CLIENT_SETTINGS_PACK_PATHS.includes(path),
+	);
+	if (sourcePaths && settingsInPack) {
+		assert.ok(settingsInSource, "Memory client settings are absent from the verified source");
+	}
 	for (const required of [
 		"package.json",
 		"dist/index.js",
@@ -237,6 +247,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		...(worktreeInSource || worktreeInPack ? WORKTREE_CUE_PACK_PATHS : []),
 		...(diagnosticInSource || diagnosticInPack ? MEMORY_DIAGNOSTIC_PACK_PATHS : []),
 		...(captureInSource || captureInPack ? MEMORY_CAPTURE_PACK_PATHS : []),
+		...(settingsInSource || settingsInPack ? MEMORY_CLIENT_SETTINGS_PACK_PATHS : []),
 	])
 		assert.ok(paths.includes(required), `Missing npm asset: ${required}`);
 }

@@ -368,6 +368,21 @@ test("memory capture runtime is an exact complete pair bound to verified source"
 	);
 });
 
+test("memory client settings ship only once the verified source declares them", () => {
+	const settings = "project-memory/client-settings.mjs";
+	// Before the sync that adds it, neither the source nor the pack has it.
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths([...paths, settings], [], [...paths, settings]);
+	assert.throws(
+		() => verifyPackPaths(paths, [], [...paths, settings]),
+		/Missing npm asset: project-memory\/client-settings\.mjs/,
+	);
+	assert.throws(
+		() => verifyPackPaths([...paths, settings], [], paths),
+		/Memory client settings are absent from the verified source/,
+	);
+});
+
 test("setup output and native runtime require complete verified source and reject extra assets", () => {
 	const setup = ["dist/setup-prompt.generated.js", "dist/setup-prompt.generated.d.ts"];
 	const runtime = [
