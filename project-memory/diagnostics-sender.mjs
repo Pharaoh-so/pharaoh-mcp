@@ -14,9 +14,8 @@ try {
 		// The other detached job of the memory hooks: fetch the records that cite a file.
 		const { refreshAnchoredMemory } = await import("./graph-cues.mjs");
 		const { requestMemory } = await import("./memory-api.mjs");
-		const { memoryClientRoot, projectMemorySession, readMemoryCredentials } = await import(
-			"./user-target.mjs"
-		);
+		const { memoryClientRoot } = await import("./client-settings.mjs");
+		const { projectMemorySession, readMemoryCredentials } = await import("./user-target.mjs");
 		// requestMemory loads and refreshes the sign-in itself; the binding names whose list this is.
 		const binding = projectMemorySession(await readMemoryCredentials());
 		if (binding)

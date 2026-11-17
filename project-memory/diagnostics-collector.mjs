@@ -4,6 +4,7 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync 
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { memoryClientRoot } from "./client-settings.mjs";
 import {
 	atomicWrite,
 	conversationMemoryBinding,
@@ -16,7 +17,6 @@ import { readHookPreferences } from "./preferences.mjs";
 import {
 	activeMemoryRuntime,
 	matchingMemoryHint,
-	memoryClientRoot,
 	projectMemoryHint,
 	projectMemorySession,
 	readMemoryCredentials,

@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs"
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { bundledHook, installMemoryBundle, packagedMemoryBundle } from "./bundle.mjs";
+import { memoryClientRoot, readActiveMemoryClients, readHookSettings } from "./client-settings.mjs";
 import {
 	clearDiagnosticQueue,
 	diagnosticsPolicyEligible,
@@ -27,14 +28,7 @@ import {
 	readHookPreferences,
 	writeHookPreferences,
 } from "./preferences.mjs";
-import {
-	legacySettingsPath,
-	matchingMemoryHint,
-	memoryClientRoot,
-	projectMemoryHint,
-	readActiveMemoryClients,
-	readHookSettings,
-} from "./user-target.mjs";
+import { legacySettingsPath, matchingMemoryHint, projectMemoryHint } from "./user-target.mjs";
 
 function userSettings(client, home, env) {
 	const codex = client === "codex";

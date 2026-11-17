@@ -4,6 +4,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { memoryClientRoot, readActiveMemoryClients } from "../project-memory/client-settings.mjs";
 import { nativeEditPaths } from "../project-memory/graph-cues.mjs";
 import {
 	conversationMemoryBinding,
@@ -11,11 +12,7 @@ import {
 	sessionLocalSensitivity,
 } from "../project-memory/local.mjs";
 import { readHookPreferences } from "../project-memory/preferences.mjs";
-import {
-	legacyMemoryHooksMayRun,
-	memoryClientRoot,
-	readActiveMemoryClients,
-} from "../project-memory/user-target.mjs";
+import { legacyMemoryHooksMayRun } from "../project-memory/user-target.mjs";
 import { nativeIdentifier } from "./runtime-native.mjs";
 import {
 	ensurePrivateDirectory,

@@ -1,10 +1,10 @@
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { memoryClientRoot } from "./client-settings.mjs";
 import { handleEvent, memoryReminder, skipMemoryPrompt } from "./hook-events.mjs";
 import { conversationMemoryBinding, protectLocalShellAttempt, readStdin } from "./local.mjs";
 import {
 	activeMemoryRuntime,
-	memoryClientRoot,
 	projectMemorySession,
 	readMemoryCredentials,
 	resolveMemoryHookTarget,
