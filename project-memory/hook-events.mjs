@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { memoryClientRoot } from "./client-settings.mjs";
 import { primeAnchoredMemory, retrievalLocked } from "./graph-cues.mjs";
 import {
 	checkout,
@@ -9,7 +10,7 @@ import {
 	shellWord,
 	turnStore,
 } from "./local.mjs";
-import { memoryClientRoot, projectMemorySession } from "./user-target.mjs";
+import { projectMemorySession } from "./user-target.mjs";
 
 const CLI = fileURLToPath(new URL("pharaoh-memory.mjs", import.meta.url));
 const REFRESH = new URL("runtime/refresh.js", import.meta.url);

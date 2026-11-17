@@ -12,11 +12,16 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { privateMemoryPath } from "./bundle.mjs";
+import {
+	MEMORY_HOOK_CLIENTS,
+	memoryClientRoot,
+	readActiveMemoryClients,
+	readHookSettings,
+} from "./client-settings.mjs";
 import { hasUserHooks } from "./hook-config.mjs";
 import { ANCHORED_MEMORY_FILE, atomicWrite, shellWord } from "./local.mjs";
-import { memoryClientRoot, readActiveMemoryClients, readHookSettings } from "./user-target.mjs";
 
-export const MEMORY_HOOK_CLIENTS = ["claude-code", "codex"];
+export { MEMORY_HOOK_CLIENTS };
 const FILE = "hook-preferences-v1.json";
 
 export function readHookPreferences(home = homedir()) {

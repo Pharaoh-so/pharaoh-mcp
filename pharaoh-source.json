@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "ab63cf959288cbd39dfc386972576f52a1004404",
-  "payloadSha256": "be19aa07fd1c90af17977711aaad3394c62e0d14e0b47e19ec12b3c5d9880667",
+  "commit": "134f459f59e616b5c8be353f58ca21289b117377",
+  "payloadSha256": "3b432a441bbccf0b7f076f407e3b44c1c48d96991ea6cfce916895b371264251",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -146,7 +146,7 @@
     },
     {
       "path": "project-memory/bundle.mjs",
-      "sha256": "7164568f1c52e5a9bc073fd13364afe4d5224793fb1c7161e72d7f8170d9b2c5",
+      "sha256": "173f55d63ebb3995522702eef69e73de582ceda5d5d94b55eb8f73e2a4e0ba80",
       "mode": "100644"
     },
     {
@@ -156,17 +156,22 @@
     },
     {
       "path": "project-memory/capture.mjs",
-      "sha256": "0104f0d1da2479ee5615a508a1a4ded3b851b703f8597abb44e630cd1b7a02b5",
+      "sha256": "8e4b036ccbfb56d1a843992e7cce8b38e424af37b7bf61898a74cef59006eb6d",
+      "mode": "100644"
+    },
+    {
+      "path": "project-memory/client-settings.mjs",
+      "sha256": "94547731b66f4896d2e511d450055d4e369d38837e334a90058258dd0d1aed83",
       "mode": "100644"
     },
     {
       "path": "project-memory/diagnostics-collector.mjs",
-      "sha256": "88c18b1f6b0aeb977f190138c5ec827c1709c1b2d469917307a372935c925233",
+      "sha256": "3d060e7e044a635c454b21c40785f339ce310eed617ad728f90c184028da7525",
       "mode": "100644"
     },
     {
       "path": "project-memory/diagnostics-sender.mjs",
-      "sha256": "00e673e56c6ad58954f19926030f658e8881c4419646bfd7b8df2ad949059488",
+      "sha256": "c7f11049fd5fd007da21a4e2041136446f30e80db0296975f71cbaf29ba939ed",
       "mode": "100644"
     },
     {
@@ -186,7 +191,7 @@
     },
     {
       "path": "project-memory/hook-events.mjs",
-      "sha256": "e3ecf91068c1b7e9542381daabf18cb6a5027da077fbb5993cca02f947851f05",
+      "sha256": "1a730b034293b9c8fcd9a9acf68bb76f3308085c221fca6dcd06cba4693b1358",
       "mode": "100644"
     },
     {
@@ -206,7 +211,7 @@
     },
     {
       "path": "project-memory/pharaoh-memory-hook.mjs",
-      "sha256": "558fd4e620a929912920be483ea7d5d2db7db014fe45ca518f6427e00284c72a",
+      "sha256": "79cec901ad80118472bb8a3cd833dac784924bdd369ff0d6d232bbd1eef821b2",
       "mode": "100644"
     },
     {
@@ -221,7 +226,7 @@
     },
     {
       "path": "project-memory/preferences.mjs",
-      "sha256": "4749fe459417564117d87566c7f00a98ab5a6fe10f303ce12522f02129fc9137",
+      "sha256": "848d87c6934f64538a4ab08509e5c796a83f5ebe2023caaedf0998b463000aff",
       "mode": "100644"
     },
     {
@@ -231,12 +236,12 @@
     },
     {
       "path": "project-memory/setup.mjs",
-      "sha256": "d85938e334e5353b06836a69aeb609ca07a59e5b593147ffaf506dcb37d5d00a",
+      "sha256": "36807871466becda41277c1e3e594439e49e32fba366c11b21b809e905c5e638",
       "mode": "100644"
     },
     {
       "path": "project-memory/user-target.mjs",
-      "sha256": "9e89eb2bdada7d86d552047b5870904defed8998a10f25a7425fc3dd17954306",
+      "sha256": "e3778b6692c76d1fd30eaa8cb89b1daf3e74439686c94cbb526ca4ca14ba6daf",
       "mode": "100644"
     },
     {
@@ -256,7 +261,7 @@
     },
     {
       "path": "runtime/local-worktree-hook.mjs",
-      "sha256": "579a20ae0c2f2550d921348bb685521e50525d2f4af6d49e6d758ce9fbbd49e8",
+      "sha256": "707e49a3956556a8ba8eea6f0ef3ad8d59cdabadffe7cf74877c8f9a36085426",
       "mode": "100644"
     },
     {
@@ -590,6 +595,11 @@
       "mode": "100644"
     },
     {
+      "path": "tests/import-layers.test.ts",
+      "sha256": "e5c7bb202de812120d6fdb519552e69119d8213250e866ee621e60b91891504c",
+      "mode": "100644"
+    },
+    {
       "path": "tests/install-skills.test.ts",
       "sha256": "cb72875dd1bf2fa72d7261bce1fae8837ea6ec68655e9f715ec146562daabdb3",
       "mode": "100644"
@@ -631,7 +641,7 @@
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "dcfb8c0a9df788d48d08d0a9bd9d013c972664943179cfff015d801fb8275b08",
+      "sha256": "62a0b98c9c1431fa6d59c7bf28b6d09dcb0ce27a6f4179f9a55e68cc88751f7b",
       "mode": "100644"
     },
     {

@@ -19,6 +19,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { memoryClientRoot } from "./client-settings.mjs";
 import { citeRefs, safeRecap } from "./execute-turn.mjs";
 import { editedPaths } from "./graph-cues.mjs";
 import {
@@ -31,7 +32,7 @@ import {
 	updateLocalState,
 } from "./local.mjs";
 import { requestMemory } from "./memory-api.mjs";
-import { memoryClientRoot, projectMemorySession, readMemoryCredentials } from "./user-target.mjs";
+import { projectMemorySession, readMemoryCredentials } from "./user-target.mjs";
 
 const TURN_TTL = 12 * 60 * 60 * 1000;
 const MAX_EVENTS = 24;

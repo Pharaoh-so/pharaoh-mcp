@@ -1,18 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-	closeSync,
-	constants,
-	fstatSync,
-	lstatSync,
-	openSync,
-	readFileSync,
-	readSync,
-	realpathSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { lstatSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { memoryClientRoot, readActiveMemoryClients, readHookSettings } from "./client-settings.mjs";
 import { hasLegacyHooks } from "./hook-config.mjs";
 import { atomicWrite, checkout, gitBefore } from "./local.mjs";
 import { PROJECT_MEMORY_ORIGIN, requestMemoryReadiness } from "./memory-api.mjs";
@@ -151,30 +141,6 @@ export async function cachedMemoryCheckout(cwd, credentials) {
 	if (hint) return resolveMappedCheckout(target, credentials, hint, false);
 }
 
-export function readHookSettings(path, storage) {
-	let fd;
-	try {
-		if (storage) storage.privatePath(dirname(path), true);
-		const info = storage ? storage.privatePath(path, false) : lstatSync(path);
-		if (!info.isFile() || (!storage && info.uid !== process.getuid?.()) || info.size > 512 * 1024)
-			throw new Error("Expected a regular owner-controlled hook settings file.");
-		if (!storage) return JSON.parse(readFileSync(path, "utf8"));
-		fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-		const opened = fstatSync(fd);
-		if (opened.dev !== info.dev || opened.ino !== info.ino || opened.size !== info.size)
-			throw new Error("Hook settings changed during inspection.");
-		const bytes = Buffer.alloc(opened.size + 1);
-		const length = readSync(fd, bytes, 0, bytes.length, 0);
-		if (length !== opened.size) throw new Error("Hook settings changed during inspection.");
-		return JSON.parse(bytes.toString("utf8", 0, length));
-	} catch (error) {
-		if (error.code === "ENOENT") return {};
-		throw error;
-	} finally {
-		if (fd !== undefined) closeSync(fd);
-	}
-}
-
 function checkoutHookPath(path, directory, storage) {
 	const info = lstatSync(path);
 	if (
@@ -240,34 +206,6 @@ export async function resolveMemoryHookTarget(
 	// Leave a checkout enrolled by the original pilot in charge until setup migrates it.
 	if (legacyMemoryHooksMayRun(client, target.root)) return;
 	return resolveMappedCheckout(target, credentials, hint, probe, deadline);
-}
-
-export function memoryClientRoot(home = homedir()) {
-	return join(home, ".pharaoh", "project-memory-client");
-}
-
-export function readActiveMemoryClients(home = homedir()) {
-	try {
-		const root = memoryClientRoot(home);
-		const directory = lstatSync(root);
-		if (!directory.isDirectory() || directory.uid !== process.getuid?.() || directory.mode & 0o077)
-			return {};
-		const path = join(root, "active.json");
-		const file = lstatSync(path);
-		if (!file.isFile() || file.uid !== process.getuid?.() || file.mode & 0o077 || file.size > 512)
-			return {};
-		const active = JSON.parse(readFileSync(path, "utf8"));
-		return Object.fromEntries(
-			Object.keys(LEGACY_SETTINGS).flatMap((client) => {
-				const digest = active?.[client];
-				return typeof digest === "string" && /^[a-f0-9]{64}$/.test(digest)
-					? [[client, digest]]
-					: [];
-			}),
-		);
-	} catch {
-		return {};
-	}
 }
 
 export function activeMemoryRuntime(client, directory, home = homedir()) {

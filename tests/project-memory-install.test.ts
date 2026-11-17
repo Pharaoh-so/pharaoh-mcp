@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { memoryClientRoot } from "../project-memory/client-settings.mjs";
 import {
 	collectDiagnosticEvent,
 	flushDiagnosticQueue,
@@ -56,7 +57,7 @@ import {
 	ensureMemoryHooks,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
-import { legacyMemoryHooksMayRun, memoryClientRoot } from "../project-memory/user-target.mjs";
+import { legacyMemoryHooksMayRun } from "../project-memory/user-target.mjs";
 import type { Backend, DownstreamClient } from "../src/backend.js";
 import { type Credentials, writeCredentials } from "../src/credentials.js";
 import { askYesNoInTerminal, tokenToCredentials } from "../src/helpers.js";
