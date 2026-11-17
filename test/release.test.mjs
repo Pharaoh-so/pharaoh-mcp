@@ -242,6 +242,7 @@ test("the release handoff requires the complete allowlisted project memory packa
 	const packageFiles = ["project-memory"];
 	const runtimePaths = [
 		"bundle.mjs",
+		"client-settings.mjs",
 		"execute-turn.mjs",
 		"hook-config.mjs",
 		"hook-events.mjs",

@@ -26,6 +26,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const PROJECT_MEMORY_PACK_PATHS = [
 	"project-memory/bundle.mjs",
+	"project-memory/client-settings.mjs",
 	"project-memory/execute-turn.mjs",
 	"project-memory/hook-config.mjs",
 	"project-memory/hook-events.mjs",
