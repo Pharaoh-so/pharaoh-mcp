@@ -11,6 +11,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -120,6 +121,12 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		expect(existsSync(join(pluginDir(home), "skills", "pharaoh", "SKILL.md"))).toBe(true);
 		expect(existsSync(join(pluginDir(home), "skills", "plan", "SKILL.md"))).toBe(true);
 		expect(hooks.hooks.PreToolUse[0].matcher).toBe("Grep");
+		// Breaks when the hook runs a bare `node`, which misses a Node unpacked into the home folder
+		// outside a shell's PATH: it names the Node Pharaoh runs on, quoted.
+		const command: string = hooks.hooks.PreToolUse[0].hooks[0].command;
+		const pinned = /^'([^']+)' "\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/route-grep\.mjs"$/.exec(command);
+		expect(pinned).not.toBeNull();
+		expect(realpathSync(pinned?.[1] ?? "")).toBe(realpathSync(process.execPath));
 		expect(existsSync(join(pluginDir(home), "hooks", "route-grep.mjs"))).toBe(true);
 		// The MCP server is registered with `claude mcp add`; a plugin copy would start a second one.
 		expect(existsSync(join(pluginDir(home), ".mcp.json"))).toBe(false);
