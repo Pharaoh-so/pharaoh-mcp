@@ -25,7 +25,7 @@ import {
 import { activationBox, pollOnce, requestDeviceCode } from "../src/auth.js";
 import { restartDesktop } from "../src/client-install.js";
 import type { Credentials } from "../src/credentials.js";
-import { askYesNo, printLines, showProgress } from "../src/helpers.js";
+import { abortOnEnter, askYesNo, printLines, showProgress } from "../src/helpers.js";
 import {
 	type AgentLaunch,
 	canStartAgent,
@@ -295,7 +295,11 @@ describe("NPX developer install", () => {
 			env: { PATH: "" },
 			platform: "darwin" as const,
 			execute: (command: string) => {
-				if (command === "/usr/bin/pgrep" && open) return "813\n";
+				if (command === "/usr/bin/pgrep") {
+					if (open) return "813\n";
+					// pgrep's exit 1: no process matched, so Desktop is closed.
+					throw Object.assign(new Error("no match"), { status: 1 });
+				}
 				if (command === "/usr/bin/osascript") {
 					open = false;
 					writeFileSync(config, legacy);
@@ -328,7 +332,79 @@ describe("NPX developer install", () => {
 		expect(ask.mock.calls.map(([question]) => question)).not.toContainEqual(
 			expect.stringContaining("Restart"),
 		);
-		expect(output.join("\n")).toContain("Quit Claude Desktop and run the install again");
+		expect(output.join("\n")).toContain(
+			"Claude Desktop: Stays on an older Pharaoh until you quit it",
+		);
+		// The person said no to Desktop's own confirmation, so it never closes: Enter ends the wait.
+		writeFileSync(config, legacy);
+		output.length = 0;
+		const tty = Object.assign(new PassThrough(), { isTTY: true, setRawMode: vi.fn() });
+		const declined = {
+			...dependencies,
+			// A terminal that draws no progress line (TERM=dumb): Enter's hint has to be a line of its own.
+			progress: () => ({ visible: false, step() {}, stop() {} }),
+			// The real listener, counting at once here; the person presses Enter as soon as it does.
+			skipOnEnter: (onListen: () => void) =>
+				abortOnEnter(
+					0,
+					() => {
+						onListen();
+						tty.emit("data", "\r");
+					},
+					tty,
+				),
+			restartDesktop: (target: ClientTarget, config: LaunchConfig, flags: object) =>
+				restartDesktop(target, config, {
+					...desktop,
+					execute: (command: string) => (command === "/usr/bin/pgrep" ? "813\n" : ""),
+					...flags,
+				}),
+		};
+		expect(await runInstall(options({ interactive: true, dependencies: declined }))).toBe(0);
+		// Done with the terminal: no key listener left, back out of raw mode.
+		expect(tty.listenerCount("data")).toBe(0);
+		expect(tty.setRawMode).toHaveBeenLastCalledWith(false);
+		expect(output.join("\n")).toContain(
+			"Claude Desktop: Stays on an older Pharaoh until you quit it",
+		);
+		expect(output).toContain("Waiting for Claude Desktop to quit. Press Enter to skip.");
+		// Its note is the next step: no "restart it and ask", and no "ask your agent" in its place.
+		expect(output.join("\n")).not.toMatch(/\bask\b/);
+	});
+
+	it("counts Enter only once the wait has run its course, dropping keys typed before", async () => {
+		vi.useFakeTimers();
+		try {
+			const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: vi.fn() });
+			const onListen = vi.fn();
+			const skip = abortOnEnter(2_000, onListen, input);
+			// A double-tapped Enter at "Restart it now?" waits unread in the terminal and reaches
+			// the drain, however long a blocking call held the event loop meanwhile.
+			await vi.advanceTimersByTimeAsync(2_000);
+			input.emit("data", "\r");
+			await vi.advanceTimersByTimeAsync(50);
+			expect(onListen).toHaveBeenCalledOnce();
+			expect(skip.signal.aborted).toBe(false);
+			input.emit("data", "x");
+			expect(skip.signal.aborted).toBe(false);
+			input.emit("data", "\r");
+			expect(skip.signal.aborted).toBe(true);
+			skip.stop();
+			expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+			expect(input.listenerCount("data")).toBe(0);
+			// Stopped before Enter counts (Desktop quit at once): it never starts listening.
+			const early = vi.fn();
+			abortOnEnter(2_000, early, input).stop();
+			// Piped input has no person to press Enter.
+			const piped = vi.fn();
+			abortOnEnter(0, piped, new PassThrough());
+			await vi.advanceTimersByTimeAsync(2_050);
+			expect(early).not.toHaveBeenCalled();
+			expect(piped).not.toHaveBeenCalled();
+			expect(input.listenerCount("data")).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("asks for the Codex hook trust only while a Pharaoh hook has no trust record", async () => {
@@ -676,6 +752,7 @@ describe("NPX developer install", () => {
 		let runtimeStarted = false;
 		const dependencies = {
 			progress: () => ({
+				visible: true,
 				step: (label: string) => events.push(`step ${label}`),
 				stop: () => events.push("stop"),
 			}),
@@ -804,6 +881,8 @@ describe("NPX developer install", () => {
 			quiet.step("Installing Pharaoh 9.9.9");
 			quiet.stop();
 			expect(piped).toEqual([]);
+			// What callers check before putting a hint on the line instead of its own.
+			expect([progress.visible, quiet.visible]).toEqual([true, false]);
 		} finally {
 			stderr.mockRestore();
 			vi.unstubAllEnvs();

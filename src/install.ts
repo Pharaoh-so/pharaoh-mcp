@@ -28,6 +28,7 @@ import {
 } from "./client-install.js";
 import { type Credentials, readCredentials, saveAuthorizedCredentials } from "./credentials.js";
 import {
+	abortOnEnter,
 	askYesNo,
 	DEFAULT_SERVER,
 	INSTALL_COMMAND,
@@ -146,24 +147,30 @@ const NO_AGENT_HERE = [
 /** The menu title for the first run; each connected agent CLI is an option, then Skip. */
 const TRY_TITLE = "Try Pharaoh in:";
 
+/** When Enter starts to skip the wait for Desktop to quit: a quit it doesn't question is done by then. */
+const DESKTOP_SKIP_AFTER_MS = 2_000;
+
 /**
  * The next step, as the summary's last line. In a terminal it offers a menu of the connected
  * agent CLIs (one or several) plus Skip; the one picked starts with the setup prompt, and
  * the menu collapses to a "Starting …" line. Without a terminal it prints each agent's
  * command. Claude Desktop has no command to start, so it gets the request to send, as does
  * a person with no agent CLI, who sees no menu at all.
- * @param desktop - What to do in a connected Claude Desktop (restart after a new registration).
+ * @param desktop - What to do in a connected Claude Desktop: open it, restart it after a new
+ *   registration, or nothing yet when it stayed open ("rerun"): its note says to quit it and
+ *   run the install again, and that install gives the request.
  * @returns The agent the person chose to start, or null.
  */
 async function chooseAgent(
 	agents: AgentLaunch[],
-	desktop: "open" | "restart" | null,
+	desktop: "open" | "restart" | "rerun" | null,
 	interactive: boolean,
 	{ choose, write }: Pick<InstallDependencies, "choose" | "write">,
 ): Promise<AgentLaunch | null> {
 	const request = JSON.stringify(SETUP_TOOL_PROMPT);
-	if (desktop) write(`Claude Desktop: ${desktop} it and ask ${request}`);
-	else if (!agents.length) write(`Next: ask your agent ${request}`);
+	if (desktop === "open" || desktop === "restart")
+		write(`Claude Desktop: ${desktop} it and ask ${request}`);
+	else if (!desktop && !agents.length) write(`Next: ask your agent ${request}`);
 	if (!agents.length) return null;
 	if (!interactive) {
 		write(...agents.map((agent) => `Start: ${agentCommand(agent)}`));
@@ -342,12 +349,14 @@ interface InstallDependencies {
 	configure: typeof configureClients;
 	/** Whether Claude Desktop is open and this install doesn't run inside it. */
 	canRestartDesktop: () => boolean;
-	/** Quit Claude Desktop, register `launch`, reopen it; null when it didn't quit. */
+	/** Quit Claude Desktop, register `launch`, reopen it; null when it didn't quit or `signal` ended the wait. */
 	restartDesktop: (
 		target: ClientTarget,
 		launch: LaunchConfig,
-		flags: { migrateLegacy: boolean },
+		flags: { migrateLegacy: boolean; signal: AbortSignal },
 	) => Promise<ClientOutcome | null>;
+	/** A signal Enter aborts until `stop`, the person's way out of a wait; `onListen` fires once Enter counts. */
+	skipOnEnter: (onListen: () => void) => { signal: AbortSignal; stop(): void };
 	ask: (question: string) => Promise<boolean | null>;
 	/** Pick one of `options` from a menu: its 0-based index, -1 for none, null on ended input. */
 	choose: (title: string, options: readonly string[]) => Promise<number | null>;
@@ -398,6 +407,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		configure: configureClients,
 		canRestartDesktop: () => desktopRestartable(),
 		restartDesktop: (target, launch, flags) => restartDesktop(target, launch, flags),
+		skipOnEnter: (onListen) => abortOnEnter(DESKTOP_SKIP_AFTER_MS, onListen),
 		ask: (question) => askYesNo(question),
 		choose: (title, labels) => pickOption(title, labels),
 		startAgent,
@@ -413,7 +423,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		...options.dependencies,
 	};
 	const write = dependencies.write;
-	let progress: Progress = { step() {}, stop() {} };
+	let progress: Progress = { visible: false, step() {}, stop() {} };
 	// Whichever way runInstall leaves, nothing it started keeps the process alive: an
 	// unfinished runtime preparation stops (a finished one ignores this).
 	const preparation = new AbortController();
@@ -529,13 +539,28 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				)
 			) {
 				progress.step("Restarting Claude Desktop");
-				// Desktop may write a legacy pin back as it quits; the consent to migrate it holds.
-				const restarted = await dependencies.restartDesktop(desktopTarget, configuredLaunch, {
-					migrateLegacy,
+				// Desktop may ask to confirm, and a "no" there can't be seen from here: Enter ends the
+				// wait, once a quit it doesn't question would have finished.
+				const skip = dependencies.skipOnEnter(() => {
+					const waiting = "Waiting for Claude Desktop to quit";
+					// Where the line doesn't draw (TERM=dumb, stderr piped), Enter still works: say so once.
+					if (progress.visible) progress.step(`${waiting} · Enter skips`);
+					else write(`${waiting}. Press Enter to skip.`);
 				});
-				if (restarted) outcomes[opened] = restarted;
-				desktopRestarted = restarted !== null;
+				try {
+					// Desktop may write a legacy pin back as it quits; the consent to migrate it holds.
+					const restarted = await dependencies.restartDesktop(desktopTarget, configuredLaunch, {
+						migrateLegacy,
+						signal: skip.signal,
+					});
+					if (restarted) outcomes[opened] = restarted;
+					desktopRestarted = restarted !== null;
+				} finally {
+					skip.stop();
+				}
 			}
+			// The rest of the setup, under the line it had before the question.
+			progress.step(`Connecting ${listClients(targets)}`);
 		}
 		const codingClients = outcomes
 			.filter(
@@ -676,9 +701,17 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				: [],
 		);
 		const desktop = connected.find((outcome) => outcome.client === "claude-desktop");
+		// A restarted Desktop's outcome is the one written while it was closed, without desktopOpen.
+		const desktopStep = !desktop
+			? null
+			: desktop.desktopOpen
+				? "rerun"
+				: desktop.status === "configured" && !desktopRestarted
+					? "restart"
+					: "open";
 		const agent = await chooseAgent(
 			agents,
-			desktop ? (desktop.status === "configured" && !desktopRestarted ? "restart" : "open") : null,
+			desktopStep,
 			options.interactive ?? canStartAgent(),
 			dependencies,
 		);

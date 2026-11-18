@@ -52,8 +52,15 @@ const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 const BLOCK_START = "# pharaoh-mcp managed registration\n";
 const BLOCK_END = "# end pharaoh-mcp managed registration\n";
 const RECOVERY = "npx @pharaoh-so/mcp@latest install --migrate-legacy";
-const DESKTOP_OPEN =
-	"Quit Claude Desktop and run the install again: while it's open, it saves its earlier settings over this change.";
+/**
+ * What an open Desktop lacks, and the way out. While it runs, it saves the settings it loaded
+ * back over this change, and a restart then reads the reverted file: only a write made while
+ * it's closed holds.
+ */
+const DESKTOP_OPEN = {
+	created: "No Pharaoh until you quit it and run the install again.",
+	updated: "Stays on an older Pharaoh until you quit it and run the install again.",
+};
 /** Claude Desktop's macOS bundle, which `osascript` asks to quit and `open` reopens. */
 const DESKTOP_BUNDLE = "com.anthropic.claudefordesktop";
 /** How long a restart waits for Desktop to close: it may ask the person to confirm. */
@@ -115,6 +122,15 @@ ConvertTo-Json -InputObject $result -Compress -Depth 3
 
 class MissingRegistration extends Error {}
 
+/** A command that ran and exited with `status`, which some commands use as their answer. */
+class CommandExit extends Error {
+	readonly status: number;
+	constructor(message: string, status: number) {
+		super(message);
+		this.status = status;
+	}
+}
+
 function object(value: unknown): value is Document {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -146,9 +162,11 @@ function execute(options: ClientInstallOptions, command: string, args: readonly 
 			stderr.includes("No MCP server named 'pharaoh' found.")
 		)
 			throw new MissingRegistration();
-		throw new Error(
-			"The client command failed. Check that its CLI starts and can read its configuration.",
-		);
+		const message =
+			"The client command failed. Check that its CLI starts and can read its configuration.";
+		// A status means it ran; none (a timeout, a signal, no such command) means it didn't.
+		const status = object(error) && typeof error.status === "number" ? error.status : null;
+		throw status === null ? new Error(message) : new CommandExit(message, status);
 	}
 }
 
@@ -543,17 +561,18 @@ function replaceable(
  * registration changed meanwhile reverts at its next save (seen in Desktop's "Config file
  * written" log minutes after each install). `-a`: install often runs in Desktop's own
  * terminal, and pgrep otherwise skips its ancestors.
+ * @returns The IDs; none when it's closed; null when pgrep couldn't tell (it failed or timed out).
  */
-function desktopPids(options: ClientInstallOptions): number[] {
+function desktopPids(options: ClientInstallOptions): number[] | null {
 	if (settings(options).platform !== "darwin") return [];
 	try {
 		return execute(options, "/usr/bin/pgrep", ["-a", "-x", "Claude"])
 			.split("\n")
 			.filter((line) => /^\d+$/.test(line.trim()))
 			.map(Number);
-	} catch {
-		// Not running (pgrep exits 1) or no pgrep: nothing to warn about.
-		return [];
+	} catch (error) {
+		// pgrep exits 1 when nothing matches: closed. Any other failure says nothing either way.
+		return error instanceof CommandExit && error.status === 1 ? [] : null;
 	}
 }
 
@@ -783,8 +802,9 @@ function configureJson(
 	const notes = [projectOverrides(document), desktopPrecedence(target, launch, options)];
 	if (current !== undefined && canonical(current) === canonical(launch))
 		return result(target, "already-configured", notes.filter(Boolean).join(" "));
-	const desktopOpen = target.client === "claude-desktop" && desktopPids(options).length > 0;
-	if (desktopOpen) notes.push(DESKTOP_OPEN);
+	// A pgrep that couldn't tell adds no note: the install can't say Desktop is open.
+	const desktopOpen = target.client === "claude-desktop" && (desktopPids(options)?.length ?? 0) > 0;
+	if (desktopOpen) notes.push(current === undefined ? DESKTOP_OPEN.created : DESKTOP_OPEN.updated);
 	const detail = notes.filter(Boolean).join(" ");
 	const servers = entries(document, target.client);
 	servers.pharaoh = { command: launch.command, args: [...launch.args] };
@@ -981,7 +1001,8 @@ export function moveToLauncher(
  */
 export function desktopRestartable(options: ClientInstallOptions = {}): boolean {
 	const pids = desktopPids(options);
-	if (!pids.length) return false;
+	// Closed, or pgrep couldn't tell: no restart to offer.
+	if (!pids?.length) return false;
 	let parents: Map<number, number>;
 	try {
 		const table = execute(options, "/bin/ps", ["-A", "-o", "pid=,ppid="]);
@@ -1006,16 +1027,19 @@ export function desktopRestartable(options: ClientInstallOptions = {}): boolean 
  * ask the person to confirm), register while it's closed, then open it again. It then
  * starts on this registration and saves this one from then on.
  *
+ * The quit request returns before Desktop decides, and a "no" to its confirmation leaves it
+ * just as it was while asking, so only the person can end the wait early: `signal`.
+ *
  * @param target - Claude Desktop's configuration
  * @param launch - The registration to keep
  * @param options - The install's consent to migrate a legacy pin, which Desktop may write
- *   back as it quits; fixtures
+ *   back as it quits; `signal`, which stops waiting for Desktop to close; fixtures
  * @returns The registration's outcome, or null when Desktop didn't quit
  */
 export async function restartDesktop(
 	target: ClientTarget,
 	launch: LaunchConfig,
-	options: ClientInstallOptions & { migrateLegacy?: boolean } = {},
+	options: ClientInstallOptions & { migrateLegacy?: boolean; signal?: AbortSignal } = {},
 ): Promise<ClientOutcome | null> {
 	try {
 		execute(options, "/usr/bin/osascript", [
@@ -1026,8 +1050,9 @@ export async function restartDesktop(
 		// macOS refused (the terminal may not control other apps): the person quits it.
 		return null;
 	}
-	for (let waited = 0; desktopPids(options).length; waited += 250) {
-		if (waited >= DESKTOP_QUIT_MS) return null;
+	// Registers only once Desktop is seen closed: a pgrep that couldn't tell keeps the wait going.
+	for (let waited = 0; desktopPids(options)?.length !== 0; waited += 250) {
+		if (waited >= DESKTOP_QUIT_MS || options.signal?.aborted) return null;
 		await new Promise((resolveWait) => setTimeout(resolveWait, 250));
 	}
 	const [outcome] = configureClients([target], launch, options);

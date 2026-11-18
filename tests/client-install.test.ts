@@ -38,6 +38,11 @@ function unavailable(): never {
 	throw new Error("CLI unavailable");
 }
 
+/** pgrep's answer when no process matches: it ran and exited 1. */
+function noMatch(): never {
+	throw Object.assign(new Error("no match"), { status: 1 });
+}
+
 function code(): ClientTarget {
 	return { client: "claude-code", path: join(home, ".claude.json") };
 }
@@ -482,9 +487,14 @@ describe("registration ownership", () => {
 		const upgraded = { ...launch, args: [join(home, "runtime-next", "dist", "index.js")] };
 		expect(configureClients([chat()], upgraded, { ...options, execute })[0]).toMatchObject({
 			status: "configured",
-			detail: expect.stringContaining("Quit Claude Desktop"),
+			detail: expect.stringContaining("Stays on an older Pharaoh until you quit it"),
 			desktopOpen: true,
 		});
+		// A first registration: Desktop has no Pharaoh at all until it restarts on it.
+		rmSync(chat().path);
+		expect(configureClients([chat()], launch, { ...options, execute })[0].detail).toMatch(
+			/^No Pharaoh until you quit it/,
+		);
 	});
 
 	it("restarts an open Claude Desktop only from outside it, registering while it's closed", async () => {
@@ -494,7 +504,7 @@ describe("registration ownership", () => {
 			...options,
 			execute: (command, args) => {
 				calls.push([command, ...args].join(" "));
-				if (command === "/usr/bin/pgrep") return open ? "813\n" : unavailable();
+				if (command === "/usr/bin/pgrep") return open ? "813\n" : noMatch();
 				if (command === "/bin/ps") return ps;
 				if (command === "/usr/bin/osascript") open = !quits;
 				return (command === "/usr/bin/open" ? reopens : quits) ? "" : unavailable();
@@ -503,8 +513,34 @@ describe("registration ownership", () => {
 		// Inside Desktop's own terminal, quitting Desktop would end this install too.
 		expect(desktopRestartable(desktop(`${process.pid} 900\n900 813\n813 1\n`))).toBe(false);
 		expect(desktopRestartable(desktop(`${process.pid} 900\n900 1\n`))).toBe(true);
-		// Desktop refused to quit (macOS denied the request, or the person cancelled).
+		// macOS denied the quit request.
 		expect(await restartDesktop(chat(), launch, desktop("", false))).toBeNull();
+		// Desktop took the request, then the person said no to its confirmation: it stays open
+		// exactly as while it asks, so only their Enter (the signal) ends the 30-second wait.
+		let polls = 0;
+		const declined: ClientInstallOptions = {
+			...options,
+			execute: (command) => {
+				if (command !== "/usr/bin/pgrep") return "";
+				polls++;
+				return "813\n";
+			},
+		};
+		const skip = new AbortController();
+		setTimeout(() => skip.abort(), 0);
+		expect(await restartDesktop(chat(), launch, { ...declined, signal: skip.signal })).toBeNull();
+		// One look before the first pause, one after the Enter: not the 120 a full wait takes.
+		expect(polls).toBe(2);
+		// pgrep failed (timed out, say) rather than finding no Desktop. It may still be open, so
+		// nothing registers or reopens until it's seen closed, and no restart is offered.
+		const blind: ClientInstallOptions = {
+			...options,
+			execute: (command) => (command === "/usr/bin/pgrep" ? unavailable() : ""),
+		};
+		const skipBlind = new AbortController();
+		setTimeout(() => skipBlind.abort(), 0);
+		expect(await restartDesktop(chat(), launch, { ...blind, signal: skipBlind.signal })).toBeNull();
+		expect(desktopRestartable(blind)).toBe(false);
 		calls.length = 0;
 		expect(await restartDesktop(chat(), launch, desktop(""))).toMatchObject({
 			status: "configured",
