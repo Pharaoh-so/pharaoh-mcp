@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { readPointer, withActivateLockSync } from "../runtime/launcher-v1.mjs";
 import { ensurePharaohHome } from "./credentials.js";
 import { writeStderr } from "./helpers.js";
+import { resolveLaunchNode } from "./runtime.js";
 import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
 import { getPackageVersion, PACKAGE_NAME, pinnedPackageSpec } from "./version.js";
 
@@ -180,6 +181,36 @@ function writeClaudeMarketplace(home: string): number {
 	return skillCount;
 }
 
+/** A plugin hooks.json: event → matcher groups → command handlers. */
+type PluginHooks = {
+	hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+};
+
+/**
+ * Point the plugin's hook commands at the Node Pharaoh runs on, as its MCP registration and
+ * runtime hooks are. A bare `node` resolves through PATH, which misses a Node the setup prompt
+ * unpacked into the home folder. Windows keeps `node`.
+ * @param file - The staged plugin's hooks.json.
+ */
+function pinHookNode(file: string): void {
+	if (process.platform === "win32") return;
+	let node: string;
+	try {
+		node = resolveLaunchNode();
+	} catch {
+		// ALLOWED-CATCH: with no usable Node path, the hook keeps finding `node` through PATH
+		return;
+	}
+	const config = JSON.parse(readFileSync(file, "utf-8")) as PluginHooks;
+	const quoted = `'${node.replaceAll("'", "'\\''")}'`;
+	for (const groups of Object.values(config.hooks))
+		for (const group of groups)
+			for (const handler of group.hooks)
+				if (handler.command.startsWith("node "))
+					handler.command = `${quoted}${handler.command.slice("node".length)}`;
+	writeFileSync(file, `${JSON.stringify(config, null, "\t")}\n`);
+}
+
 /** Build the plugin beside the live one and swap it in, keeping the old one until the new one is live. */
 function publishClaudePlugin(home: string): void {
 	const root = claudeMarketplaceDir(home);
@@ -203,6 +234,7 @@ function publishClaudePlugin(home: string): void {
 	);
 	cpSync(BUNDLED_SKILLS_DIR, join(staging, "skills"), { recursive: true });
 	cpSync(BUNDLED_HOOKS_DIR, join(staging, "hooks"), { recursive: true });
+	pinHookNode(join(staging, "hooks", "hooks.json"));
 	rmSync(previous, { recursive: true, force: true });
 	if (existsSync(plugin)) renameSync(plugin, previous);
 	renameSync(staging, plugin);
