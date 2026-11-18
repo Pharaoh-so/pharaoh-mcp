@@ -784,6 +784,17 @@ describe("auth-flow E2E", () => {
 			result: { content: [refusal], isError: false },
 		},
 		{ name: "signed out without setup writes", code: 3, noCredentials: true, connections: 0 },
+		// Breaks when a result that needs sign-in (a local worktree answer) exits 3 without the hint.
+		{
+			name: "sign-in refusal in a result names where sign-in works",
+			code: 3,
+			result: {
+				content: [{ type: "text", text: "Sign in to Pharaoh to use local worktree answers." }],
+				isError: true,
+				_meta: { errorCode: "sign_in_required" },
+			},
+			stdout: "Sign in to Pharaoh to use local worktree answers.\n",
+		},
 		{
 			name: "expired credentials from another origin never leave disk",
 			code: 1,
@@ -921,11 +932,11 @@ describe("auth-flow E2E", () => {
 			expect(readFileSync(credentialsPath)).toEqual(before);
 			expect(stderr).not.toContain("not signed in");
 		}
-		if (scenario.code === 2 || scenario.code === 3) expect(stdout).toBe("");
+		if (scenario.code === 2 || (scenario.code === 3 && !scenario.result)) expect(stdout).toBe("");
 		if (scenario.code !== 0) expect(stderr).not.toBe("");
-		if (scenario.name === "signed out without setup writes") {
+		if (scenario.code === 3) {
 			expect(stderr).toContain(
-				"Pharaoh: not signed in. Run npx @pharaoh-so/mcp in a terminal to sign in.",
+				"Pharaoh: not signed in. Run npx @pharaoh-so/mcp in a terminal on a computer with Claude Code, Codex or Claude Desktop to sign in.\nOther ways to connect: https://pharaoh.so/docs\n",
 			);
 		}
 		if (scenario.preservesCredentials !== undefined)
