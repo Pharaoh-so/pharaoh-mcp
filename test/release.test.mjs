@@ -607,7 +607,7 @@ test("publication resumes identical versions and rejects changed bytes or older/
 	}
 });
 
-test("keeps verifying when npm processing takes longer than six attempts", async () => {
+test("keeps verifying while npm processing takes several minutes", async () => {
 	let attempts = 0;
 	const waits = [];
 	const result = await retryRegistryVerification(
@@ -622,10 +622,10 @@ test("keeps verifying when npm processing takes longer than six attempts", async
 	);
 	assert.equal(result, "verified bytes and provenance");
 	assert.equal(attempts, 9);
-	assert.deepEqual(waits, [5_000, 5_000, 5_000, 5_000, 5_000, 5_000, 5_000, 5_000]);
+	assert.deepEqual(waits, Array(8).fill(15_000));
 });
 
-test("fails closed with the verification error after 72 attempts and no final extra wait", async () => {
+test("fails closed with the verification error after 30 minutes of attempts and no final extra wait", async () => {
 	let attempts = 0;
 	let waits = 0;
 	const failure = new Error("Published provenance does not match the release");
@@ -637,14 +637,14 @@ test("fails closed with the verification error after 72 attempts and no final ex
 					throw failure;
 				},
 				async (ms) => {
-					assert.equal(ms, 5_000);
+					assert.equal(ms, 15_000);
 					waits++;
 				},
 			),
 		(error) => error === failure,
 	);
-	assert.equal(attempts, 72);
-	assert.equal(waits, 71);
+	assert.equal(attempts, 120);
+	assert.equal(waits, 119);
 });
 
 test("rerunning an older failed tag job cannot replace a newer GitHub Latest release", () => {

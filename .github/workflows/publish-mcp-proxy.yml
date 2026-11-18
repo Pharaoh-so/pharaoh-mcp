@@ -69,7 +69,8 @@ jobs:
     if: needs.quality.outputs.should-publish == 'true' && github.repository == 'Pharaoh-so/pharaoh-mcp' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     environment: npm-publish
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Room for npm's processing: the registry check retries for up to 30 minutes.
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
