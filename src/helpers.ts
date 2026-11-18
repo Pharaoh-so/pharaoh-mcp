@@ -17,6 +17,9 @@ export const NPX_COMMAND = "npx @pharaoh-so/mcp";
 /** Explicit setup works in a terminal or a script; tool commands keep the base NPX command. */
 export const INSTALL_COMMAND = "npx @pharaoh-so/mcp@latest install";
 
+/** The fallback when this computer has no client the installer can connect. */
+export const OTHER_WAYS_TO_CONNECT = "Other ways to connect: https://pharaoh.so/docs";
+
 /** Write one or more lines to stderr, above the progress line if one is showing. */
 export function printLines(...lines: string[]): void {
 	writeStderr(`${lines.join("\n")}\n`);

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `install` stops before sign-in when the computer has no Claude Code, Codex or Claude Desktop (an agent's cloud sandbox, say), and says to run it on your own computer. Before, it signed in anyway and suggested shell queries.
+- A shell query made before signing in says to run the command on a computer with Claude Code, Codex or Claude Desktop, and links the other ways to connect.
 - The sign-in box shows the activation link with your code already in it, and says to keep the command running until sign-in is approved.
 - `install` prepares Pharaoh while you sign in, then shows what's left on one line, with the step and the seconds so far (`Installing Pharaoh 0.3.83 · 4s`, then `Connecting Claude Code and Codex · 5s`), erased before the summary. A new version installs from the release npx just downloaded, with npm still checking every package, and goes online only when npm's cache can't supply that exact version. Piped and CI output is unchanged.
 - `install` ends with a "Try Pharaoh in:" menu of your connected Claude Code and Codex, plus Skip: ↑/↓ and Enter pick, a number picks at once, and n or Esc skips. One agent gets the same menu instead of a yes/no question. The one you pick starts with the setup prompt, and the menu collapses to "Starting Claude Code…". Without either CLI there's no menu, and piped output still prints each agent's command.

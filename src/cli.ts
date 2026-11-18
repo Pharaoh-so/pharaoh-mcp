@@ -8,7 +8,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { localWorktreeShellReady } from "../runtime/local-worktree-hook.mjs";
 import { loadBundledCatalog } from "./catalog.js";
 import { type Credentials, readCredentials } from "./credentials.js";
-import { NPX_COMMAND, parseArgs, printLines } from "./helpers.js";
+import { NPX_COMMAND, OTHER_WAYS_TO_CONNECT, parseArgs, printLines } from "./helpers.js";
 import { type LocalDelivery, localRefusal } from "./local/contracts.js";
 import { selectBlastRoute } from "./local/dispatch.js";
 import { createLocalBlastRuntime } from "./local/runtime.js";
@@ -33,7 +33,11 @@ const CLI_TOOLS = [
 	SETUP_TOOL,
 ];
 const CALL_TIMEOUT_MS = 5 * 60_000;
-const SIGN_IN = `Pharaoh: not signed in. Run ${NPX_COMMAND} in a terminal to sign in.`;
+// The bare command runs the installer, which signs in only where it finds a client to connect.
+const SIGN_IN = [
+	`Pharaoh: not signed in. Run ${NPX_COMMAND} in a terminal on a computer with Claude Code, Codex or Claude Desktop to sign in.`,
+	OTHER_WAYS_TO_CONNECT,
+];
 // Wire code from src/mcp/plan-wall.ts; the npm proxy ships independently.
 const PLAN_WALL_ERROR_CODE = "plan_wall:map_only";
 const LEGACY_PLAN_WALL_PREFIX = "This needs Pro: ";
@@ -48,7 +52,7 @@ function localShellRefusal(): CallToolResult {
 
 function authFailure(action: RefreshFailureAction = "reauth"): void {
 	const needsSignIn = action === "reauth";
-	printLines(needsSignIn ? SIGN_IN : "Pharaoh: could not refresh credentials. Try again.");
+	printLines(...(needsSignIn ? SIGN_IN : ["Pharaoh: could not refresh credentials. Try again."]));
 	process.exitCode = needsSignIn ? EXIT.signIn : EXIT.failure;
 }
 
@@ -303,6 +307,8 @@ export async function runCli(argv: string[]): Promise<void> {
 			}
 		}
 		process.exitCode = resultExitCode(name, result);
+		// A local worktree answer can need sign-in too; say where it works, as authFailure does.
+		if (process.exitCode === EXIT.signIn) printLines(...SIGN_IN);
 		const output = asJson
 			? JSON.stringify(result)
 			: result.content

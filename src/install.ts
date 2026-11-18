@@ -32,6 +32,7 @@ import {
 	DEFAULT_SERVER,
 	INSTALL_COMMAND,
 	NPX_COMMAND,
+	OTHER_WAYS_TO_CONNECT,
 	type Progress,
 	pickOption,
 	printLines,
@@ -139,7 +140,7 @@ function agentCommand(agent: AgentLaunch): string {
 const NO_AGENT_HERE = [
 	"Pharaoh: no Claude Code, Codex or Claude Desktop on this computer, so there's nothing to connect.",
 	"Running this for someone else? Run it on their computer instead.",
-	"Other ways to connect: https://pharaoh.so/docs",
+	OTHER_WAYS_TO_CONNECT,
 ];
 
 /** The menu title for the first run; each connected agent CLI is an option, then Skip. */
