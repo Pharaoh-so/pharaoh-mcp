@@ -38,6 +38,8 @@ const ERASE_LINE = "\r\x1b[2K";
 
 /** A transient status line: the current step and the seconds since the line appeared. */
 export interface Progress {
+	/** Whether the line draws at all: not on a piped, CI or dumb terminal, where step and stop do nothing. */
+	readonly visible: boolean;
 	/** Show `label` as the current step; the first call starts drawing. */
 	step(label: string): void;
 	/** Stop and erase the line (safe to call twice). */
@@ -66,7 +68,7 @@ export function showProgress(
 	stream: Pick<NodeJS.WriteStream, "isTTY" | "write"> = process.stderr,
 	now: () => number = Date.now,
 ): Progress {
-	if (!stream.isTTY || process.env.TERM === "dumb") return { step() {}, stop() {} };
+	if (!stream.isTTY || process.env.TERM === "dumb") return { visible: false, step() {}, stop() {} };
 	let label: string | undefined;
 	let started = 0;
 	let frame = 0;
@@ -91,6 +93,7 @@ export function showProgress(
 	};
 	const handle = { pause, resume };
 	return {
+		visible: true,
 		step(next) {
 			if (label === undefined) started = now();
 			label = next;
@@ -263,6 +266,57 @@ export function askYesNoInTerminal(
 	return input.isTTY && output.isTTY
 		? askYesNo(question, input, output, defaultAnswer)
 		: Promise.resolve(null);
+}
+
+/**
+ * Abort the returned signal when the person presses Enter, until `stop`: for a wait only
+ * they can see the end of. Enter counts from `afterMs` on, so a key meant for the question
+ * before (a double-tapped Enter) can't end the wait it started. Keys typed until then are
+ * dropped, as in askYesNo, on a timer of their own, so a blocking call in between can't
+ * let them through. Ctrl-C exits (130). Off a terminal it never listens.
+ *
+ * @param afterMs - When Enter starts to count.
+ * @param onListen - Called once Enter counts, to say so.
+ * @param input - Where keys are read (defaults to stdin).
+ * @returns The signal, and `stop`, which stops reading keys (safe to call twice).
+ */
+export function abortOnEnter(
+	afterMs: number,
+	onListen: () => void,
+	input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
+): { signal: AbortSignal; stop(): void } {
+	const controller = new AbortController();
+	if (!input.isTTY) return { signal: controller.signal, stop() {} };
+	const raw = input as Partial<NodeJS.ReadStream>;
+	let stopped = false;
+	const onData = (chunk: string | Buffer) => {
+		const keys = String(chunk);
+		if (keys.includes("\x03")) {
+			raw.setRawMode?.(false);
+			// Off the progress line, as askYesNo leaves it, so the shell prompt starts clean.
+			process.stderr.write("\n");
+			process.exit(130);
+		}
+		if (/[\r\n]/.test(keys)) controller.abort();
+	};
+	const listen = setTimeout(async () => {
+		// Leaves raw mode on, so Enter arrives alone and nothing typed echoes into the progress line.
+		await dropTypedAhead(input);
+		if (stopped) return;
+		input.on("data", onData);
+		input.resume();
+		onListen();
+	}, afterMs);
+	return {
+		signal: controller.signal,
+		stop() {
+			stopped = true;
+			clearTimeout(listen);
+			input.off("data", onData);
+			raw.setRawMode?.(false);
+			input.pause();
+		},
+	};
 }
 
 /** Read and drop the input already waiting, in raw mode so a half-typed line goes too. */
