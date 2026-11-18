@@ -575,17 +575,21 @@ async function verifyRegistry(manifest) {
 	}
 }
 
-/** Allow npm's asynchronous processing up to 72 complete verification attempts, five seconds apart. */
+/**
+ * Allow npm's asynchronous processing up to 120 complete verification attempts, 15 seconds
+ * apart: 30 minutes. 0.3.85 and 0.3.86 each took over six minutes to be served, and a check that
+ * gives up records no release, which holds every later release until it is rerun.
+ */
 export async function retryRegistryVerification(
 	verify,
 	wait = (ms) => new Promise((done) => setTimeout(done, ms)),
 ) {
-	for (let attempt = 0; attempt < 72; attempt++) {
+	for (let attempt = 0; attempt < 120; attempt++) {
 		try {
 			return await verify();
 		} catch (error) {
-			if (attempt === 71) throw error;
-			await wait(5_000);
+			if (attempt === 119) throw error;
+			await wait(15_000);
 		}
 	}
 }
