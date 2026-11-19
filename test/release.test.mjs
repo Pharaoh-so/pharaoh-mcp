@@ -380,6 +380,63 @@ test("memory client settings ship only once the verified source declares them", 
 	);
 });
 
+test("change review is optional until introduced, then requires its complete source-bound runtime", () => {
+	const review = [
+		"project-memory/change-review.d.mts",
+		"project-memory/change-review.mjs",
+		"project-memory/change-review-proof.d.mts",
+		"project-memory/change-review-proof.mjs",
+	];
+	const complete = [...paths, ...review];
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths(complete, [], complete);
+	for (const missing of review) {
+		assert.throws(
+			() => verifyPackPaths(complete.filter((path) => path !== missing), [], complete),
+			/Missing Change review npm assets/,
+		);
+		assert.throws(
+			() => verifyPackPaths(complete, [], complete.filter((path) => path !== missing)),
+			/Change review is absent or incomplete in the verified source/,
+		);
+	}
+	assert.throws(() => verifyPackPaths(paths, [], complete), /Missing Change review npm assets/);
+	assert.throws(() => verifyPackPaths(complete), /verified source/);
+	assert.throws(
+		() => verifyPackPaths([...complete, "project-memory/change-review-receipts.json"], [], complete),
+		/Unexpected npm file/,
+	);
+	const item = fixture(complete);
+	const verified = {
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: item.manifest.sourcePayloadSha256,
+		files: review.map((path) => ({ path, sha256: hash(`public ${path}`) })),
+	};
+	try {
+		assert.equal(validateArtifact(item.directory, commit, item.save(), verified).version, version);
+		for (const path of review) {
+			const file = join(item.root, "package", path);
+			const original = readFileSync(file);
+			writeFileSync(file, "altered review executable");
+			const tarball = join(item.directory, item.manifest.tarballFile);
+			execFileSync("tar", ["-czf", tarball, ...complete.map((name) => `package/${name}`)], {
+				cwd: item.root,
+			});
+			const bytes = readFileSync(tarball);
+			item.manifest.tarballSha256 = hash(bytes);
+			item.manifest.integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+			assert.throws(
+				() => validateArtifact(item.directory, commit, item.save(), verified),
+				/source hash mismatch/,
+			);
+			writeFileSync(file, original);
+		}
+	} finally {
+		item.clean();
+	}
+});
+
 test("checkout scope helpers require the complete source-bound group only once introduced", () => {
 	const scope = [
 		"project-memory/install-scope.d.mts",
