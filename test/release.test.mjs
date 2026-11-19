@@ -353,10 +353,7 @@ test("memory capture runtime is an exact complete pair bound to verified source"
 			() => verifyPackPaths(partial, [], complete),
 			new RegExp(`Missing npm asset: ${omitted}`),
 		);
-		assert.throws(
-			() => verifyPackPaths(complete, [], partial),
-			/complete memory capture runtime/,
-		);
+		assert.throws(() => verifyPackPaths(complete, [], partial), /complete memory capture runtime/);
 	}
 	assert.throws(
 		() => verifyPackPaths(complete, [], paths),
@@ -443,6 +440,89 @@ test("checkout scope helpers require the complete source-bound group only once i
 		}
 	} finally {
 		item.clean();
+	}
+});
+
+test("native context stays optional until a complete source-bound package is introduced", () => {
+	const raw = [
+		"runtime/feed-hooks.d.mts",
+		"runtime/feed-hooks.mjs",
+		"runtime/feed-identity.d.mts",
+		"runtime/feed-identity.mjs",
+		"runtime/feed-io.d.mts",
+		"runtime/feed-io.mjs",
+		"runtime/feed-launcher.mjs",
+		"runtime/feed-maintenance.mjs",
+		"runtime/feed-profiles.d.mts",
+		"runtime/feed-profiles.mjs",
+		"runtime/feed-signin.d.mts",
+		"runtime/feed-signin.mjs",
+		"runtime/feed-store.d.mts",
+		"runtime/feed-store.mjs",
+		"runtime/native-feed-hook.d.mts",
+		"runtime/native-feed-hook.mjs",
+	];
+	const modules = ["native-feed", "native-feed-maintenance", "native-feed-status"];
+	const source = [...raw, ...modules.map((name) => `src/${name}.ts`)];
+	const packed = [...raw, ...modules.flatMap((name) => [`dist/${name}.js`, `dist/${name}.d.ts`])];
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths([...paths, ...packed], ["runtime"], [...paths, ...source]);
+	for (const omitted of packed)
+		assert.throws(
+			() =>
+				verifyPackPaths(
+					[...paths, ...packed.filter((path) => path !== omitted)],
+					[],
+					[...paths, ...source],
+				),
+			/Missing Native context npm assets/,
+		);
+	for (const omitted of source)
+		assert.throws(
+			() =>
+				verifyPackPaths(
+					[...paths, ...packed],
+					[],
+					[...paths, ...source.filter((path) => path !== omitted)],
+				),
+			/Native context is absent or incomplete in the verified source/,
+		);
+	assert.throws(() => verifyPackPaths([...paths, ...packed]), /verified source/);
+	assert.throws(
+		() =>
+			verifyPackPaths([...paths, "runtime/feed-private.json"], ["runtime"], [...paths, ...source]),
+		/Unexpected npm file/,
+	);
+
+	const item = fixture([...paths, ...packed], ["runtime"]);
+	const verified = {
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: "c".repeat(64),
+		files: source.map((path) => ({ path, sha256: hash(Buffer.from(`public ${path}`)) })),
+	};
+	try {
+		assert.equal(validateArtifact(item.directory, commit, item.save(), verified).version, version);
+		for (const path of raw) {
+			const original = readFileSync(join(item.root, "package", path));
+			writeFileSync(join(item.root, "package", path), Buffer.from([0xff, 0x00, 0x41]));
+			const tarball = join(item.directory, item.manifest.tarballFile);
+			execFileSync(
+				"tar",
+				["-czf", tarball, ...[...paths, ...packed].map((name) => `package/${name}`)],
+				{ cwd: item.root },
+			);
+			const bytes = readFileSync(tarball);
+			item.manifest.tarballSha256 = hash(bytes);
+			item.manifest.integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+			assert.throws(
+				() => validateArtifact(item.directory, commit, item.save(), verified),
+				/Native runtime source hash mismatch/,
+			);
+			writeFileSync(join(item.root, "package", path), original);
+		}
+	} finally {
+		rmSync(item.root, { recursive: true, force: true });
 	}
 });
 
