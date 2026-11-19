@@ -14,6 +14,7 @@
       --rule:var(--color-border-tertiary,light-dark(rgba(31,30,29,.15),rgba(222,220,209,.15))); --track:var(--color-background-secondary,light-dark(#f5f4ed,#262624)); --focus:var(--color-ring-primary,light-dark(rgba(20,20,19,.7),rgba(250,249,245,.7)));
       --red:var(--color-text-danger,light-dark(#7f2c28,#ee8884)); --amber:var(--color-text-warning,light-dark(#5a4815,#d1a041)); --green:var(--color-text-success,light-dark(#265b19,#7ab948));
       --gold:light-dark(#86610c,#d4a843);
+      --label-background:light-dark(rgba(255,255,255,.9),rgba(17,17,16,.68)); --label-edge:light-dark(#ffffff,#111110);
       /* Slices are separate things, so they share one lightness and differ by hue. The order alternates warm and cool, which keeps neighbours apart under colour blindness; it clears red, amber and green, which mean error, warning and ok here. */
       --s0:light-dark(#977100,#cca13e); --s1:light-dark(#7d66b9,#ad97ee); --s2:light-dark(#008d65,#4ac094); --s3:light-dark(#5374c1,#81a5f6); --s4:light-dark(#aa5688,#df86ba);
       --s-muted:var(--color-border-primary,light-dark(rgba(31,30,29,.4),rgba(222,220,209,.4))); --s-warning:var(--color-border-warning,light-dark(#805c1f,#a87829)); --s-error:var(--color-border-danger,light-dark(#a73d39,#cd5c58));
@@ -106,6 +107,57 @@
     .notes,.provenance { color:var(--muted); font-size:var(--type-caption); margin:6px 0 2px; }
     .notes p { margin:2px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
     #fallback { font:var(--regular) var(--type-caption)/1.5 var(--mono); color:var(--text); margin:6px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
+    /* The landing map's connected glyph trail, used as an abstract activity illustration. */
+    #trace[data-activity] { padding:0; border:0; }
+    #trace[data-activity] > :where(:not(#activity):not(#foot):not(#drawer)) { display:none; }
+    #trace[data-activity] > #foot { margin:0 12px 6px; }
+    #trace[data-activity] > #drawer { margin:0 12px; }
+    #trace[data-activity][data-details] > .head { display:flex; margin:8px 12px 0; }
+    #trace[data-activity][data-details] > #bar:not([hidden]) { display:grid; margin-inline:12px; }
+    #trace[data-activity][data-details] > #legend:not([hidden]):not(:empty) { display:flex; margin-inline:12px; }
+    #trace[data-activity][data-details] > #caveat:not([hidden]),#trace[data-activity][data-details] > #rows:not([hidden]) { display:block; margin-inline:12px; }
+    #activity { overflow:hidden; padding:0 4px 10px; }
+    .activity-figure { position:relative; }
+    #activity-svg { display:block; width:100%; height:240px; }
+    :root:not([data-display="fullscreen"]) body[data-compact] #activity-svg { height:120px; }
+    .activity-figure text { font-family:var(--mono); dominant-baseline:central; text-anchor:middle; }
+    .activity-route { opacity:1; visibility:var(--visible,visible); }
+    .activity-route text { fill:var(--gold); }
+    .activity-node { opacity:1; }
+    .activity-node text { fill:var(--gold); filter:drop-shadow(0 0 4px var(--gold)); }
+    #activity-labels { position:absolute; inset:0; pointer-events:none; }
+    .activity-entity { position:absolute; left:var(--x); top:var(--y); width:32%; transform:translateX(-50%); text-align:center; font:var(--regular) var(--type-caption)/var(--leading) var(--mono); text-shadow:0 0 4px var(--track),0 0 3px var(--track),0 0 2px var(--track); pointer-events:auto; }
+    .activity-entity:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+    .activity-entity strong,.activity-entity small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .activity-entity strong { color:var(--gold); font-size:calc(var(--type-caption) * .92); font-weight:var(--strong); line-height:1.2; }
+    .activity-entity small { color:var(--muted); font-size:calc(var(--type-caption) * .86); }
+    .activity-entity[data-origin] { width:30%; transform:none; text-align:left; }
+    :root:not([data-display="fullscreen"]) body[data-compact] .activity-entity { width:29%; padding:1px 4px; border-radius:2px; background:var(--label-background); -webkit-text-stroke:2px var(--label-edge); paint-order:stroke fill; text-shadow:0 0 3px var(--label-edge); }
+    :root:not([data-display="fullscreen"]) body[data-compact] .activity-entity strong { font-size:calc(var(--type-caption) * .82); }
+    :root:not([data-display="fullscreen"]) body[data-compact] .activity-entity small { font-size:calc(var(--type-caption) * .74); }
+    .activity-caption { display:flex; justify-content:space-between; align-items:center; padding:0 12px; font:var(--regular) var(--type-caption)/var(--leading) var(--mono); }
+    .activity-brand { color:var(--gold); letter-spacing:.14em; }
+    .activity-state { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:4px 12px; }
+    #activity-verdict[data-state="error"] { color:var(--red); }
+    #activity-verdict[data-state="warning"] { color:var(--amber); }
+    #activity-verdict[data-state="ok"] { color:var(--green); }
+    #activity-label { color:var(--text); }
+    .activity-notice { margin:5px 12px 0; color:var(--muted); font:var(--regular) var(--type-caption)/var(--leading) var(--sans); overflow-wrap:anywhere; }
+    .activity-value { margin:8px 12px 0; padding-top:8px; border-top:var(--line); font:var(--regular) var(--type-caption)/var(--leading) var(--sans); overflow-wrap:anywhere; }
+    .activity-value > p { margin:0; color:var(--gold); }
+    .activity-value details { margin-top:4px; color:var(--muted); }
+    .activity-value summary { cursor:pointer; width:fit-content; }
+    .activity-value details p { margin:5px 0; }
+    .activity-value .action { margin-top:5px; }
+    #activity[data-phase="partial"] #activity-label { color:var(--amber); }
+    #activity[data-phase="failed"] #activity-label { color:var(--red); }
+    @media(prefers-reduced-motion:no-preference) {
+      .activity-route,.activity-node[data-node="finding"] { animation:activity-build .14s ease-out both; animation-delay:calc(var(--at) * 1ms + var(--start,0ms)); animation-play-state:var(--play,running); }
+      .activity-entity:not([data-origin]) { animation:activity-label-in .16s ease-out backwards; animation-delay:calc(var(--at) * 1ms); }
+      #activity[data-phase="failed"] *,#activity[data-phase="cancelled"] * { animation-play-state:paused; }
+      @keyframes activity-build { from { opacity:0; filter:drop-shadow(0 0 5px var(--gold)); } to { opacity:1; } }
+      @keyframes activity-label-in { from { opacity:0; visibility:hidden; } to { opacity:1; visibility:visible; } }
+    }
     @media(max-width:400px) { #trace { padding:8px 10px; } #summary { margin-left:0; } #summary:not([hidden]) { display:block; } .tree summary,.leaf { grid-template-columns:minmax(0,1fr); gap:0; } .badge { text-align:left; } }
     /* A finger needs 44pt: the MCP Apps minimum for anything tappable. */
     @media(pointer:coarse) { .action { min-height:44px; min-width:44px; justify-content:center; } .tree summary { min-height:44px; align-items:center; } .foot { gap:8px; } }
@@ -129,8 +181,25 @@
     [hidden] { display:none; }
   </style>
 </head>
-<body>
+<body data-compact>
   <main id="trace" data-state="waiting">
+    <section id="activity" aria-label="Pharaoh activity" hidden>
+      <div class="activity-figure">
+        <svg id="activity-svg" viewBox="0 0 660 280" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false"></svg>
+        <div id="activity-labels"></div>
+      </div>
+      <div class="activity-caption"><span class="activity-brand">PHARAOH</span><span class="activity-state"><span id="activity-verdict" hidden></span><span id="activity-label" role="status" aria-live="polite">Ready</span></span></div>
+      <p id="activity-notice" class="activity-notice" hidden></p>
+      <div id="activity-value" class="activity-value" hidden>
+        <p id="activity-value-text"></p>
+        <details id="activity-value-details" hidden>
+          <summary>Estimate details</summary>
+          <p id="activity-value-scope"></p>
+          <button id="activity-value-method" class="action" type="button" hidden>How we estimate</button>
+          <p id="activity-value-status" role="status" hidden></p>
+        </details>
+      </div>
+    </section>
     <div class="head">
       <p class="headline"><span id="kind"></span><span id="target"></span><span id="title">Pharaoh</span><span id="summary" role="status" aria-live="polite">Waiting for the tool</span></p>
       <span class="meta"><span id="verdict" hidden></span><span id="sha" hidden></span></span>
@@ -186,7 +255,7 @@
       };
       const PROTOCOL_VERSION = "2026-01-26";
       // Kept in parity with TRACE_LIMITS in trace-contract.ts by the resource test.
-      const LIMITS = { bytes:65536, nodes:120, depth:6, label:512, detail:2048, badge:128, summary:1024, notes:16, note:1024, repo:256, segments:8 };
+      const LIMITS = { bytes:65536, nodes:120, depth:6, label:512, detail:2048, badge:128, summary:1024, notes:16, note:1024, repo:256, segments:8, valueText:256, valueScope:1024, valueUrl:2048 };
       const MAX_TEXT = 32768;
       const MAX_ROWS = 5;
       // Px from one tick to the next, its width plus the gap: a wider card gets more ticks, not fatter ones.
@@ -198,6 +267,8 @@
       const BLOCKS = ["","▏","▎","▍","▌","▋","▊","▉","█"];
       const TONES = ["warning","error","muted"];
       const STATES = ["ok","pending","warning","error"];
+      const ACTIVITY_TOOLS = ["get_codebase_map","get_module_context","search_functions","get_blast_radius","get_unused_code","pharaoh_recon"];
+      const GLYPHS = Array.from("⬢◆⊕⊗⍟⬣◈⊙⟡⏣△▽∆∇≡⌬⍙◇⟁⟐⏢⎔⍊⍜⍝≢⟊⟔");
       const DISPLAY_MODES = ["inline","fullscreen"];
       // The tokens hosts send, and only those: a host never overwrites the card's own names (--gold, --rule).
       const HOST_VARIABLE = /^--(color|font|border|shadow)-[a-z0-9-]+$/;
@@ -207,10 +278,21 @@
       const root = document.getElementById("trace");
       const head = root.querySelector(".head");
       const page = document.documentElement;
+      const activity = document.getElementById("activity");
+      const activityLabel = document.getElementById("activity-label");
+      const activityNotice = document.getElementById("activity-notice");
+      const activityVerdict = document.getElementById("activity-verdict");
+      const activityValue = document.getElementById("activity-value");
+      const activityValueText = document.getElementById("activity-value-text");
+      const activityValueDetails = document.getElementById("activity-value-details");
+      const activityValueScope = document.getElementById("activity-value-scope");
+      const activityValueMethod = document.getElementById("activity-value-method");
+      const activityValueStatus = document.getElementById("activity-value-status");
       const fields = Object.fromEntries(["kind","target","title","summary","verdict","sha","bar","caveat","rows","foot","legend","toggle","toggle-label","expand","drawer","tree","fallback","notes","provenance","setup-next","setup-explore","setup-audit","setup-explore-status","setup-explore-fallback","setup-fallback-request"].map(id => [id,document.getElementById(id)]));
       const compact = new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
       const initId = "pharaoh-trace-initialize";
       const displayId = "pharaoh-trace-display-";
+      const methodId = "pharaoh-value-method-";
       const setupExploreId = "pharaoh-setup-explore";
       let tool = "";
       let ready = false;
@@ -228,6 +310,16 @@
       let setupExploreAcknowledged = false;
       let setupExploreTimeout = 0;
       let setupExploreRepo = "";
+      let inputComplete = false;
+      let resultReceived = false;
+      let activityTarget = "";
+      let activityEntities = [];
+      let activityLayout = null;
+      let currentView = null;
+      let canOpenLinks = false;
+      let valueMethodUrl = "";
+      let methodRequests = 0;
+      let methodRequestId = "";
       const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
       const string = (value,max) => typeof value === "string" && value.length <= max;
       const send = message => { if (!closed) window.parent.postMessage({jsonrpc:"2.0",...message},"*"); };
@@ -236,6 +328,267 @@
         if (className) node.className = className;
         if (text !== undefined) node.textContent = text;
         return node;
+      }
+      function activityElement(tag,attributes) {
+        const node = document.createElementNS("http://www.w3.org/2000/svg",tag);
+        for (const [name,value] of Object.entries(attributes)) node.setAttribute(name,String(value));
+        return node;
+      }
+      function activityGlyph(column,row) {
+        let hash = Math.imul(column + 1,0x9e3779b1) ^ Math.imul(row + 1,0x85ebca6b);
+        hash = Math.imul(hash ^ (hash >>> 13),0xc2b2ae35);
+        return GLYPHS[((hash ^ (hash >>> 16)) >>> 0) % GLYPHS.length];
+      }
+      function activityFindings(view) {
+        const found = {module:[],file:[],function:[],fact:[],"constant-export":[]};
+        function visit(nodes,file = "") {
+          for (const node of nodes) {
+            if (node.status === "error") continue;
+            const sourceFile = node.kind === "file" ? node.label : file;
+            if (typeof node.kind === "string" && Object.hasOwn(found,node.kind)) {
+              const detail = file || node.detail || "";
+              const fileKey = (sourceFile || detail).split(" · ")[0].replace(/:\d+(?:-\d+)?$/,"");
+              found[node.kind].push({label:node.label,detail,fileKey,key:`${node.label}\n${detail}`});
+            }
+            if (node.children) visit(node.children,sourceFile);
+          }
+        }
+        visit(view.nodes);
+        const groups = tool === "get_codebase_map"
+          ? [found.module]
+          : [found.function,found.file,found.module,[...found["constant-export"],...found.fact]];
+        const candidates = groups.find(group => group.length) || [];
+        const selected = [];
+        const keys = new Set();
+        const files = new Set();
+        // First show one finding from each source file, then fill any remaining places.
+        for (const distinctFiles of [true,false]) {
+          for (const item of candidates) {
+            if (selected.length === 4) return selected;
+            if (keys.has(item.key) || (distinctFiles && item.fileKey && files.has(item.fileKey))) continue;
+            keys.add(item.key);
+            files.add(item.fileKey);
+            selected.push(item);
+          }
+        }
+        return selected;
+      }
+      function activityOutcome(view) {
+        const outcomes = new Set();
+        const issues = {error:[],pending:[],warning:[]};
+        const verdicts = view.glance?.verdict ? [view.glance.verdict] : [];
+        let caveat = view.glance?.caveat || "";
+        function visit(items) {
+          for (const node of items) {
+            if (node.glance?.verdict) verdicts.push(node.glance.verdict);
+            if (!caveat && node.glance?.caveat) caveat = node.glance.caveat;
+            if (Object.hasOwn(issues,node.status)) issues[node.status].push([node.label,node.detail].filter(Boolean).join(" · "));
+            if (node.status === "error") outcomes.add("failed");
+            else if (node.status === "pending") outcomes.add("pending");
+            else if (node.children?.length) visit(node.children);
+            else outcomes.add(node.status === "warning" ? "checked" : "complete");
+          }
+        }
+        visit(view.nodes);
+        let phase = "complete";
+        if (outcomes.has("failed")) phase = outcomes.size > 1 ? "partial" : "failed";
+        else if (outcomes.has("pending")) phase = outcomes.size > 1 ? "partial" : "pending";
+        else if (outcomes.has("checked") && !outcomes.has("complete")) phase = "checked";
+        const issue = issues.error[0] || issues.pending[0] || issues.warning[0] || "";
+        const freshness = view.freshness?.status === "stale" ? "Map is behind the latest push." : "";
+        const summary = activityFindings(view).length ? "" : view.summary || "";
+        const verdict = verdicts.find(value => value.status === "error") || verdicts.find(value => value.status === "warning") || verdicts[0];
+        return {phase,notice:[...new Set([issue,caveat,freshness,summary].filter(Boolean))].join(" "),verdict};
+      }
+      function showActivityNotice(text) {
+        activityNotice.textContent = text;
+        activityNotice.hidden = !text;
+      }
+      function clearActivityValue() {
+        activityValue.hidden = true;
+        activityValueText.textContent = "";
+        activityValueDetails.hidden = true;
+        activityValueDetails.open = false;
+        activityValueScope.textContent = "";
+        activityValueMethod.hidden = true;
+        activityValueStatus.textContent = "";
+        activityValueStatus.hidden = true;
+        valueMethodUrl = "";
+        methodRequestId = "";
+      }
+      function valueString(value,limit) {
+        return string(value,limit) && value.trim().length > 0 && Array.from(value).every(char => {
+          const code = char.charCodeAt(0);
+          return code >= 32 && (code < 127 || code > 159);
+        });
+      }
+      function validActivityValue(value) {
+        return record(value) && valueString(value.text,LIMITS.valueText) && valueString(value.scope,LIMITS.valueScope);
+      }
+      function safeMethodUrl(value) {
+        if (!valueString(value,LIMITS.valueUrl)) return "";
+        return /^https:\/\/mcp\.pharaoh\.so\/value-method\/[a-f0-9]{64}$/.test(value) ||
+          value === "https://pharaoh.so/docs/use-pharaoh/what-we-measure#estimates" ? value : "";
+      }
+      function showActivityValue(view,outcome) {
+        clearActivityValue();
+        if (!ACTIVITY_TOOLS.includes(tool) || !["complete","partial","checked"].includes(outcome.phase)) return;
+        if (validActivityValue(view.value)) {
+          activityValueText.textContent = view.value.text;
+          activityValueScope.textContent = view.value.scope;
+          activityValueDetails.hidden = false;
+          valueMethodUrl = safeMethodUrl(view.value.methodUrl);
+          activityValueMethod.hidden = !canOpenLinks || !valueMethodUrl;
+        } else if (view.summary && !outcome.notice.includes(view.summary)) {
+          activityValueText.textContent = view.summary;
+        } else return;
+        activityValue.hidden = false;
+      }
+      function drawActivity(svg) {
+        svg.replaceChildren();
+        const compact = document.body.hasAttribute("data-compact") && displayMode !== "fullscreen";
+        const rows = compact ? 15 : 28;
+        const middle = compact ? 7 : 14;
+        svg.setAttribute("viewBox",`0 0 660 ${rows * 10}`);
+        for (let branch = 1; branch <= 4; branch++) {
+          for (const property of ["visible","play","offset"]) activity.style.removeProperty(`--branch-${branch}-${property}`);
+        }
+        const labels = document.getElementById("activity-labels");
+        labels.replaceChildren();
+        // One input-seeded illustration survives the complete lookup. Returned
+        // findings label its existing tips without replacing any path glyphs.
+        let seed = 0;
+        for (const character of activityTarget) seed = (Math.imul(seed,31) + character.codePointAt(0)) >>> 0;
+        const slots = compact ? [[25,3],[51,3],[31,11],[56,11]] : [[25,8],[51,7],[31,20],[56,20]];
+        const points = slots.map(([x,y],index) => ({
+          x:x + ((seed >>> (index * 3)) % 3) - 1,
+          y:y + ((seed >>> (index * 4)) % 3) - 1
+        }));
+        const spine = [[4,middle]];
+        const bend = middle - 1 + seed % 3;
+        const end = Math.max(...points.map(point => point.x)) - 6;
+        function walk(path,column,row) {
+          let [x,y] = path[path.length - 1];
+          while (x !== column || y !== row) {
+            if (x !== column) x += Math.sign(column - x);
+            else y += Math.sign(row - y);
+            path.push([x,y]);
+          }
+        }
+        walk(spine,15,middle);
+        walk(spine,15,bend);
+        walk(spine,end,bend);
+        const cells = new Map(spine.map(([x,y],index) => [`${x},${y}`,{x,y,at:index * 10,branch:0}]));
+        points.forEach((point,index) => {
+          const junctionX = Math.max(15,Math.min(end,point.x - 6));
+          const junction = spine.findIndex(([x,y]) => x === junctionX && y === bend);
+          const branch = [[junctionX,bend]];
+          walk(branch,junctionX,point.y);
+          walk(branch,point.x,point.y);
+          branch.slice(1).forEach(([x,y],step) => {
+            cells.set(`${x},${y}`,{x,y,at:index * 160 + (step + 1) * 16,branch:index + 1});
+          });
+          point.at = index * 160 + (branch.length - 1) * 16;
+          point.junctionAt = junction * 10;
+        });
+        const ordered = [...cells.values()].sort((a,b) => a.at - b.at);
+        for (const {x,y,at,branch} of ordered) {
+          const cell = activityElement("g",{class:"activity-route","data-at":at,"data-branch":branch});
+          cell.style.setProperty("--at",at);
+          if (branch) {
+            cell.style.setProperty("--play",`var(--branch-${branch}-play,paused)`);
+            cell.style.setProperty("--visible",`var(--branch-${branch}-visible,hidden)`);
+            cell.style.setProperty("--start",`var(--branch-${branch}-offset,0ms)`);
+          }
+          const glyph = activityElement("text",{x:x * 10 + 5,y:y * 10 + 5,"font-size":10});
+          glyph.textContent = activityGlyph(x,y);
+          cell.append(glyph);
+          svg.append(cell);
+        }
+        activityLayout = {points,bend,rows,compact,startedAt:performance.now()};
+        addActivityLabel(svg,{x:4,y:middle,at:0,name:"origin",label:activityTarget || "Pharaoh",detail:""});
+      }
+      function addActivityLabel(svg,{x,y,at,name,label,detail,startedAt = activityLayout.startedAt}) {
+        const elapsed = performance.now() - startedAt;
+        const delay = Math.max(0,at - elapsed);
+        const node = activityElement("g",{class:"activity-node","data-node":name,"data-at":at});
+        node.style.setProperty("--at",delay);
+        const glyph = activityElement("text",{x:x * 10 + 5,y:y * 10 + 5,"font-size":16});
+        glyph.textContent = name === "origin" ? "⊙" : "⟡";
+        node.append(glyph);
+        svg.append(node);
+        const caption = element("div","activity-entity");
+        caption.title = [label,detail].filter(Boolean).join(" · ");
+        caption.tabIndex = 0;
+        caption.setAttribute("aria-label",caption.title);
+        caption.style.setProperty("--at",delay);
+        const column = name === "origin" ? 2 : x + .5;
+        let row = name === "origin" ? y + 2.8 : y < activityLayout.bend ? Math.max(0,y - 5.6) : y + 2;
+        if (activityLayout.compact) row = Math.max(0,y - (name === "origin" ? .35 : 1.1));
+        caption.dataset.column = column;
+        caption.dataset.row = row;
+        caption.style.setProperty("--x",`${column / 66 * 100}%`);
+        caption.style.setProperty("--y",`${row / activityLayout.rows * 100}%`);
+        if (name === "origin") caption.setAttribute("data-origin","");
+        caption.append(element("strong","",label));
+        if (detail) {
+          const file = detail.split(" · ")[0].replace(/:\d+(?:-\d+)?$/,"").split("/").pop();
+          if (file !== label) caption.append(element("small","",file));
+        }
+        document.getElementById("activity-labels").append(caption);
+      }
+      function positionActivityLabels() {
+        if (!activityLayout || activity.hidden) return;
+        const svg = document.getElementById("activity-svg");
+        const bounds = svg.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) return;
+        const height = activityLayout.rows * 10;
+        const scale = Math.min(bounds.width / 660,bounds.height / height);
+        const offsetX = (bounds.width - 660 * scale) / 2;
+        const offsetY = (bounds.height - height * scale) / 2;
+        for (const caption of document.getElementById("activity-labels").children) {
+          const width = 660 * scale * (activityLayout.compact ? .29 : .32);
+          const anchor = offsetX + Number(caption.dataset.column) * 10 * scale;
+          const x = caption.hasAttribute("data-origin") ? anchor : Math.max(width / 2,Math.min(bounds.width - width / 2,anchor));
+          caption.style.setProperty("--x",`${x}px`);
+          caption.style.setProperty("--y",`${offsetY + Number(caption.dataset.row) * 10 * scale}px`);
+          caption.style.maxWidth = `${width}px`;
+          caption.style.width = activityLayout.compact ? "max-content" : `${width}px`;
+        }
+      }
+      function labelActivityFindings(svg) {
+        if (activityLayout) {
+          for (const node of svg.querySelectorAll('[data-node="finding"]')) node.remove();
+          for (const label of document.querySelectorAll('.activity-entity:not([data-origin])')) label.remove();
+          activityEntities.forEach((entity,index) => {
+            const point = activityLayout.points[index];
+            const now = performance.now();
+            if (point.startedAt === undefined) {
+              point.startedAt = Math.max(now,activityLayout.startedAt + point.junctionAt);
+              activity.style.setProperty(`--branch-${index + 1}-offset`,`${point.startedAt - now}ms`);
+              activity.style.setProperty(`--branch-${index + 1}-visible`,"visible");
+              activity.style.setProperty(`--branch-${index + 1}-play`,"running");
+            }
+            addActivityLabel(svg,{...point,...entity,name:"finding"});
+          });
+        }
+      }
+      function showActivity(phase,view,force = false) {
+        if (!ACTIVITY_TOOLS.includes(tool)) return;
+        showActivityNotice("");
+        if (view) {
+          activityEntities = activityFindings(view);
+          activityTarget ||= /^([^:]{1,40}): (.+)$/.exec(view.title)?.[2] || view.repo || view.title;
+        }
+        const svg = document.getElementById("activity-svg");
+        const freeze = phase === "failed" || phase === "cancelled";
+        if (!freeze && phase !== "waiting" && (force || !activityLayout)) drawActivity(svg);
+        if (view) labelActivityFindings(svg);
+        root.dataset.activity = "";
+        activity.hidden = false;
+        activity.dataset.phase = phase;
+        activityLabel.textContent = {waiting:"Ready",working:"Working",complete:"Complete",partial:"Partial results",pending:"Preparing context",checked:"Scope checked",failed:"Needs attention",cancelled:"Cancelled"}[phase];
+        positionActivityLabels();
       }
       // Counts read at a glance: digit runs become gold monospace spans, everything else stays text.
       function rich(target,text) {
@@ -267,6 +620,7 @@
         fields.foot.hidden = fields.toggle.hidden && fields.expand.hidden;
       }
       function setOpen(open) {
+        root.toggleAttribute("data-details",open);
         fields.drawer.toggleAttribute("data-open",open);
         fields.drawer.toggleAttribute("inert",!open);
         fields.toggle.setAttribute("aria-expanded",String(open));
@@ -274,12 +628,24 @@
       }
       function setDisplay(mode) {
         // Hosts repeat the mode in context updates, and Details stay as the user left them.
-        if (mode !== displayMode) setOpen(mode === "fullscreen");
+        const changed = mode !== displayMode;
+        if (changed) setOpen(mode === "fullscreen");
         displayMode = mode;
         page.dataset.display = mode;
+        if (changed && activityLayout && !activity.hidden) {
+          const svg = document.getElementById("activity-svg");
+          drawActivity(svg);
+          if (resultReceived) labelActivityFindings(svg);
+          positionActivityLabels();
+        }
         showActions();
       }
       function clearResult() {
+        currentView = null;
+        activityVerdict.textContent = "";
+        activityVerdict.hidden = true;
+        delete activityVerdict.dataset.state;
+        clearActivityValue();
         setOpen(displayMode === "fullscreen");
         for (const field of ["bar","rows","legend","tree","notes"]) fields[field].replaceChildren();
         for (const field of ["verdict","sha","caveat","provenance","fallback"]) display(field,"");
@@ -303,10 +669,12 @@
       }
       function fallback(title,text,notice,state="neutral") {
         fields["setup-next"].hidden = true;
+        activityEntities = [];
         clearResult();
         root.dataset.state = state === "error" ? "error" : "ready";
         const first = text.split("\n").find(line => line.trim()) || "";
-        headline(title,first.length > 160 ? `${first.slice(0,159)}…` : first);
+        const brief = first.length > 160 ? `${first.slice(0,159)}…` : first;
+        headline(title,brief);
         display("fallback",text);
         if (state === "error" || state === "cancelled") {
           fields.verdict.dataset.state = state === "error" ? "error" : "warning";
@@ -315,6 +683,13 @@
         if (notice) notes([notice]);
         hasDetails = Boolean(text);
         showActions();
+        if (state === "neutral") {
+          delete root.dataset.activity;
+          activity.hidden = true;
+        } else {
+          showActivity(state === "error" ? "failed" : "cancelled");
+          showActivityNotice(brief || notice);
+        }
       }
       function readableText(result) {
         if (!record(result) || !Array.isArray(result.content)) return {text:"No readable text was returned. Read the tool response in chat.",omitted:false};
@@ -344,7 +719,9 @@
       function validView(view) {
         try {
           if (!record(view) || view.version !== 1 || !string(view.title,LIMITS.label) || !view.title.trim() || !Array.isArray(view.nodes)) return false;
-          if (new TextEncoder().encode(JSON.stringify(view)).byteLength > LIMITS.bytes) return false;
+          const facts = {...view};
+          delete facts.value;
+          if (new TextEncoder().encode(JSON.stringify(facts)).byteLength > LIMITS.bytes) return false;
           if (view.repo !== undefined && !string(view.repo,LIMITS.repo)) return false;
           if (view.summary !== undefined && !string(view.summary,LIMITS.summary)) return false;
           if (!validGlance(view.glance)) return false;
@@ -496,6 +873,7 @@
       }
       function renderView(view) {
         clearResult();
+        currentView = view;
         cancelled = false;
         root.dataset.state = "ready";
         root.dataset.reveal = "";
@@ -528,22 +906,37 @@
         hasDetails = fields.tree.childElementCount > 0 || !fields.notes.hidden || !fields.provenance.hidden;
         showActions();
         reveal();
+        const outcome = activityOutcome(view);
+        verdict(activityVerdict,outcome.verdict);
+        showActivity(outcome.phase,view);
+        showActivityNotice(outcome.notice);
+        showActivityValue(view,outcome);
       }
-      function input(params) {
+      function input(params,partial = false) {
+        if (partial && (inputComplete || resultReceived)) return;
+        const args = record(params.arguments) ? params.arguments : {};
+        const target = ["entity","query","module","repo"].map(key => args[key]).find(value => string(value,LIMITS.repo) && value.trim()) || "";
+        const preservePath = activityLayout && !resultReceived && activityTarget === target;
         fields["setup-next"].hidden = true;
         cancelled = false;
         clearResult();
+        if (!partial) {
+          inputComplete = true;
+          resultReceived = false;
+        }
         root.dataset.state = "pending";
-        const args = record(params.arguments) ? params.arguments : {};
-        const target = ["entity","query","module","repo"].map(key => args[key]).find(value => string(value,LIMITS.repo) && value.trim());
+        activityTarget = target;
+        activityEntities = [];
         const verb = Object.hasOwn(VERBS,tool) ? VERBS[tool] : "Querying the Pharaoh graph";
         headline("","");
         display("kind",target ? `${verb} ` : `${verb}…`);
         display("target",target ? `${target}…` : "");
         showTrack();
+        showActivity("working",undefined,!preservePath);
       }
       function result(params) {
         if (cancelled) return;
+        resultReceived = true;
         const text = readableText(params);
         const omission = text.omitted ? "Text shortened for this view. The full tool response remains in chat." : "";
         if (params.isError === true) {
@@ -567,8 +960,21 @@
         if (record(insets)) for (const side of ["top","right","bottom","left"]) if (Number.isFinite(insets[side]) && insets[side] >= 0) page.style.setProperty(`--safe-${side}`,`${insets[side]}px`);
         if (Array.isArray(params.availableDisplayModes)) hostModes = params.availableDisplayModes;
         if (DISPLAY_MODES.includes(params.displayMode)) setDisplay(params.displayMode);
+        const previousTool = tool;
         const name = params.toolInfo?.tool?.name;
         if (string(name,128)) tool = name;
+        if (ACTIVITY_TOOLS.includes(tool)) {
+          if (currentView && previousTool !== tool) {
+            const open = fields.drawer.hasAttribute("data-open");
+            renderView(currentView);
+            setOpen(open);
+          } else if (!resultReceived && !activity.hasAttribute("data-phase")) {
+            showActivity(root.dataset.state === "pending" ? "working" : "waiting");
+          }
+        } else {
+          delete root.dataset.activity;
+          activity.hidden = true;
+        }
         showActions();
       }
       function size() {
@@ -576,6 +982,7 @@
         resizeFrame = requestAnimationFrame(() => {
           resizeFrame = 0;
           refit();
+          positionActivityLabels();
           const height = Math.ceil(document.body.getBoundingClientRect().height);
           const width = Math.ceil(document.documentElement.clientWidth);
           if (height !== lastHeight || width !== lastWidth) {
@@ -592,6 +999,14 @@
       window.addEventListener("resize",size);
       fields.toggle.addEventListener("click",() => { setOpen(fields.toggle.getAttribute("aria-expanded") !== "true"); size(); });
       fields.expand.addEventListener("click",() => send({id:`${displayId}${++displayRequests}`,method:"ui/request-display-mode",params:{mode:displayMode === "fullscreen" ? "inline" : "fullscreen"}}));
+      activityValueMethod.addEventListener("click",() => {
+        if (!ready || closed || !canOpenLinks || !valueMethodUrl || methodRequestId) return;
+        methodRequestId = methodId + ++methodRequests;
+        activityValueStatus.textContent = "Opening the estimate method…";
+        activityValueStatus.hidden = false;
+        send({id:methodRequestId,method:"ui/open-link",params:{url:valueMethodUrl}});
+        size();
+      });
       function setupExploreFallback(message) {
         display("setup-explore-status",message);
         fields["setup-explore-fallback"].hidden = false;
@@ -626,8 +1041,18 @@
           }
           ready = true;
           clearTimeout(initTimeout);
+          canOpenLinks = record(message.result.hostCapabilities) && record(message.result.hostCapabilities.openLinks);
           if (record(message.result.hostContext)) context(message.result.hostContext);
           send({method:"ui/notifications/initialized",params:{}});
+          size();
+          return;
+        }
+        if (typeof message.id === "string" && message.id.startsWith(methodId) && message.method === undefined) {
+          if (message.id !== methodRequestId) return;
+          methodRequestId = "";
+          const failed = message.error || !record(message.result) || message.result.isError === true;
+          activityValueStatus.textContent = failed ? "This host could not open the estimate method." : "";
+          activityValueStatus.hidden = !failed;
           size();
           return;
         }
@@ -661,15 +1086,18 @@
             cancelAnimationFrame(resizeFrame);
             observer?.disconnect();
             root.dataset.state = "ready";
+            showActivity("cancelled");
             window.removeEventListener("message",receive);
           } else send({id:message.id,error:{code:-32601,message:"Unsupported request"}});
           return;
         }
         if (!ready || !record(message.params)) return;
         if (message.method === "ui/notifications/tool-input") input(message.params);
+        else if (message.method === "ui/notifications/tool-input-partial") input(message.params,true);
         else if (message.method === "ui/notifications/tool-result") result(message.params);
         else if (message.method === "ui/notifications/tool-cancelled") {
           cancelled = true;
+          resultReceived = true;
           fallback("Request cancelled",string(message.params.reason,LIMITS.detail) ? message.params.reason : "The host cancelled this tool request.","","cancelled");
         } else if (message.method === "ui/notifications/host-context-changed") context(message.params);
         size();
@@ -679,7 +1107,7 @@
       const initTimeout = setTimeout(() => {
         if (!ready && !closed) fallback("Text response available","Read the tool response in chat.","Trace has not received a host connection.");
       },10000);
-      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.6.0"},appCapabilities:{availableDisplayModes:DISPLAY_MODES},protocolVersion:PROTOCOL_VERSION}});
+      send({id:initId,method:"ui/initialize",params:{appInfo:{name:"Pharaoh Trace",version:"1.7.1"},appCapabilities:{availableDisplayModes:DISPLAY_MODES},protocolVersion:PROTOCOL_VERSION}});
     })();
   </script>
 </body>
