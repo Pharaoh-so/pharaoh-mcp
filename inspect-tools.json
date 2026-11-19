@@ -356,6 +356,47 @@
       }
     },
     {
+      "name": "get_issue",
+      "title": "Issue Details",
+      "description": "A Codebase Health issue by its Pharaoh ID: one repo's exact duplicates, dependency cycles or complex functions, or one finding among them.\n\nCALL THIS WHEN:\n• A prompt or an earlier answer gives you an issue ID (pharaoh:owner/repo:…)\n\nRETURNS: The repo's live Health score and mapped commit; each finding's ID, files, related findings and file-disjoint group; and the points its removal adds to the score.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "The repo the ID names (owner/repo)"
+          },
+          "id": {
+            "type": "string",
+            "description": "The issue ID"
+          },
+          "cursor": {
+            "description": "The next-page cursor from the previous answer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "title": "Issue Details",
+        "openWorldHint": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://pharaoh/trace/v1.1.html"
+        }
+      }
+    },
+    {
       "name": "pharaoh_setup",
       "title": "Setup",
       "description": "Pharaoh's connection and setup status for the repo you're working in. Writes no files.\n\nCALL THIS WHEN:\n• The user asks to set up Pharaoh, or to check its setup\n• Pharaoh was just connected and the user asks what to try first\n\nRETURNS: Connection, mapped-repo and access status, a Codebase Health link, optional first-use choices, and the Pharaoh-first instructions line only when needed.",

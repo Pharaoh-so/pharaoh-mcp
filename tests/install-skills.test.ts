@@ -1061,6 +1061,7 @@ describe("SC-6: allowReadTools (interactive setup only)", () => {
 			"mcp__pharaoh__search_functions",
 			"mcp__pharaoh__get_blast_radius",
 			"mcp__pharaoh__get_unused_code",
+			"mcp__pharaoh__get_issue",
 			"mcp__pharaoh__pharaoh_recon",
 			"mcp__pharaoh__pharaoh_account",
 			"mcp__pharaoh__pharaoh_setup",
