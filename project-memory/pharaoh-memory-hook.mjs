@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { memoryClientRoot } from "./client-settings.mjs";
 import { handleEvent, memoryReminder, skipMemoryPrompt } from "./hook-events.mjs";
 import { conversationMemoryBinding, protectLocalShellAttempt, readStdin } from "./local.mjs";
+import { memoryScopeMatches, setMemoryInstallScope } from "./install-scope.mjs";
 import {
 	activeMemoryRuntime,
 	projectMemorySession,
@@ -17,6 +18,10 @@ const exitQuietly = setTimeout(() => process.exit(0), Math.max(0, deadline - per
 try {
 	const [client, root, repo] = process.argv.slice(2);
 	const input = await readStdin(1024 * 1024);
+	const scopeIndex = process.argv.indexOf("--install-root");
+	const scope = scopeIndex < 0 ? undefined : { kind: "local", root: process.argv[scopeIndex + 1] };
+	setMemoryInstallScope(scope);
+	if (!memoryScopeMatches(input?.cwd, scope)) process.exit(0);
 	let result;
 	if (["--user", "--graph", "--diagnostics", "--capture"].includes(root)) {
 		const reminder = root === "--user";
@@ -41,7 +46,7 @@ try {
 			if (!structuralSearch) process.exit(0);
 		}
 		const runtime = dirname(fileURLToPath(import.meta.url));
-		if (!activeMemoryRuntime(client, runtime)) process.exit(0);
+		if (!activeMemoryRuntime(client, runtime, undefined, scope)) process.exit(0);
 		const { readHookPreferences } = await import("./preferences.mjs");
 		const choice = readHookPreferences()[client];
 		if (

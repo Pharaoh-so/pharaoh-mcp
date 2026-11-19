@@ -8,7 +8,6 @@
 import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
-	existsSync,
 	mkdirSync,
 	readFileSync,
 	renameSync,
@@ -20,6 +19,13 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import {
+	beginFeedSignIn,
+	bootstrapFeedSignIn,
+	commitFeedSignIn,
+	readFeedSignIn,
+	withdrawFeedSignIn,
+} from "../runtime/feed-signin.mjs";
 
 /**
  * A lock older than this was left by a proxy that died mid-refresh; it may be
@@ -66,6 +72,8 @@ export interface Credentials {
 	project_memory_checked_at?: string;
 	/** Private installation binding, preserved across refresh and replaced on a new sign-in. */
 	runtime_session?: string;
+	/** Explicit sign-in fence for optional native context; preserved by ordinary refreshes. */
+	native_feed_generation?: string;
 }
 
 /** Default credential file path (route-grep-hook.ts checks the same file to know Pharaoh is signed in). */
@@ -111,7 +119,56 @@ export async function saveAuthorizedCredentials(
 ): Promise<void> {
 	const release = await acquireCredentialsLock(path);
 	try {
-		writeCredentials(credentials, path);
+		// The credential write fences old feed state even when optional marker IO fails.
+		const generation = randomUUID();
+		writeCredentials({ ...credentials, native_feed_generation: generation }, path);
+		if (process.platform !== "win32") {
+			try {
+				const pending = beginFeedSignIn(credentials.sse_url, path, generation);
+				commitFeedSignIn(pending, path);
+			} catch {
+				// Native context is optional; a mismatching marker stays unreadable.
+			}
+		}
+	} finally {
+		release();
+	}
+}
+
+/**
+ * Initialize native feed identity for a legacy sign-in already validated by install.
+ * Acquires the credential lock and refuses a different saved authorization or server.
+ * @returns The committed generation, or null when the sign-in changed or was withdrawn.
+ */
+export async function bootstrapLegacyFeedSignIn(
+	validated: Credentials,
+	server: string,
+	path = CREDENTIALS_PATH,
+): Promise<string | null> {
+	if (process.platform === "win32") return null;
+	const release = await acquireCredentialsLock(path);
+	try {
+		const current = readCredentials(path);
+		if (
+			!current ||
+			current.access_token !== validated.access_token ||
+			current.refresh_token !== validated.refresh_token ||
+			current.sse_url !== validated.sse_url ||
+			new URL(current.sse_url).origin !== new URL(server).origin
+		)
+			return null;
+		const active = readFeedSignIn(path);
+		if (active) return active.server === new URL(server).origin ? active.generation : null;
+		// Existing generation without a readable marker is an incomplete publication, not legacy.
+		if (current.native_feed_generation) return null;
+		try {
+			return bootstrapFeedSignIn(server, path, (generation) => {
+				writeCredentials({ ...current, native_feed_generation: generation }, path);
+			});
+		} catch {
+			// A failed optional bootstrap must not prevent the working client setup.
+			return null;
+		}
 	} finally {
 		release();
 	}
@@ -222,6 +279,11 @@ function ensureDir(path: string): void {
 /** Delete the credential file. No-op if it doesn't exist. */
 export function deleteCredentials(path = CREDENTIALS_PATH): void {
 	try {
+		if (process.platform !== "win32") withdrawFeedSignIn(path);
+	} catch {
+		// Missing or unsafe private state already prevents a scoped feed read.
+	}
+	try {
 		unlinkSync(path);
 	} catch {
 		// File doesn't exist — nothing to delete
@@ -232,7 +294,6 @@ export function deleteCredentials(path = CREDENTIALS_PATH): void {
 export async function takeCredentialsForLogout(
 	path = CREDENTIALS_PATH,
 ): Promise<Credentials | null> {
-	if (!existsSync(path) && !existsSync(`${path}.lock`)) return null;
 	const release = await acquireCredentialsLock(path);
 	try {
 		const previous = readCredentials(path);

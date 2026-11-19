@@ -4,7 +4,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { recordedLocalRoots } from "./client-install.js";
 import { printLines } from "./helpers.js";
 
 export {
@@ -13,6 +14,9 @@ export {
 	discoverClients,
 	freshRuntimeClients,
 	legacyMigrations,
+	preflightInstallScope,
+	recordedLocalRoots,
+	scopeInstallTargets,
 	verifiedCodingClients,
 } from "./client-install.js";
 export type {
@@ -20,6 +24,7 @@ export type {
 	ClientInstallOptions,
 	ClientOutcome,
 	ClientTarget,
+	InstallScope,
 	LaunchConfig,
 	LegacyMigration,
 } from "./install-types.js";
@@ -94,14 +99,14 @@ interface ClaudeJson {
 }
 
 /**
- * Remove all traces of pharaoh from Claude Code's internal config (~/.claude.json).
+ * Remove legacy Pharaoh entries from Claude Code's internal config (~/.claude.json).
  *
  * The `claude mcp remove` CLI only removes the server definition from one scope
  * at a time and does NOT clear:
  * - `disabledMcpServers` arrays (set when user disables via UI)
  * - Project-scoped `mcpServers.pharaoh` entries in other workspaces
  *
- * This function handles what the CLI cannot — a true clean slate.
+ * Owned Local installations are excluded; explicit scoped cleanup owns their removal.
  */
 export function cleanSlate(home = homedir()): void {
 	const claudeJsonPath = join(home, ".claude.json");
@@ -118,6 +123,13 @@ export function cleanSlate(home = homedir()): void {
 	}
 
 	let changed = false;
+	let localRoots: Set<string>;
+	try {
+		localRoots = new Set(recordedLocalRoots({ home }));
+	} catch {
+		// Keep every real checkout when its scope cannot be proved; independent Global cleanup can continue.
+		localRoots = new Set(Object.keys(data.projects ?? {}).filter(isAbsolute));
+	}
 
 	// Remove global User MCP server definition
 	if (data.mcpServers?.pharaoh) {
@@ -127,7 +139,8 @@ export function cleanSlate(home = homedir()): void {
 
 	// Walk all project/workspace entries
 	if (data.projects) {
-		for (const proj of Object.values(data.projects)) {
+		for (const [root, proj] of Object.entries(data.projects)) {
+			if (localRoots.has(root)) continue;
 			// Remove project-scoped pharaoh server definitions
 			if (proj.mcpServers?.pharaoh) {
 				delete proj.mcpServers.pharaoh;

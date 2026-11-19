@@ -24,7 +24,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { memoryClientRoot } from "../project-memory/client-settings.mjs";
+import {
+	memoryActivePath,
+	memoryClientRoot,
+	readActiveMemoryClients,
+} from "../project-memory/client-settings.mjs";
 import {
 	collectDiagnosticEvent,
 	flushDiagnosticQueue,
@@ -168,6 +172,181 @@ function hookCommand(settings: string, event: string): string {
 		group.hooks[0]?.command?.endsWith("# pharaoh-project-memory:user-v1"),
 	).hooks[0].command;
 }
+
+it("keeps Local memory active through repair without writing user-level hooks or legacy migration", () => {
+	const scope = { kind: "local" as const, root: checkout };
+	expect(configure({ scope, enable: true })).toEqual([]);
+	const settings = join(checkout, ".claude/settings.local.json");
+	expect(readFileSync(settings, "utf8")).toContain("pharaoh-project-memory:local-v1:");
+	expect(existsSync(join(home, ".claude/settings.json"))).toBe(false);
+	expect(existsSync(join(home, ".codex/hooks.json"))).toBe(false);
+	expect(legacyMemoryHooksMayRun("claude-code", checkout)).toBe(false);
+	expect(memoryHookStateForClient({ name: "claude-code" }, { home, env: {}, scope })).toBe(
+		"installed",
+	);
+	ensureMemoryHooks({ name: "claude-code" }, credentials, {
+		home,
+		env: {},
+		scope,
+		cwd: checkout,
+		packageRoot,
+	});
+	expect(existsSync(join(home, ".claude/settings.json"))).toBe(false);
+	expect(readFileSync(settings, "utf8")).toContain("pharaoh-project-memory:local-v1:");
+});
+
+it("Local cleanup preserves another checkout's activation and user-level hooks", () => {
+	configure({ enable: true });
+	const global = readFileSync(join(home, ".claude/settings.json"), "utf8");
+	const first = { kind: "local" as const, root: checkout };
+	const other = join(home, "other");
+	mkdirSync(other);
+	execFileSync("git", ["-C", other, "init", "-q"]);
+	const second = { kind: "local" as const, root: other };
+	configure({ scope: first, enable: true });
+	configure({ scope: second, enable: true });
+	const otherSettings = readFileSync(join(other, ".claude/settings.local.json"), "utf8");
+	configure({ scope: first });
+	expect(readActiveMemoryClients(home, first)).toEqual({});
+	expect(readActiveMemoryClients(home, second)["claude-code"]).toBeTruthy();
+	expect(readFileSync(join(other, ".claude/settings.local.json"), "utf8")).toBe(otherSettings);
+	expect(readFileSync(join(home, ".claude/settings.json"), "utf8")).toBe(global);
+	expect(existsSync(memoryActivePath(memoryClientRoot(home), second))).toBe(true);
+});
+
+it("scoped memory setup and cleanup preserve another installation's diagnostics", async () => {
+	const fixture = diagnosticFixture();
+	const event = collectDiagnosticEvent(
+		{ ...fixture.input, hook_event_name: "UserPromptSubmit", prompt: "Check the saved decision" },
+		fixture.options,
+	);
+	const queued = join(fixture.directory, `event-${event?.eventId}.json`);
+	const before = readFileSync(queued, "utf8");
+	const saved = readHookPreferences(home).codex;
+	const scope = { kind: "local" as const, root: checkout };
+	const decision = await choose({ scope, requested: true, ask: async () => false });
+	applyMemoryHookChoices(decision, {
+		home,
+		env: {},
+		cwd: checkout,
+		scope,
+		credentials,
+		packageRoot,
+	});
+	expect(readHookPreferences(home).codex).toEqual({ ...saved, graph: false });
+	expect(readFileSync(queued, "utf8")).toBe(before);
+	const local = join(checkout, ".codex/hooks.json");
+	expect(readFileSync(local, "utf8")).not.toContain("--diagnostics");
+	configure({ scope, clients: ["codex"] });
+	expect(readFileSync(queued, "utf8")).toBe(before);
+	expect(readHookPreferences(home).codex?.diagnosticsGeneration).toBe(saved?.diagnosticsGeneration);
+	// A Global repair or cleanup must likewise preserve a live Local target.
+	configure({ scope, clients: ["codex"], enable: true });
+	const global = join(home, ".codex/hooks.json");
+	const config = JSON.parse(readFileSync(global, "utf8"));
+	delete config.hooks.Stop;
+	writeFileSync(global, JSON.stringify(config));
+	appendFileSync(new URL("project-memory/local.mjs", packageRoot), "\n// force repair\n");
+	ensureMemoryHooks({ name: "codex" }, credentials, { home, env: {}, cwd: checkout, packageRoot });
+	expect(readHookPreferences(home).codex?.diagnostics).toBe(true);
+	expect(readFileSync(global, "utf8")).not.toContain("--diagnostics");
+	configure({ clients: ["codex"] });
+	expect(readFileSync(queued, "utf8")).toBe(before);
+	expect(readActiveMemoryClients(home, scope).codex).toBeTruthy();
+});
+
+it("a Local memory hook ignores a native event from a different checkout", () => {
+	const scope = { kind: "local" as const, root: checkout };
+	configure({ scope, enable: true });
+	const config = JSON.parse(readFileSync(join(checkout, ".claude/settings.local.json"), "utf8"));
+	const command = config.hooks.UserPromptSubmit[0].hooks[0].command;
+	const child = spawnSync(command, {
+		shell: true,
+		cwd: home,
+		env: { ...process.env, HOME: home },
+		input: JSON.stringify({
+			hook_event_name: "UserPromptSubmit",
+			cwd: home,
+			session_id: SESSION,
+			prompt: "inspect callers",
+		}),
+		encoding: "utf8",
+	});
+	expect(child.status).toBe(0);
+	expect(child.stdout).toBe("");
+});
+
+it("keeps Local memory repair scoped when native credentials are refreshed", async () => {
+	const scope = { kind: "local" as const, root: checkout };
+	configure({ scope, enable: true, clients: ["codex"] });
+	vi.stubEnv("HOME", home);
+	vi.stubEnv("CODEX_HOME", join(home, ".codex"));
+	const currentDirectory = vi.spyOn(process, "cwd").mockReturnValue(checkout);
+	const identified: DownstreamClient[] = [];
+	const backend: Backend = {
+		name: "sse",
+		identifyClient: (value) => identified.push(value),
+		listTools: async () => [],
+		callTool: async () => ({ content: [] }),
+	};
+	const proxy = new ProxyServer(backend, undefined, undefined, scope);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "codex", version: "1.2.3" });
+	try {
+		proxy.setMemoryCredentials(credentials);
+		await proxy.startWithTransport(serverTransport);
+		await client.connect(clientTransport);
+		proxy.setMemoryCredentials({ ...credentials });
+		expect(identified[0].memoryHooks).toBe("installed");
+		expect(existsSync(join(home, ".codex/hooks.json"))).toBe(false);
+		expect(readActiveMemoryClients(home, scope).codex).toBeTruthy();
+	} finally {
+		await client.close();
+		currentDirectory.mockRestore();
+	}
+});
+
+it.each([
+	"absent",
+	"declined",
+	"installed",
+] as const)("handles %s Global memory setup through an unmanaged connection without silent adoption", async (state) => {
+	vi.stubEnv("HOME", home);
+	vi.stubEnv("CODEX_HOME", join(home, ".codex"));
+	const settings = join(home, ".codex/hooks.json");
+	if (state === "declined") writeHookPreferences({ codex: { memory: false } }, home);
+	if (state === "installed") {
+		configure({ clients: ["codex"], enable: true });
+		const config = JSON.parse(readFileSync(settings, "utf8"));
+		delete config.hooks.Stop;
+		writeFileSync(settings, JSON.stringify(config));
+	}
+	const before = existsSync(settings) ? readFileSync(settings, "utf8") : null;
+	const backend: Backend = {
+		name: "sse",
+		listTools: async () => [],
+		callTool: async () => ({ content: [{ type: "text", text: "Memory lookup complete." }] }),
+	};
+	const proxy = new ProxyServer(backend, undefined, undefined, undefined, () => []);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "codex", version: "1.2.3" });
+	proxy.setMemoryCredentials(credentials);
+	await proxy.startWithTransport(serverTransport);
+	await client.connect(clientTransport);
+	try {
+		const call = () =>
+			client.callTool({ name: "pharaoh_memory_recall", arguments: { repo, terms: ["setup"] } });
+		const first = JSON.stringify(await call());
+		proxy.setMemoryCredentials({ ...credentials });
+		const second = JSON.stringify(await call());
+		if (state === "declined") expect(first).not.toContain("no matching managed activation");
+		else expect(first).toContain("no matching managed activation");
+		expect(second).not.toContain("no matching managed activation");
+		expect(existsSync(settings) ? readFileSync(settings, "utf8") : null).toBe(before);
+	} finally {
+		await client.close();
+	}
+});
 
 it("keeps native adoption states content-free and preserves saved declines and custom settings", () => {
 	const options = { home, env: {}, platform: "linux" as const };

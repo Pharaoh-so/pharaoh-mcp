@@ -5,11 +5,18 @@ import { claimRuntimeDelivery, flushRuntimeQueue, recordRuntimeHook } from "./ru
 import { runtimeUuid } from "./runtime-native.mjs";
 
 const hookPath = fileURLToPath(import.meta.url);
-const [client, mode, reference, marker] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const client = args.shift();
+let targetId;
+if (args[0] === "--target") {
+	args.shift();
+	targetId = args.shift();
+}
+const [mode, reference, marker] = args;
 const HOOK_MARKER = "--pharaoh-runtime-v1";
 try {
 	if (mode === "--deliver" && runtimeUuid(reference))
-		await flushRuntimeQueue(client, marker, { hookPath, generation: reference });
+		await flushRuntimeQueue(client, marker, { hookPath, generation: reference, targetId });
 	else if (runtimeUuid(mode) && (marker === HOOK_MARKER || reference === HOOK_MARKER)) {
 		const generation = mode;
 		const deadline = setTimeout(() => process.exit(0), 2_400);
@@ -25,13 +32,21 @@ try {
 				recordRuntimeHook(client, JSON.parse(Buffer.concat(chunks).toString("utf8")), {
 					hookPath,
 					generation,
+					targetId,
 					selectionId: marker === HOOK_MARKER ? reference : undefined,
 				});
-				const delivery = claimRuntimeDelivery(client, { hookPath, generation });
+				const delivery = claimRuntimeDelivery(client, { hookPath, generation, targetId });
 				if (delivery) {
 					const sender = spawn(
 						process.execPath,
-						[hookPath, client, "--deliver", generation, delivery],
+						[
+							hookPath,
+							client,
+							...(targetId ? ["--target", targetId] : []),
+							"--deliver",
+							generation,
+							delivery,
+						],
 						{
 							detached: true,
 							stdio: "ignore",

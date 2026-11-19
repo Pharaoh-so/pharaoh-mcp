@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { syncNativeFeedHooks } from "../runtime/feed-hooks.mjs";
 import { diagnoseLocalSetup } from "../src/doctor.js";
 import { hasClaude } from "../src/setup.js";
 import { fetchLatestVersion, getPackageVersion, isNewerVersion } from "../src/version.js";
@@ -203,6 +204,11 @@ describe("upgrade hint — version comparison and the registry check", () => {
 
 it("explicit reset continues independent cleanup when the private installation record is broken", () => {
 	const home = mkdtempSync(join(tmpdir(), "pharaoh-reset-broken-record-"));
+	const localRoot = join(home, "local-project");
+	const localEntry = {
+		command: "node",
+		args: ["/managed/launcher-v1.mjs", "--install-scope", "local", "--install-root", localRoot],
+	};
 	try {
 		mkdirSync(join(home, ".pharaoh"));
 		mkdirSync(join(home, "empty-path"));
@@ -214,7 +220,10 @@ it("explicit reset continues independent cleanup when the private installation r
 					pharaoh: { command: "npx", args: ["@pharaoh-so/mcp@0.3.50"] },
 					other: { command: "keep-this-server" },
 				},
-				projects: { fixture: { disabledMcpServers: ["pharaoh", "other"] } },
+				projects: {
+					fixture: { disabledMcpServers: ["pharaoh", "other"] },
+					[localRoot]: { mcpServers: { pharaoh: localEntry } },
+				},
 			}),
 		);
 		const tsx = createRequire(import.meta.url).resolve("tsx/cli");
@@ -232,7 +241,10 @@ it("explicit reset continues independent cleanup when the private installation r
 		expect(result.stderr).toContain("installation record could not be read");
 		expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"))).toEqual({
 			mcpServers: { other: { command: "keep-this-server" } },
-			projects: { fixture: { disabledMcpServers: ["other"] } },
+			projects: {
+				fixture: { disabledMcpServers: ["other"] },
+				[localRoot]: { mcpServers: { pharaoh: localEntry } },
+			},
 		});
 	} finally {
 		rmSync(home, { recursive: true, force: true });
@@ -255,10 +267,21 @@ it.each([
 		const keep = { hooks: [{ type: "command", command: "keep-this-hook" }] };
 		const notice =
 			"'node' 'launcher-v1.mjs' 'hook' 'notice' 'claude-code' --pharaoh-update-notice-v1";
+		const feed = "'node' 'native-feed-hook.mjs' --client claude-code --pharaoh-native-feed-v1";
 		writeFileSync(
 			claude,
 			JSON.stringify({
-				hooks: { SessionStart: [{ hooks: [{ type: "command", command: notice }] }, keep] },
+				hooks: {
+					SessionStart: [
+						{
+							hooks: [
+								{ type: "command", command: notice },
+								{ type: "command", command: feed },
+							],
+						},
+						keep,
+					],
+				},
 			}),
 		);
 		const tsx = createRequire(import.meta.url).resolve("tsx/cli");
@@ -276,6 +299,28 @@ it.each([
 		expect(result.stderr).not.toContain("runtime revocation");
 		expect(readFileSync(hooks, "utf8")).toBe("{unrelated malformed configuration");
 		expect(JSON.parse(readFileSync(claude, "utf8")).hooks).toEqual({ SessionStart: [keep] });
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+it("native feed removal preserves unrelated malformed groups while removing its own handlers", () => {
+	const home = mkdtempSync(join(tmpdir(), "pharaoh-native-clean-"));
+	try {
+		const path = join(home, "settings.json");
+		const own = { type: "command", command: "'node' 'feed.mjs' --pharaoh-native-feed-v1" };
+		const keep = { hooks: [{ type: "command", command: "keep-this-hook" }] };
+		const malformed = { hooks: "preserve-unrelated-shape" };
+		writeFileSync(
+			path,
+			JSON.stringify({
+				hooks: { SessionStart: [{ hooks: [own] }, keep, malformed], PostToolUse: "unrelated" },
+			}),
+		);
+		syncNativeFeedHooks("claude-code", null, { home, settingsPath: path });
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+			hooks: { SessionStart: [keep, malformed], PostToolUse: "unrelated" },
+		});
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

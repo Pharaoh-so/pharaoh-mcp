@@ -208,8 +208,8 @@ export async function resolveMemoryHookTarget(
 	return resolveMappedCheckout(target, credentials, hint, probe, deadline);
 }
 
-export function activeMemoryRuntime(client, directory, home = homedir()) {
-	const digest = readActiveMemoryClients(home)[client];
+export function activeMemoryRuntime(client, directory, home = homedir(), scope) {
+	const digest = readActiveMemoryClients(home, scope)[client];
 	return Boolean(digest && directory === join(realpathSync(memoryClientRoot(home)), digest));
 }
 

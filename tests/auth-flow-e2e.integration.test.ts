@@ -26,7 +26,16 @@
  */
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
@@ -41,6 +50,8 @@ import {
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { configureClients } from "../src/client-install.js";
+import { syncLocalWorktreeHooks } from "../runtime/runtime-hooks.mjs";
 
 // Point at the package source via an absolute path so tsx can run index.ts
 // directly, no prior build required. Using pathResolve so the test passes
@@ -410,6 +421,8 @@ function spawnProxy(opts: {
 				// Isolate credentials to the test's tempdir so we don't read or
 				// write the developer's ~/.pharaoh/credentials.json.
 				HOME: opts.homeDir,
+				CLAUDE_CONFIG_DIR: undefined,
+				CODEX_HOME: undefined,
 				// Suppress skill-install chatter during tests — not load-bearing
 				// for the flow, noisy in stderr.
 				PHARAOH_DEBUG: opts.cliArgs ? "1" : "0",
@@ -1046,12 +1059,80 @@ describe("auth-flow E2E", () => {
 		]);
 	}, 30_000);
 
+	it.skipIf(process.platform === "win32")(
+		"the emitted Local worktree hook verifies the exact custom-server launch",
+		() => {
+			mkdirSync(join(homeDir, "local-repo"));
+			const root = realpathSync(join(homeDir, "local-repo"));
+			execFileSync("git", ["init", "--quiet", root]);
+			const scope = { kind: "local" as const, root };
+			const launch = {
+				command: process.execPath,
+				args: [
+					BUILT_INDEX_PATH,
+					"--server",
+					mockServer.url,
+					"--install-scope",
+					"local",
+					"--install-root",
+					root,
+				],
+			};
+			expect(
+				configureClients(
+					[{ client: "claude-code", path: join(homeDir, ".claude.json"), cli: "claude" }],
+					launch,
+					{ home: homeDir, env: {}, scope },
+				)[0].status,
+			).toBe("configured");
+			const settingsPath = join(root, ".claude", "settings.local.json");
+			syncLocalWorktreeHooks(
+				"claude-code",
+				pathResolve(__dirname, "..", "runtime", "local-worktree-hook.mjs"),
+				{ settingsPath, scope, server: mockServer.url },
+			);
+			const command = JSON.parse(readFileSync(settingsPath, "utf8")).hooks.UserPromptSubmit[0]
+				.hooks[0].command as string;
+			const run = (command: string) =>
+				execFileSync("/bin/sh", ["-c", command], {
+					cwd: root,
+					env: {
+						...process.env,
+						HOME: homeDir,
+						CLAUDE_CONFIG_DIR: undefined,
+						CODEX_HOME: undefined,
+					},
+					input: JSON.stringify({
+						hook_event_name: "UserPromptSubmit",
+						cwd: root,
+						session_id: "native-local-server",
+						prompt_id: "first-turn",
+					}),
+					encoding: "utf8",
+					timeout: 10_000,
+				});
+			const privateState = join(homeDir, ".pharaoh", "local-worktree");
+			run(command.replace(mockServer.url, "https://wrong-server.invalid"));
+			expect(existsSync(privateState)).toBe(false);
+			run(command);
+			expect(readdirSync(privateState).some((file) => /^epoch-[a-f0-9]{2}\.json$/.test(file))).toBe(
+				true,
+			);
+			syncLocalWorktreeHooks("claude-code", null, { settingsPath, scope });
+			expect(JSON.parse(readFileSync(settingsPath, "utf8")).hooks.UserPromptSubmit).toBeUndefined();
+		},
+	);
+
 	// A warm proxy connects upstream before front initialization. It must not
 	// claim UI support early, and must negotiate it before forwarding tool calls.
 	it.each([
-		true,
-		false,
-	])("negotiates warm UI support=%s, names its client upstream, and keeps both across reconnect", async (ui) => {
+		{ ui: true, managed: false },
+		{ ui: false, managed: false },
+		{ ui: true, managed: true },
+	])("negotiates warm UI=$ui for managed=$managed and keeps client state across reconnect", async ({
+		ui,
+		managed,
+	}) => {
 		// Pharaoh sees the proxy as pharaoh-proxy, so each upstream session that
 		// serves the client (negotiated, then reconnected) hears which client the
 		// proxy serves and whether Pharaoh's Claude Code plugin is enabled. Breaks
@@ -1059,18 +1140,31 @@ describe("auth-flow E2E", () => {
 		// one, or the plugin state is misread.
 		writeValidCredentials(homeDir, mockServer.url);
 		mkdirSync(join(homeDir, ".claude"), { recursive: true });
-		writeFileSync(
-			join(homeDir, ".claude", "settings.json"),
-			JSON.stringify({ enabledPlugins: { "pharaoh@pharaoh": true } }),
-		);
+		const settingsPath = join(homeDir, ".claude", "settings.json");
+		const originalSettings = JSON.stringify({ enabledPlugins: { "pharaoh@pharaoh": true } });
+		writeFileSync(settingsPath, originalSettings);
+		if (managed) {
+			const outcomes = configureClients(
+				[{ client: "claude-code", path: join(homeDir, ".claude.json") }],
+				{ command: process.execPath, args: [BUILT_INDEX_PATH, "--server", mockServer.url] },
+				{ home: homeDir, env: {}, platform: process.platform },
+			);
+			expect(outcomes[0].status).toBe("configured");
+		}
+		const automaticMemory = managed && process.platform !== "win32";
 		const report = {
 			client: { name: "claude-code", version: "2.1.3" },
 			plugin: "enabled",
-			// Turned on at start for a sign-in not yet checked for memory (0.3.81).
-			memoryHooks: process.platform === "win32" ? "unsupported" : "installed",
+			// Only a verified managed registration authorizes automatic global hook repair.
+			memoryHooks:
+				process.platform === "win32" ? "unsupported" : automaticMemory ? "installed" : "absent",
 			instructions: { user: "missing", managed: "absent", project: "unknown" },
 		};
-		harness = spawnProxy({ serverUrl: mockServer.url, homeDir });
+		harness = spawnProxy({
+			serverUrl: mockServer.url,
+			homeDir,
+			...(managed ? { cliArgs: [] } : {}),
+		});
 		await initializeProxy(
 			harness,
 			{
@@ -1094,12 +1188,26 @@ describe("auth-flow E2E", () => {
 			params: { name: "get_codebase_map", arguments: {} },
 		});
 		const result = (await harness.waitForResponse(1)).result as Record<string, unknown>;
-		// A Claude Code sign-in not yet checked for memory gets the hooks at start,
-		// and the first answered call says so once (with the off command).
-		expect(result.content).toEqual([
-			{ type: "text", text: "mock pharaoh: tool=get_codebase_map" },
-			{ type: "text", text: expect.stringContaining("--disable-memory-hooks") },
-		]);
+		const firstContent = [{ type: "text", text: "mock pharaoh: tool=get_codebase_map" }];
+		expect(result.content, harness.stderr.join("")).toEqual(
+			automaticMemory
+				? [
+						...firstContent,
+						{ type: "text", text: expect.stringContaining("--disable-memory-hooks") },
+					]
+				: firstContent,
+		);
+		if (automaticMemory) {
+			expect(JSON.parse(readFileSync(settingsPath, "utf8")).hooks.UserPromptSubmit).toBeDefined();
+			expect(existsSync(join(homeDir, ".pharaoh", "project-memory-client", "active.json"))).toBe(
+				true,
+			);
+		} else {
+			expect(readFileSync(settingsPath, "utf8")).toBe(originalSettings);
+			expect(existsSync(join(homeDir, ".pharaoh", "project-memory-client", "active.json"))).toBe(
+				false,
+			);
+		}
 		const negotiated = ui
 			? {
 					extensions: {
@@ -1188,6 +1296,7 @@ describe("auth-flow E2E", () => {
 		});
 		expect(captureEndedBeforeReconnect).toBe(true);
 		expect(mockServer.state.sseGetCount).toBe(connections + 1);
+		if (!automaticMemory) expect(readFileSync(settingsPath, "utf8")).toBe(originalSettings);
 		expect(mockServer.state.toolCalls).toEqual([
 			{ name: "get_codebase_map", arguments: {} },
 			{ name: "pharaoh_memory_capture", arguments: capture },

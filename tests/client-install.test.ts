@@ -1,4 +1,5 @@
 /** Installation fixtures use private homes and fake CLIs, never the operator's settings. */
+import { execFileSync } from "node:child_process";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -20,7 +21,10 @@ import {
 	freshRuntimeClients,
 	legacyMigrations,
 	moveToLauncher,
+	preflightInstallScope,
+	recordedLocalRoots,
 	restartDesktop,
+	scopeInstallTargets,
 	verifiedCodingClients,
 } from "../src/client-install.js";
 import type { ClientInstallOptions, ClientTarget, LaunchConfig } from "../src/install-types.js";
@@ -821,6 +825,24 @@ describe("verified coding clients for automatic startup assets", () => {
 		).toEqual([]);
 	});
 
+	it("only suppresses Global repair for an override covering the current checkout", () => {
+		write(launch.command, "fixture-node");
+		configureClients([code()], launch, options);
+		const current = join(home, "current");
+		const sibling = join(home, "sibling");
+		mkdirSync(current);
+		mkdirSync(sibling);
+		const document = JSON.parse(readFileSync(code().path, "utf8"));
+		document.projects = { [sibling]: { disabledMcpServers: ["pharaoh"] } };
+		write(code().path, JSON.stringify(document));
+		const repair = { ...options, runningLaunch: launch, rejectProjectOverrides: true };
+		expect(verifiedCodingClients({ ...repair, projectRoot: current })).toEqual(["claude-code"]);
+		expect(verifiedCodingClients({ ...repair, projectRoot: sibling })).toEqual([]);
+		const nested = join(sibling, "src");
+		mkdirSync(nested);
+		expect(verifiedCodingClients({ ...repair, projectRoot: nested })).toEqual([]);
+	});
+
 	it("requires the managed proxy release and server to support runtime receipts", () => {
 		const server = "https://self-hosted.example";
 		const managedLaunch = (version: string) => {
@@ -902,6 +924,177 @@ describe("verified coding clients for automatic startup assets", () => {
 	);
 });
 
+describe("checkout-scoped installation", () => {
+	function local(root: string): ClientInstallOptions {
+		mkdirSync(root, { recursive: true });
+		execFileSync("git", ["init", "--quiet", root]);
+		return { ...options, scope: { kind: "local", root } };
+	}
+	function localCode(): ClientTarget {
+		return { ...code(), cli: "claude" };
+	}
+
+	it("writes only the selected Claude project and preserves unrelated user and project fields", () => {
+		const root = join(home, "Mixed Case Project");
+		const scoped = local(root);
+		write(
+			code().path,
+			JSON.stringify({
+				theme: "dark",
+				projects: {
+					[root]: { allowedTools: ["Read"] },
+					"/other": { mcpServers: { custom: { url: "https://custom.example" } } },
+				},
+			}),
+		);
+		expect(configureClients([localCode()], launch, scoped)[0].status).toBe("configured");
+		const actual = JSON.parse(readFileSync(code().path, "utf8"));
+		expect(actual).toEqual({
+			theme: "dark",
+			projects: {
+				[root]: { allowedTools: ["Read"], mcpServers: { pharaoh: launch } },
+				"/other": { mcpServers: { custom: { url: "https://custom.example" } } },
+			},
+		});
+		expect(verifiedCodingClients(scoped)).toEqual(["claude-code"]);
+		expect(verifiedCodingClients(options)).toEqual([]);
+	});
+
+	it("keeps two Local ownership records separate and cleans only the selected checkout", () => {
+		const a = local(join(home, "a"));
+		const b = local(join(home, "b"));
+		configureClients([localCode()], launch, a);
+		configureClients([localCode()], launch, b);
+		expect(recordedLocalRoots(options).sort()).toEqual([
+			a.scope?.kind === "local" && a.scope.root,
+			b.scope?.kind === "local" && b.scope.root,
+		]);
+		expect(cleanupManagedClients(a)[0].status).toBe("configured");
+		expect(verifiedCodingClients(a)).toEqual([]);
+		expect(verifiedCodingClients(b)).toEqual(["claude-code"]);
+	});
+
+	it("requires explicit cleanup before switching either direction", () => {
+		const root = join(realpathSync(home), "project");
+		const scoped = local(root);
+		execFileSync("git", ["init", "--quiet", root]);
+		configureClients([code()], launch, options);
+		const targets = scopeInstallTargets([localCode()], scoped.scope!);
+		expect(preflightInstallScope(targets, scoped)[0]).toMatchObject({
+			status: "ambiguous",
+			recovery: expect.stringContaining("--scope global"),
+		});
+		cleanupManagedClients(options);
+		expect(preflightInstallScope(targets, scoped)).toEqual([]);
+		configureClients([localCode()], launch, scoped);
+		expect(preflightInstallScope([code()], options)[0]).toMatchObject({
+			status: "ambiguous",
+			recovery: expect.stringContaining("--scope local"),
+		});
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"quotes a Local cleanup path without shell expansion",
+		() => {
+			const root = join(realpathSync(home), "project $(printf expanded) 'quote'");
+			const scoped = local(root);
+			execFileSync("git", ["init", "--quiet", root]);
+			configureClients([localCode()], launch, scoped);
+			const recovery = preflightInstallScope([code()], options)[0].recovery!;
+			const argument = recovery.split(" --path ")[1];
+			expect(execFileSync("sh", ["-c", `printf '%s' ${argument}`], { encoding: "utf8" })).toBe(
+				root,
+			);
+		},
+	);
+
+	it.each([
+		"missing",
+		"not-a-checkout",
+	])("gives manual recovery for an owned Local registration whose root is %s", (state) => {
+		const root = join(home, "project");
+		const scoped = local(root);
+		configureClients([localCode()], launch, scoped);
+		if (state === "missing") rmSync(root, { recursive: true });
+		else rmSync(join(root, ".git"), { recursive: true });
+		const before = readFileSync(code().path, "utf8");
+		const recovery = preflightInstallScope([code()], options)[0].recovery!;
+		expect(recovery).toContain("missing or no longer a Git root");
+		expect(recovery).toContain(code().path);
+		expect(recovery).toContain(`project key ${JSON.stringify(root)}`);
+		expect(recovery).not.toContain("cleanup --");
+		expect(readFileSync(code().path, "utf8")).toBe(before);
+	});
+
+	it("adopts Liam's equivalent local stable launcher only on explicit Local setup", () => {
+		const root = join(home, "project");
+		const scoped = local(root);
+		const original = { command: launch.command, args: [managed()] };
+		write(
+			code().path,
+			JSON.stringify({ projects: { [root]: { mcpServers: { pharaoh: original } } } }),
+		);
+		const selected = {
+			...original,
+			args: [...original.args, "--install-scope", "local", "--install-root", root],
+		};
+		expect(configureClients([localCode()], selected, scoped)[0].status).toBe("configured");
+		expect(verifiedCodingClients(scoped)).toEqual(["claude-code"]);
+		expect(JSON.parse(readFileSync(code().path, "utf8")).mcpServers).toBeUndefined();
+	});
+
+	it("preserves custom and disabled project registrations", () => {
+		const root = join(home, "project");
+		const scoped = local(root);
+		for (const project of [
+			{ mcpServers: { pharaoh: { url: "https://custom.example" } } },
+			{ disabledMcpServers: ["pharaoh"] },
+		]) {
+			const before = JSON.stringify({ projects: { [root]: project } });
+			write(code().path, before);
+			expect(configureClients([localCode()], launch, scoped)[0].status).toMatch(/^preserved-/);
+			expect(readFileSync(code().path, "utf8")).toBe(before);
+		}
+	});
+
+	it("writes Codex Local TOML without invoking its global registration command", () => {
+		const root = join(home, "project");
+		const scoped = local(root);
+		write(codex().path, 'model = "keep-global"\n');
+		const target = { ...codex(), cli: "codex", version: "0.166.0" };
+		expect(configureClients([target], launch, scoped)[0].status).toBe("configured");
+		expect(readFileSync(codex().path, "utf8")).toBe('model = "keep-global"\n');
+		expect(parseToml(readFileSync(join(root, ".codex", "config.toml"), "utf8"))).toMatchObject({
+			mcp_servers: { pharaoh: launch },
+		});
+		expect(verifiedCodingClients(scoped)).toEqual(["codex"]);
+	});
+
+	it("reports an unverified Codex project-hook version without creating global fallback", () => {
+		const scoped = local(join(home, "project"));
+		expect(
+			configureClients([{ ...codex(), cli: "codex", version: "0.100.0" }], launch, scoped)[0],
+		).toMatchObject({ status: "unavailable" });
+		expect(preflightInstallScope([code()], options)).toEqual([]);
+	});
+
+	it("preserves tracked Codex project settings before creating a local activation", () => {
+		const root = join(home, "tracked-project");
+		const scoped = local(root);
+		execFileSync("git", ["init", "--quiet", root]);
+		const path = join(root, ".codex", "config.toml");
+		write(path, 'model = "shared-team-model"\n');
+		execFileSync("git", ["-C", root, "add", ".codex/config.toml"]);
+		const targets = scopeInstallTargets(
+			[{ ...codex(), cli: "codex", version: "0.166.0" }],
+			scoped.scope!,
+		);
+		expect(preflightInstallScope(targets, scoped)[0].status).toBe("ambiguous");
+		expect(configureClients(targets, launch, scoped)[0].status).toBe("preserved-custom");
+		expect(readFileSync(path, "utf8")).toBe('model = "shared-team-model"\n');
+	});
+});
+
 describe("failures and cleanup", () => {
 	it("retains a successful client when another configuration is malformed", () => {
 		write(code().path, '{"token":"private-canary", broken');
@@ -929,6 +1122,21 @@ describe("failures and cleanup", () => {
 		);
 		expect(outcomes.find(({ client }) => client === "codex")?.status).toBe("configured");
 		expect(parseToml(readFileSync(codex().path, "utf8")).mcp_servers).toBeUndefined();
+	});
+
+	it("reports unowned active registrations and treats an already removed registration as a successful retry", () => {
+		write(code().path, '{"mcpServers":{"pharaoh":{"url":"https://custom.example"}}}');
+		expect(cleanupManagedClients({ ...options, client: "claude-code" })[0].status).toBe(
+			"preserved-custom",
+		);
+		write(code().path, "{}");
+		configureClients([code()], launch, options);
+		expect(cleanupManagedClients({ ...options, client: "claude-code" })[0].status).toBe(
+			"configured",
+		);
+		expect(cleanupManagedClients({ ...options, client: "claude-code" })[0].status).toBe(
+			"already-configured",
+		);
 	});
 
 	it("targets the recorded Codex profile when cleaning a CLI-created registration", () => {

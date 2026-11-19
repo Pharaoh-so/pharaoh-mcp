@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "ae51aeb6cb1e52256b7ca5e7f4ee329d1ca9bca3",
-  "payloadSha256": "9e7c203f567e351a46a5cd2c4d852616e7736861e58d698439c6de41cb797932",
+  "commit": "fd6492a48b52d9527374032452dc6c9d160d9085",
+  "payloadSha256": "835672b8b3147e8cf45bdc65e07db01d68893c72b13ef7baa685ca3946ba8734",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -46,7 +46,7 @@
     },
     {
       "path": "hooks/route-grep.mjs",
-      "sha256": "2b4cfa1474a123461a663e671787063e619bd36c889f87c194fa2f9044fd8946",
+      "sha256": "bfc5e6fd53cb3d21c155972cab5440ec3215574eba71e528340e99d0f272ec87",
       "mode": "100644"
     },
     {
@@ -146,7 +146,7 @@
     },
     {
       "path": "project-memory/bundle.mjs",
-      "sha256": "173f55d63ebb3995522702eef69e73de582ceda5d5d94b55eb8f73e2a4e0ba80",
+      "sha256": "bf0a91236faa23e72c7d2f331adc8822c4af6a7ef76af34c8c79080d75e14bd0",
       "mode": "100644"
     },
     {
@@ -161,7 +161,7 @@
     },
     {
       "path": "project-memory/client-settings.mjs",
-      "sha256": "94547731b66f4896d2e511d450055d4e369d38837e334a90058258dd0d1aed83",
+      "sha256": "37092c3d4960fa900c949d1c87d28b5e052ccd371e08141ad9ab2e5966fb20a5",
       "mode": "100644"
     },
     {
@@ -186,7 +186,7 @@
     },
     {
       "path": "project-memory/hook-config.mjs",
-      "sha256": "7abc0d4620af54061144289ae2e84d685f37c2c7818baa1bc300c937d6541b0f",
+      "sha256": "6505250a0c69695518bc74f26d6046608adce063645f700f53ed82f4a53cc41c",
       "mode": "100644"
     },
     {
@@ -195,13 +195,23 @@
       "mode": "100644"
     },
     {
+      "path": "project-memory/install-scope.d.mts",
+      "sha256": "e1069fed0ffbed1380201ee196459f82f850c1142f347a46f1be46c75580eba4",
+      "mode": "100644"
+    },
+    {
+      "path": "project-memory/install-scope.mjs",
+      "sha256": "c458a11f420499c6ad795173c8304ad932915c026fdfe5b351aabdcf77703aae",
+      "mode": "100644"
+    },
+    {
       "path": "project-memory/local.d.mts",
-      "sha256": "44c7f8cd905d997aec934dfbb052ae34d4da0b8cdc141573b28d3299f3f46534",
+      "sha256": "a1bc9c116cf0c7e3dfcbeb6f112ea0ceed76ca07c7fd395cf7f5fe641894701d",
       "mode": "100644"
     },
     {
       "path": "project-memory/local.mjs",
-      "sha256": "87efa2c48ae66a32c1f1c7c31b4e7e41ed77aba8a56f1b6fb5a07f819a7f5bea",
+      "sha256": "9a34c343e868b888afed5c07e9ca82beb64785a4a74a33a9ffa8f6c991b96137",
       "mode": "100644"
     },
     {
@@ -211,7 +221,7 @@
     },
     {
       "path": "project-memory/pharaoh-memory-hook.mjs",
-      "sha256": "79cec901ad80118472bb8a3cd833dac784924bdd369ff0d6d232bbd1eef821b2",
+      "sha256": "7aa6396fa9f70fb8505911fb4622b05dc6bcaadc0af7434d60fd9e1edb25b7dc",
       "mode": "100644"
     },
     {
@@ -221,27 +231,97 @@
     },
     {
       "path": "project-memory/preferences.d.mts",
-      "sha256": "cd8dd2a52fd84b7c66beea068bc9ea555e0e7827e2703b3e96ce6f679ab7415d",
+      "sha256": "0bb0af1ba727df33389a372306c2c9c062d620b9935377bb288b8badbb286b2c",
       "mode": "100644"
     },
     {
       "path": "project-memory/preferences.mjs",
-      "sha256": "848d87c6934f64538a4ab08509e5c796a83f5ebe2023caaedf0998b463000aff",
+      "sha256": "351e36c0a3da275bfd88f931bea42162d6f1418a6b7b795b7cfd83a7ee00f92e",
       "mode": "100644"
     },
     {
       "path": "project-memory/setup.d.mts",
-      "sha256": "b44ca566b733b235c0335279927ad4d1549d4f216c39c2ff528e1cea051149a3",
+      "sha256": "313df78d7dad877e234ad27eba5b084e54cd74e2abe88a3bf34593077065cc23",
       "mode": "100644"
     },
     {
       "path": "project-memory/setup.mjs",
-      "sha256": "36807871466becda41277c1e3e594439e49e32fba366c11b21b809e905c5e638",
+      "sha256": "6e2070f2124fe7ff2756e9366706732d197c8e15ad814b9a6c9c7ecbd048b22e",
       "mode": "100644"
     },
     {
       "path": "project-memory/user-target.mjs",
-      "sha256": "e3778b6692c76d1fd30eaa8cb89b1daf3e74439686c94cbb526ca4ca14ba6daf",
+      "sha256": "1931cc78b5cdd4a3514b679abcab78606e8e480306d4e31207872ac265643457",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-hooks.d.mts",
+      "sha256": "2651b9994f05d2b944b25264e9b0ece8620df9acaefb7dfe43c1bb8113533dc7",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-hooks.mjs",
+      "sha256": "96ff74f06e1b3a547dfca4fa143306adf3402bfd9ff09a53c1c71926ca2a2b55",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-identity.d.mts",
+      "sha256": "3ea2f17890b366286eb87a2d0fbd9fa3ec0cd0e62998dd52937209ae53ae79f7",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-identity.mjs",
+      "sha256": "62d3a51b67fd6f536da6fb3601fe8b29af0eb6371cbc6b0682e9463455c29286",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-io.d.mts",
+      "sha256": "6ad9941a30792bd8c209bfc6a50c82d7dd9dfa944e85af010f5b85b76d48204a",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-io.mjs",
+      "sha256": "d2d3f209a0d3f1ebb8fd4bf61e33fc39f513e4c9fd405c88b4a4efefb0520602",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-launcher.mjs",
+      "sha256": "69833618cb1bec9cc8d272a5806d1863e734708c10d7cd6473f5cbf64ba4acc9",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-maintenance.mjs",
+      "sha256": "d8630f0407137e8bab512343b2b0fbfe95b29a088cf0de0ec273fd19e12de420",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-profiles.d.mts",
+      "sha256": "0050afe5eae612340875087d45a3b789d0afd8f0586796e803e0c05413cc1544",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-profiles.mjs",
+      "sha256": "2072f619967ce4e6be91ca861724b0da14c884afe832a9590558952acc481296",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-signin.d.mts",
+      "sha256": "02f78a7b1f0d7f9e5cb1992cec4898fa91eab6f13b2c99529c8fbc9201d5052e",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-signin.mjs",
+      "sha256": "53eb0f0382443564482401a5a57e55ff624b14459349db4cde0ca219400058c3",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-store.d.mts",
+      "sha256": "cc495047fb3c8b93b2fd8ffcd8b3d23994af6ec62a62014a973eee5b746648cc",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/feed-store.mjs",
+      "sha256": "7298cb2be33387fdfc18bb915b00894aee8116c11af30c02b0a4ccb2ed838eb4",
       "mode": "100644"
     },
     {
@@ -251,17 +331,27 @@
     },
     {
       "path": "runtime/launcher-v1.mjs",
-      "sha256": "a62374fa0d2380040e1b7541a0a5d059a846ed007fd512dbd5dd7e4e96a4f4b7",
+      "sha256": "2a1711437813110fe4c3933853ec9a9711119203c4aad18bf57301eaf81a205d",
       "mode": "100644"
     },
     {
       "path": "runtime/local-worktree-hook.d.mts",
-      "sha256": "836cefe9e00e813477a88806ab18b80302f0a82b1d37e7fd2a945bc3ba7e44fe",
+      "sha256": "3ec14d9b4437ce4a8d725f0e24be1d70a87ee9dcb2381d486dd40c4317a75b7e",
       "mode": "100644"
     },
     {
       "path": "runtime/local-worktree-hook.mjs",
-      "sha256": "c80786a1d61f889d39e924a7835e355b5a6336a5af80f5d0eeb33d301dec5b7b",
+      "sha256": "31f3b927ac307aa2886dc1ee83faca50adb99daf60a097517f75dded1f101f37",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/native-feed-hook.d.mts",
+      "sha256": "0ac8235d062a3c88d7c931e14f4113e36a7e69293173988d479c0cbcbde01ad9",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/native-feed-hook.mjs",
+      "sha256": "91a095b83902a7c375fbb8c1071743613a2e649f37392842e2a8048c0477e29f",
       "mode": "100644"
     },
     {
@@ -271,17 +361,17 @@
     },
     {
       "path": "runtime/runtime-bundle.mjs",
-      "sha256": "89942bb4c83190c367b3669ed6329560ded18a685182ed2604c3877617a18894",
+      "sha256": "5845172ad553bd386475d6e16171796525bef663c02ff9581ddcfc878009f825",
       "mode": "100644"
     },
     {
       "path": "runtime/runtime-client.d.mts",
-      "sha256": "06d9fd05d2a4ebbb9922d745ce05df8362af4286290da3221ec5adfa21cdd883",
+      "sha256": "d7b59143598547ba36379a308ec4453bc63548285a34bd5c0cfc039adf5dbd88",
       "mode": "100644"
     },
     {
       "path": "runtime/runtime-client.mjs",
-      "sha256": "fd6e5e15a1048ea7b119890b979055be90ae7192fe7521912b5bafa4dd63ef4f",
+      "sha256": "1200d4fada4f1496e5c97044d73a5587d3f57ce289d5bdf01f10b11107e7f954",
       "mode": "100644"
     },
     {
@@ -296,17 +386,17 @@
     },
     {
       "path": "runtime/runtime-hook.mjs",
-      "sha256": "128f84fedfa07fc754d6a9f0230e671ebffd1f46148e25fab6f69800e00373e0",
+      "sha256": "db7a4cf5586d2cb309fd941a5a01a216ba28c79c958d58ae6b32a45940b16fce",
       "mode": "100644"
     },
     {
       "path": "runtime/runtime-hooks.d.mts",
-      "sha256": "6775ded2a6fdfe6755ca0e42cc3f00f9020a3711b1bc9de9e137ef2ac8754661",
+      "sha256": "ad47f1e7f84cfdc03d4641aa6f281ac6d8a314161832086ad29f7758f789a8a6",
       "mode": "100644"
     },
     {
       "path": "runtime/runtime-hooks.mjs",
-      "sha256": "acfa6caaef855e013cefbd1fb459131e6a70fc6d305b18cc530f88f411ba8ccb",
+      "sha256": "2f9eea5f9de9b8d2a7e20cf7773e0326dee237f1b029d5cb8903783a66c8d75a",
       "mode": "100644"
     },
     {
@@ -330,6 +420,16 @@
       "mode": "100644"
     },
     {
+      "path": "runtime/runtime-scope.d.mts",
+      "sha256": "4827362bfb318b43db74e3a1c53185266424b08bbbe78fc143fe63a0fd47963b",
+      "mode": "100644"
+    },
+    {
+      "path": "runtime/runtime-scope.mjs",
+      "sha256": "8fb1e3df271779140b456c0e44a348f3abe998ba86f172f261b61a4111f49266",
+      "mode": "100644"
+    },
+    {
       "path": "runtime/runtime-storage.d.mts",
       "sha256": "8e75752a5b63b58c652d276b1c0456734e8739251707e808b7836cc407491043",
       "mode": "100644"
@@ -346,7 +446,7 @@
     },
     {
       "path": "runtime/update-notice.mjs",
-      "sha256": "a0f72c9b44dfe0b0795d84d5d0b749a4dcebf59532ab48602c2f0380aa936273",
+      "sha256": "b8380d287472a646f6f26cfc7b930b92090bbf0ca15a298c57dd2e8ea541b0b9",
       "mode": "100644"
     },
     {
@@ -401,7 +501,7 @@
     },
     {
       "path": "src/auth.ts",
-      "sha256": "5556bcff2b2b32b36172ea88ebbf2e717debbfd63cfdbb5c3ee6f952b7540a35",
+      "sha256": "a5d1993e81ab88cab5395d368f7df4960f0be68bdb9d397c452672e85dc98810",
       "mode": "100644"
     },
     {
@@ -421,12 +521,12 @@
     },
     {
       "path": "src/client-install.ts",
-      "sha256": "f714798b09306e42063dcd3f913c7100ee26c99612b79670e3ff1e2c56cf9377",
+      "sha256": "21fecae78af53254d45a6e68c4ac4932e958b2fbcd839f767a4a459f9da5f08a",
       "mode": "100644"
     },
     {
       "path": "src/credentials.ts",
-      "sha256": "a8abd72c896fc1b0afcf5f5793c00942732e94d41a99dd193954b24a81b64f94",
+      "sha256": "e11745044fa14c456842506b612dbd8b8422f02a9cc978132304d12ed2a863f4",
       "mode": "100644"
     },
     {
@@ -441,12 +541,12 @@
     },
     {
       "path": "src/helpers.ts",
-      "sha256": "5307855f2d73f37dc5528d95fd698f37c1a0b46c51937f0dd4e3d072c9d24e03",
+      "sha256": "a7e60501a6811b17205a523cf4586d0b4cb9c90250b9f988ab5b8345bc7b7e83",
       "mode": "100644"
     },
     {
       "path": "src/index.ts",
-      "sha256": "427003c651c315e757830e8c8439d2433b9db4f01594f85e3e596a80150bfa14",
+      "sha256": "1885cb2951f3abf6ae672024b2fb13b8efaa36e02ea46f9ee9ff84940cb151a3",
       "mode": "100644"
     },
     {
@@ -455,18 +555,23 @@
       "mode": "100644"
     },
     {
+      "path": "src/install-scope.ts",
+      "sha256": "009afc0b7f57830bf6a664e990d95a7cadab63e2848b1d7f2a8e497ef8750edd",
+      "mode": "100644"
+    },
+    {
       "path": "src/install-skills.ts",
-      "sha256": "e7539a45ff8a05e493727b229e2527c9f04cc9c3d7fef8bab442f107de5a1168",
+      "sha256": "2d0c06d0674a085445ee6d134af0e184c368d173af74eac5c3af5473b6a5ec27",
       "mode": "100644"
     },
     {
       "path": "src/install-types.ts",
-      "sha256": "82f275e640a91df9def87f332b19c7ac9b72dd1e26288b6b77a3662504f254ea",
+      "sha256": "4943a0573a68358c07d8489d20f4e4b1e1b56e248def2980a4caad8c7afee342",
       "mode": "100644"
     },
     {
       "path": "src/install.ts",
-      "sha256": "32cbe51da5c23c4db4f1cf77c241e699e2349df47a425c9bb59bb53e1d71f06b",
+      "sha256": "05a1f105ad2a6f0cc35d4c8eb16a1bde39c7f5581cb16ba3f0479db43c98626f",
       "mode": "100644"
     },
     {
@@ -476,7 +581,7 @@
     },
     {
       "path": "src/local-host.ts",
-      "sha256": "f63dfb124f0797f18ebcbd0eff7a5f91af8ac66033d0988373b2f0110961feca",
+      "sha256": "9ceba262a41d894214dbeef8311916cb5c381350b2d51bc0f3f5cdda69587c25",
       "mode": "100644"
     },
     {
@@ -486,7 +591,7 @@
     },
     {
       "path": "src/local/contracts.ts",
-      "sha256": "1f3f8042a55200daed3c91a0ca70b0a7fa076bfdccc244db14ee3efa016d6c64",
+      "sha256": "7d4b10559efc4213e2f7e402ad2a7191b518855dbb7e4ed6189f4fd5823176fb",
       "mode": "100644"
     },
     {
@@ -501,7 +606,7 @@
     },
     {
       "path": "src/local/runtime.ts",
-      "sha256": "aa3efaf617c35fd1c2d24abbf354e88cf5e36e5a3e19e6c1aa5601bbe1d879b8",
+      "sha256": "d0478452a0c28c28fc317ba9b94b04678ef5cf5a6bb18d30b0b958d966ee7bb8",
       "mode": "100644"
     },
     {
@@ -525,8 +630,23 @@
       "mode": "100644"
     },
     {
+      "path": "src/native-feed-maintenance.ts",
+      "sha256": "14d28ea7a4ed97c35337c2557ffa8be7f240a9beab5725552028111dfa2681df",
+      "mode": "100644"
+    },
+    {
+      "path": "src/native-feed-status.ts",
+      "sha256": "7fb9dbdc781a75f6aa59f8f6ba1f72e1269e6d77fb7dd489750a092d0d73a5dd",
+      "mode": "100644"
+    },
+    {
+      "path": "src/native-feed.ts",
+      "sha256": "db9ee9c640e459938bc37237643493965dd95d7b739f83906d1026a12bfc6b45",
+      "mode": "100644"
+    },
+    {
       "path": "src/proxy-server.ts",
-      "sha256": "bb7b571a58be183c6edc26423c43186887f87b8ba8be23cb5201d0c745a8697a",
+      "sha256": "d71a1e1983d85eeb695d7e855d42f1ae8602517ce6459743fb563788a9615ad0",
       "mode": "100644"
     },
     {
@@ -541,7 +661,7 @@
     },
     {
       "path": "src/runtime-command.ts",
-      "sha256": "293bbd9fae4585b7d0c9c816855b6d40a32cc5dea7659b9c8c307bd3d6000e71",
+      "sha256": "d1c15ab81844842a0867888e6b2f40c4d5a3e9079d550dcf6b14fbe98797c876",
       "mode": "100644"
     },
     {
@@ -556,7 +676,7 @@
     },
     {
       "path": "src/setup.ts",
-      "sha256": "db36e9772d828a18e168a69ee7bbd62cba5bd65f79e02df58491620b41c5eb9a",
+      "sha256": "5086c8bb4fe124f80cbbe02e0441ee9f46d2eecff8ac467a82eb8cfcf01b4492",
       "mode": "100644"
     },
     {
@@ -576,7 +696,7 @@
     },
     {
       "path": "tests/auth-flow-e2e.integration.test.ts",
-      "sha256": "93f04cac7faed3d57476726b8dc36b1b1456c6a7e0768cd7d0a70a721cf2d388",
+      "sha256": "c23f4cab20fda6769433525719e98e8ca05d66e04ba26db9b1471b3561e1957a",
       "mode": "100644"
     },
     {
@@ -591,7 +711,32 @@
     },
     {
       "path": "tests/client-install.test.ts",
-      "sha256": "3a02973b9ccb761d43ae2f4c309e0039d53cbb1560d5a8c74c3e59dda053fd37",
+      "sha256": "b57703725bd68710f2ab7694b4543648f75dfea84ee9021fe76fd1f3e5b175d7",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/feed-install.test.ts",
+      "sha256": "31fc4ccb1b1799b1ed94010392fa6cdc88184e6529c6fa5e06a6c9759a9bbfec",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/fixtures/native-feed/README.md",
+      "sha256": "9336d964119ee77351a823496574b4a3251b0333b0c5a11453f5264047fd6c36",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/fixtures/native-feed/claude-code-2.1.327.json",
+      "sha256": "f3d9e0dfda0d9d6e43ca144221c700e497f2e411fa1a62fa47e10e4e69921781",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/fixtures/native-feed/claude-code-2.1.328.json",
+      "sha256": "41566f02c876a2da4371aa6584d322c45c86d69bcc79a3565aaefa68bac93f1a",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/fixtures/native-feed/codex-0.166.0.json",
+      "sha256": "4c6e982ce85427a42f82b28820c7728c91020fd40176ba84543308f2e504ada8",
       "mode": "100644"
     },
     {
@@ -601,17 +746,22 @@
     },
     {
       "path": "tests/import-layers.test.ts",
-      "sha256": "bc763d59c357fcf51bf01e314f959408a75a51a96803c17dcb7e0f3c5d56ca5b",
+      "sha256": "0ec5f301a9d8bd2e670601819339537900a7bb306b56f6ba3d1dd18fe884e997",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/install-skills-local.test.ts",
+      "sha256": "9139cf89661eff21bc35123dc206a3a021a3e311ad83104ab8be5539fd746160",
       "mode": "100644"
     },
     {
       "path": "tests/install-skills.test.ts",
-      "sha256": "c98a43fd9a5018b92f294eda3dcb2d26f39365df4cfae83852f96c69775fd787",
+      "sha256": "725f0ed8e036ce372196c71f69fe0adb5fe8bbf24ec836ece00d140357ccc931",
       "mode": "100644"
     },
     {
       "path": "tests/install.test.ts",
-      "sha256": "175f2f94da70a29c0b0a78544080f3fb4fbfd02f757a9944512c64632d7228ce",
+      "sha256": "4159b6fda06a9304c17a752a2c98e62293971bba47749e914b033779f2fca57c",
       "mode": "100644"
     },
     {
@@ -640,13 +790,38 @@
       "mode": "100644"
     },
     {
+      "path": "tests/native-feed-core.test.ts",
+      "sha256": "614cf1a916d375df1e686ec298d649ca24905a1842bbca2d07613c87019f338b",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/native-feed-hook.test.ts",
+      "sha256": "81da57ff721fd57364dffb98cd9feaa61ae31c14b85fa5d31ad52f23b5164817",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/native-feed-maintenance.test.ts",
+      "sha256": "e9408ab44b53971915bd93c834a2349330b3377d7df2b1f07a75d6d67e3274d4",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/native-feed-runtime.test.ts",
+      "sha256": "2dcfa8d0b1302cc5b9996de62435245959f0329c040a2cc788ac7134c29a2b65",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/native-feed-status.test.ts",
+      "sha256": "946e57be43b6d0e2f93313a95649f85559c2790192dc9f186661dff7666cfd5e",
+      "mode": "100644"
+    },
+    {
       "path": "tests/project-memory-capture.test.ts",
       "sha256": "794edfe10301bb8e6ec4fb3988c762384aa85a51fdf6aea95ac8c4b83b65b7ac",
       "mode": "100644"
     },
     {
       "path": "tests/project-memory-install.test.ts",
-      "sha256": "62a0b98c9c1431fa6d59c7bf28b6d09dcb0ce27a6f4179f9a55e68cc88751f7b",
+      "sha256": "910b50d10c2328f927ef0ffd9da5243a3701a9cf842bd16ec3207429090f535a",
       "mode": "100644"
     },
     {
@@ -661,12 +836,12 @@
     },
     {
       "path": "tests/route-grep-hook.test.ts",
-      "sha256": "7164f4000186e8794db644fa0f1f8faafd0ff5882167c84759cb9f3857c067f3",
+      "sha256": "4201593d1b938e6e8b598d69ecce1ff36cbd02b266be33ccc81ac20c04016035",
       "mode": "100644"
     },
     {
       "path": "tests/runtime-observations.test.ts",
-      "sha256": "63f4d44aaea746b8d722ac5b45c8e8b5b46ac5afbd65fb68bd80c92917f3761c",
+      "sha256": "cef62fe18791e88b217a4145680823349b97580ee47e980cb08a2ab476b56dbb",
       "mode": "100644"
     },
     {
@@ -676,7 +851,7 @@
     },
     {
       "path": "tests/setup.test.ts",
-      "sha256": "9eaef4943e53307b5d2d63d2f67d90853de37f943b81b4e1079bdcb032329345",
+      "sha256": "52c224c0b1cf0ef042db0aa62e83b23072c96f44631de501a4fbcaae20a602dd",
       "mode": "100644"
     },
     {

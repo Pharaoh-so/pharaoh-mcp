@@ -332,20 +332,46 @@ async function dropTypedAhead(input: NodeJS.ReadableStream): Promise<void> {
 /** Parse CLI arguments. */
 export function parseArgs(argv: string[] = process.argv.slice(2)): {
 	server: string;
+	serverArgv: string[];
+	feedClient?: "claude-code" | "codex";
+	feedRegistration?: string;
 	logout: boolean;
 } {
 	let server = DEFAULT_SERVER;
 	let logout = false;
+	let serverArgv: string[] = [];
+	let feedClient: "claude-code" | "codex" | undefined;
+	let feedRegistration: string | undefined;
+	const seen = new Set<string>();
+	const invalid = () => {
+		printLines("Pharaoh: invalid or duplicate managed proxy option.");
+		process.exit(1);
+	};
 
 	for (let i = 0; i < argv.length; i++) {
-		if (argv[i] === "--server" && argv[i + 1]) {
-			server = argv[i + 1];
+		if (["--server", "--feed-client", "--feed-registration"].includes(argv[i])) {
+			const key = argv[i];
+			const value = argv[i + 1];
+			if (seen.has(key) || !value || value.startsWith("--")) invalid();
+			seen.add(key);
+			if (key === "--server") {
+				server = value;
+				serverArgv = [key, value];
+			} else if (key === "--feed-client") {
+				if (value !== "claude-code" && value !== "codex") invalid();
+				feedClient = value as "claude-code" | "codex";
+			} else {
+				if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))
+					invalid();
+				feedRegistration = value;
+			}
 			i++;
 		} else if (argv[i] === "--logout") {
 			logout = true;
 		}
 	}
 
+	if (Boolean(feedClient) !== Boolean(feedRegistration)) invalid();
 	// Strip trailing slash
 	server = server.replace(/\/+$/, "");
 
@@ -370,27 +396,33 @@ export function parseArgs(argv: string[] = process.argv.slice(2)): {
 		process.exit(1);
 	}
 
-	return { server, logout };
+	return { server, serverArgv, ...(feedClient && { feedClient, feedRegistration }), logout };
 }
 
 export function printUsage(): void {
 	printLines(
 		"Usage: pharaoh-mcp [options]",
-		"       pharaoh-mcp install [--migrate-legacy] [options]",
+		"       pharaoh-mcp install [--scope global|local] [--path <repository>] [options]",
+		"       pharaoh-mcp cleanup --client <name> --scope global|local [--path <repository>]",
 		"       pharaoh-mcp update   Verify the newest release and stage it for your next session",
 		"       pharaoh-mcp <tool> --repo <name> [flags] [--json] (use <tool> --help)",
 		"",
 		"Options:",
 		"  --server <url>    Pharaoh server URL (default: https://mcp.pharaoh.so)",
 		"  --logout          Clear credentials, MCP config, the Claude Code plugin and the CLAUDE.md line, then exit",
-		"  --clean           Remove Pharaoh setup, including managed local project memory hooks",
+		"  --clean           Remove global Pharaoh setup, preserving managed Local installations",
 		"  --memory-hooks    Re-enable eligible memory reminders and offer optional settings",
 		"  --disable-memory-hooks  Remove Pharaoh's memory hooks and remember the choice",
 		"  --disable-memory-capture  Stop saving fixes to project memory automatically",
 		"  --undo-memory     Remove the last automatic project memory save",
 		"  --install-skills  Reinstall the Claude Code plugin and OpenClaw skills",
 		"  --migrate-legacy  Move plain pinned NPX connections to the managed runtime during install",
+		"  --scope <scope>   Install globally (recommended) or in one local Git checkout",
+		"  --path <path>     Select the checkout for --scope local (default: current checkout)",
 		"  --skip-runtime    Turn off runtime analytics during install and remember the choice",
+		"  --native-context-status  Inspect local queued, claimed and emitted updates",
+		"  --disable-native-context [--client <name>]  Stop native subagent context updates",
+		"  --enable-native-context [--client <name>]   Enable native context updates on the next install",
 		"  --doctor          Report bounded local setup markers offline; changes nothing",
 		"  --client <name>   With --doctor, select claude-code to inspect project markers",
 		"  --runtime-enable --client <name>  Opt in to native runtime observations (claude-code or codex)",

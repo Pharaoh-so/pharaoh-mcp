@@ -12,6 +12,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -40,6 +41,13 @@ import {
 	uninstallClaudePlugin,
 } from "../src/install-skills.js";
 import type { ClientInstallOptions, ClientTarget, LaunchConfig } from "../src/install-types.js";
+import { writeHookPreferences } from "../project-memory/preferences.mjs";
+
+// All filesystem operations remain real; fault injection targets the receipt commit only.
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
 
 /** Read the package version from package.json (mirrors internal getPackageVersion). */
 function readPackageVersion(): string {
@@ -233,6 +241,68 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		]);
 	});
 
+	it("creates the Claude root for an explicitly selected client", () => {
+		rmSync(join(home, ".claude"), { recursive: true, force: true });
+		const result = runInstallSkills(home, { clients: ["claude-code"], claude: () => true });
+		expect(result.errors).toEqual([]);
+		expect(existsSync(join(home, ".claude", "commands", "review.md"))).toBe(true);
+	});
+
+	it("installs and removes owned extras through a user-selected Claude directory symlink", () => {
+		const claudeRoot = join(home, ".claude");
+		rmSync(claudeRoot, { recursive: true, force: true });
+		const dotfiles = join(home, "dotfiles-claude");
+		mkdirSync(dotfiles);
+		symlinkSync(dotfiles, claudeRoot, "dir");
+		const settings = join(dotfiles, "settings.json");
+		writeFileSync(settings, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
+		const result = runInstallSkills(home, { clients: ["claude-code"], claude: () => true });
+		expect(result.errors).toEqual([]);
+		expect(existsSync(join(dotfiles, "commands", "review.md"))).toBe(true);
+		expect(allowReadTools(home)).toBe("added");
+		writeFileSync(join(dotfiles, "commands", "mine.md"), "Personal command");
+		uninstallClaudePlugin(home, () => true);
+		expect(existsSync(join(dotfiles, "commands", "review.md"))).toBe(false);
+		expect(readFileSync(join(dotfiles, "commands", "mine.md"), "utf8")).toBe("Personal command");
+		expect(JSON.parse(readFileSync(settings, "utf8")).permissions.allow).toEqual(["Bash(ls:*)"]);
+		expect(statSync(claudeRoot).isDirectory()).toBe(true);
+	});
+
+	it("the installed hook honors a saved No after repeated setup without disabling memory", () => {
+		writeHookPreferences({ "claude-code": { memory: true, graph: false } }, home);
+		writeFileSync(join(home, ".pharaoh", "credentials.json"), "{}");
+		for (let attempt = 0; attempt < 2; attempt++) {
+			runInstallSkills(home, NO_CLI);
+			const output = execFileSync(
+				process.execPath,
+				[join(pluginDir(home), "hooks", "route-grep.mjs")],
+				{
+					input: JSON.stringify({
+						session_id: "declined",
+						tool_name: "Grep",
+						tool_input: { pattern: "resolveWidget" },
+					}),
+					encoding: "utf8",
+					env: {
+						...process.env,
+						HOME: home,
+						PHARAOH_ROUTE_GREP_STATE_DIR: join(home, "route-state"),
+					},
+				},
+			);
+			expect(output).toBe("");
+		}
+		expect(existsSync(join(home, "route-state"))).toBe(false);
+		expect(
+			JSON.parse(
+				readFileSync(
+					join(home, ".pharaoh", "project-memory-client", "hook-preferences-v1.json"),
+					"utf8",
+				),
+			).clients["claude-code"],
+		).toEqual({ memory: true, graph: false });
+	});
+
 	it("installs bundled slash commands to ~/.claude/commands/", () => {
 		runInstallSkills(home, NO_CLI);
 
@@ -291,7 +361,7 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		expect(planCmd).toContain("$ARGUMENTS");
 	});
 
-	it("SC-7: rewrites its own command files — marked ones and those from the pre-marker installer", () => {
+	it("SC-7: preserves ambiguous legacy commands rather than overwrite possible user edits", () => {
 		const commandsDir = join(home, ".claude", "commands");
 		mkdirSync(commandsDir, { recursive: true });
 		writeFileSync(
@@ -306,9 +376,9 @@ describe("runInstallSkills — Claude Code plugin", () => {
 
 		const result = runInstallSkills(home, NO_CLI);
 
-		expect(result.keptCommands).toEqual([]);
-		expect(readFileSync(join(commandsDir, "plan.md"), "utf-8")).toContain("Pharaoh Reconnaissance");
-		expect(readFileSync(join(commandsDir, "review.md"), "utf-8")).toContain("Phase 0");
+		expect(result.keptCommands).toEqual(["plan.md", "review.md"]);
+		expect(readFileSync(join(commandsDir, "plan.md"), "utf-8")).toContain("stale marked body");
+		expect(readFileSync(join(commandsDir, "review.md"), "utf-8")).toContain("stale body");
 	});
 
 	it("SC-7: does not write through a symlink at the destination", () => {
@@ -324,14 +394,14 @@ describe("runInstallSkills — Claude Code plugin", () => {
 		expect(result.keptCommands).toEqual(["review.md"]);
 	});
 
-	it("SC-7: removes its own retired sessions.md, never a user's file or a symlink", () => {
+	it("SC-7: preserves unverified retired commands and symlinks", () => {
 		const commandsDir = join(home, ".claude", "commands");
 		const sessions = join(commandsDir, "sessions.md");
 		mkdirSync(commandsDir, { recursive: true });
 		writeFileSync(sessions, `---\ndescription: old\n${PHARAOH_COMMAND_MARKER}\n---\nbody\n`);
 
 		runInstallSkills(home, NO_CLI);
-		expect(existsSync(sessions)).toBe(false);
+		expect(existsSync(sessions)).toBe(true);
 
 		writeFileSync(sessions, "# my own /sessions\nUSER CONTENT\n");
 		runInstallSkills(home, NO_CLI);
@@ -680,6 +750,76 @@ describe("uninstallClaudePlugin", () => {
 		]);
 		expect(existsSync(marketplaceDir(home))).toBe(false);
 	});
+	it("removes unchanged owned extras but preserves custom commands and pre-existing permissions", () => {
+		const settingsPath = join(home, ".claude", "settings.json");
+		writeFileSync(
+			settingsPath,
+			JSON.stringify({
+				permissions: { allow: [PHARAOH_ALLOW_RULES[0], "Bash(ls:*)"], deny: ["Bash(rm:*)"] },
+			}),
+		);
+		runInstallSkills(home, NO_CLI);
+		expect(allowReadTools(home)).toBe("added");
+		expect(allowReadTools(home)).toBe("current");
+		const commands = join(home, ".claude", "commands");
+		appendFileSync(join(commands, "plan.md"), "\nMy local instructions.\n");
+		writeFileSync(join(commands, "personal.md"), "Mine");
+		const before = readFileSync(join(commands, "plan.md"), "utf8");
+		const reinstalled = runInstallSkills(home, NO_CLI);
+		expect(reinstalled.keptCommands).toContain("plan.md");
+		expect(readFileSync(join(commands, "plan.md"), "utf8")).toBe(before);
+		for (let attempt = 0; attempt < 2; attempt++) uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readFileSync(join(commands, "plan.md"), "utf8")).toBe(before);
+		expect(existsSync(join(commands, "review.md"))).toBe(false);
+		expect(readFileSync(join(commands, "personal.md"), "utf8")).toBe("Mine");
+		expect(JSON.parse(readFileSync(settingsPath, "utf8")).permissions).toEqual({
+			allow: [PHARAOH_ALLOW_RULES[0], "Bash(ls:*)"],
+			deny: ["Bash(rm:*)"],
+		});
+	});
+
+	it("preserves legacy permissions without an ownership record", () => {
+		const settingsPath = join(home, ".claude", "settings.json");
+		const original = JSON.stringify({ permissions: { allow: [...PHARAOH_ALLOW_RULES] } });
+		writeFileSync(settingsPath, original);
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readFileSync(settingsPath, "utf8")).toBe(original);
+	});
+	it("preserves ownership through a dangling Claude root symlink until its target returns", () => {
+		const root = join(home, ".claude");
+		const target = join(home, "dotfiles-claude");
+		const unavailable = join(home, "dotfiles-away");
+		renameSync(root, target);
+		symlinkSync(target, root, "dir");
+		runInstallSkills(home, { clients: ["claude-code"], claude: () => true });
+		const receipt = join(home, ".pharaoh", "claude-extras-v1.json");
+		const before = readFileSync(receipt, "utf8");
+		renameSync(target, unavailable);
+		uninstallClaudePlugin(home, () => true);
+		expect(readFileSync(receipt, "utf8")).toBe(before);
+		renameSync(unavailable, target);
+		uninstallClaudePlugin(home, () => true);
+		expect(existsSync(join(target, "commands", "review.md"))).toBe(false);
+		expect(existsSync(receipt)).toBe(false);
+	});
+
+	it.each(["directory", "receipt"])("does not trust a non-private ownership %s", (target) => {
+		if (typeof process.getuid !== "function") return;
+		const settingsPath = join(home, ".claude", "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
+		runInstallSkills(home, NO_CLI);
+		allowReadTools(home);
+		chmodSync(
+			target === "directory"
+				? join(home, ".pharaoh")
+				: join(home, ".pharaoh", "claude-extras-v1.json"),
+			0o755,
+		);
+		const before = readFileSync(settingsPath, "utf8");
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readFileSync(settingsPath, "utf8")).toBe(before);
+		expect(existsSync(join(home, ".claude", "commands", "review.md"))).toBe(true);
+	});
 });
 
 // ── OpenClaw skill install ──────────────────────────────────────────
@@ -981,6 +1121,25 @@ describe("SC-6: allowReadTools (interactive setup only)", () => {
 
 		expect(allowReadTools(home)).toBe("error");
 		expect(readFileSync(settingsPath, "utf-8")).toBe("not valid json {{{");
+	});
+	it("rolls back newly allowed rules if committing their ownership receipt fails", () => {
+		const original = JSON.stringify({
+			permissions: { allow: [PHARAOH_ALLOW_RULES[0], "Bash(ls:*)"] },
+		});
+		writeFileSync(settingsPath, original);
+		expect(allowReadTools(home)).toBe("added");
+		const receipt = join(home, ".pharaoh", "claude-extras-v1.json");
+		const before = readFileSync(receipt, "utf8");
+		writeFileSync(settingsPath, original);
+		vi.mocked(renameSync).mockImplementationOnce(() => {
+			throw new Error("receipt disk failure");
+		});
+		expect(allowReadTools(home)).toBe("error");
+		expect(readFileSync(settingsPath, "utf8")).toBe(original);
+		expect(readFileSync(receipt, "utf8")).toBe(before);
+		expect(allowReadTools(home)).toBe("added");
+		uninstallClaudePlugin(home, NO_CLI.claude);
+		expect(readAllow()).toEqual([PHARAOH_ALLOW_RULES[0], "Bash(ls:*)"]);
 	});
 });
 

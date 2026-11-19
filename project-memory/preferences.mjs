@@ -9,7 +9,7 @@ import {
 	rmSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { privateMemoryPath } from "./bundle.mjs";
 import {
@@ -17,48 +17,14 @@ import {
 	memoryClientRoot,
 	readActiveMemoryClients,
 	readHookSettings,
+	readHookPreferences,
 } from "./client-settings.mjs";
 import { hasUserHooks } from "./hook-config.mjs";
+import { memoryInstallScope, memorySettingsPath } from "./install-scope.mjs";
 import { ANCHORED_MEMORY_FILE, atomicWrite, shellWord } from "./local.mjs";
 
-export { MEMORY_HOOK_CLIENTS };
+export { MEMORY_HOOK_CLIENTS, readHookPreferences };
 const FILE = "hook-preferences-v1.json";
-
-export function readHookPreferences(home = homedir()) {
-	const root = memoryClientRoot(home);
-	const path = join(root, FILE);
-	try {
-		privateMemoryPath(root, true);
-		if (privateMemoryPath(path, false).size > 1024)
-			throw new Error("Project memory preferences are too large.");
-		const { version, clients } = JSON.parse(readFileSync(path, "utf8"));
-		if (version !== 1 || !clients || typeof clients !== "object" || Array.isArray(clients))
-			throw new Error("Project memory preferences have an unknown format.");
-		for (const client of MEMORY_HOOK_CLIENTS) {
-			if (!Object.hasOwn(clients, client)) continue;
-			const choice = clients[client];
-			if (
-				!choice ||
-				typeof choice !== "object" ||
-				Array.isArray(choice) ||
-				["memory", "graph", "diagnostics", "capture"].some(
-					(key) => Object.hasOwn(choice, key) && typeof choice[key] !== "boolean",
-				) ||
-				(choice.diagnosticsPolicyVersion !== undefined &&
-					(typeof choice.diagnosticsPolicyVersion !== "string" ||
-						choice.diagnosticsPolicyVersion.length > 128)) ||
-				(choice.diagnosticsGeneration !== undefined &&
-					(typeof choice.diagnosticsGeneration !== "string" ||
-						!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(choice.diagnosticsGeneration)))
-			)
-				throw new Error("Project memory preferences contain an invalid choice.");
-		}
-		return clients;
-	} catch (error) {
-		if (error.code === "ENOENT") return {};
-		throw error;
-	}
-}
 
 export function writeHookPreferences(clients, home = homedir(), expected) {
 	const previous = readHookPreferences(home);
@@ -177,18 +143,19 @@ export function nativeMemoryClient(info) {
 /** Configuration evidence only: native review, trust and execution remain unobserved. */
 export function memoryHookStateForClient(
 	info,
-	{ home = homedir(), env = process.env, platform = process.platform } = {},
+	{
+		home = homedir(),
+		env = process.env,
+		platform = process.platform,
+		scope = memoryInstallScope(),
+	} = {},
 ) {
 	if (typeof info?.name !== "string" || !info.name) return "unknown";
 	const client = nativeMemoryClient(info);
 	if (!client || platform === "win32" || typeof process.getuid !== "function") return "unsupported";
 	try {
 		if (readHookPreferences(home)[client]?.memory === false) return "declined";
-		const codex = client === "codex";
-		const directory =
-			(codex ? env.CODEX_HOME : env.CLAUDE_CONFIG_DIR) ?? join(home, codex ? ".codex" : ".claude");
-		if (!isAbsolute(directory)) return "unknown";
-		let settings = join(directory, codex ? "hooks.json" : "settings.json");
+		let settings = memorySettingsPath(client, home, env, scope);
 		try {
 			settings = realpathSync(settings);
 		} catch (error) {
@@ -209,8 +176,8 @@ export function memoryHookStateForClient(
 		)
 			return "unknown";
 		const reminder = { hooks: { UserPromptSubmit: groups } };
-		if (!hasUserHooks(reminder, client)) return "absent";
-		const digest = readActiveMemoryClients(home)[client];
+		if (!hasUserHooks(reminder, client, scope)) return "absent";
+		const digest = readActiveMemoryClients(home, scope)[client];
 		if (!digest) return "unknown";
 		const runtime = join(realpathSync(memoryClientRoot(home)), digest);
 		privateMemoryPath(runtime, true);
@@ -227,7 +194,7 @@ export function memoryHookStateForClient(
 						entry?.type === "command" &&
 						typeof entry.command === "string" &&
 						entry.command.includes(invocation) &&
-						hasUserHooks({ hooks: { UserPromptSubmit: [{ hooks: [entry] }] } }, client),
+						hasUserHooks({ hooks: { UserPromptSubmit: [{ hooks: [entry] }] } }, client, scope),
 				),
 		)
 			? "installed"
@@ -238,7 +205,7 @@ export function memoryHookStateForClient(
 }
 
 /** Consent metadata for the actual native initialize identity; unknown clients stay unknown. */
-export function memoryDiagnosticsForClient(info, home = homedir()) {
+export function memoryDiagnosticsForClient(info, home = homedir(), scope = memoryInstallScope()) {
 	const clientName = nativeMemoryClient(info);
 	if (!clientName) return;
 	try {
@@ -248,7 +215,7 @@ export function memoryDiagnosticsForClient(info, home = homedir()) {
 			choice?.diagnostics !== true ||
 			!choice.diagnosticsGeneration ||
 			!choice.diagnosticsPolicyVersion ||
-			!readActiveMemoryClients(home)[clientName]
+			!readActiveMemoryClients(home, scope)[clientName]
 		)
 			return;
 		const version =

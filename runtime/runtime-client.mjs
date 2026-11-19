@@ -2,7 +2,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
 	parseRuntimeEvent,
@@ -17,6 +17,7 @@ import {
 } from "./runtime-hooks.mjs";
 import {
 	EVENT_TTL_MS,
+	extractRuntimeReceipt,
 	nativeIdentifier,
 	nativeObservation,
 	RUNTIME_CLIENTS,
@@ -34,6 +35,13 @@ import {
 	runtimeRoot,
 	writeRuntimeJSON,
 } from "./runtime-storage.mjs";
+import {
+	runtimeProfileId,
+	runtimeProfilePath,
+	runtimeScope,
+	runtimeScopeMatches,
+	runtimeTargetId,
+} from "./runtime-scope.mjs";
 
 const STATE = "state.json";
 const STATUS = "status.json";
@@ -54,12 +62,263 @@ const KEY = /^[a-f0-9]{64}$/;
 const REF = /^[a-f0-9]{64}$/;
 const time = (options) => options.now ?? Date.now();
 const root = (options) => runtimeRoot(options.home);
-const clientDirectory = (client, options) => join(root(options), client);
+const clientDirectory = (client, options) => {
+	const base = join(root(options), client);
+	const profile = runtimeProfileId(client, options);
+	if (!profile) return base;
+	const legacy = readRuntimeJSON(join(base, STATE), 65_536);
+	return legacy?.settingsPath === runtimeProfilePath(client, options)
+		? base
+		: join(root(options), "profiles", `${client}-${profile}`);
+};
 const validClient = (client) => RUNTIME_CLIENTS.includes(client);
-const pendingName = (client) => `revoke-${client}.json`;
-const choiceName = (client) => `choice-${client}.json`;
+function pendingName(client, options) {
+	const profile = runtimeProfileId(client, options);
+	const name = `revoke-${client}${profile ? `-${profile}` : ""}.json`;
+	const legacy = `revoke-${client}.json`;
+	return profile &&
+		!pathExists(join(root(options), name)) &&
+		pathExists(join(root(options), legacy))
+		? legacy
+		: name;
+}
+function choiceName(client, options) {
+	const profile = runtimeProfileId(client, options);
+	const name = `choice-${client}${profile ? `-${profile}` : ""}.json`;
+	const legacy = `choice-${client}.json`;
+	return profile &&
+		!pathExists(join(root(options), name)) &&
+		readRuntimeJSON(join(root(options), legacy), 256)?.disabled === true
+		? legacy
+		: name;
+}
 const iso = (value) => new Date(value).toISOString();
 const wait = (ms, options) => (options.wait ?? sleep)(ms);
+const MAX_TARGETS = 64;
+
+function targetId(client, options) {
+	return options.targetId ?? runtimeTargetId(client, options);
+}
+
+function targetDescriptor(client, options) {
+	return {
+		id: runtimeTargetId(client, options),
+		scope: runtimeScope(options),
+		settingsPath: runtimeSettingsPath(client, options),
+	};
+}
+
+function targetStateName(id) {
+	return `target-${id}.json`;
+}
+function statusName(client, options) {
+	if (options.scope?.kind === "global") return STATUS;
+	return runtimeScope(options).kind === "local" || options.targetId
+		? `status-${targetId(client, options)}.json`
+		: STATUS;
+}
+
+function activation(base, client, options) {
+	const id = targetId(client, options);
+	if (typeof id !== "string" || !REF.test(id)) return null;
+	const targets = base.targets;
+	const legacy =
+		!targets && id === runtimeTargetId(client, { ...options, scope: { kind: "global" } });
+	const descriptor = legacy
+		? targetDescriptor(client, { ...options, scope: { kind: "global" } })
+		: targets?.[id];
+	if (
+		!descriptor ||
+		descriptor.id !== id ||
+		descriptor.committed === false ||
+		!["global", "local"].includes(descriptor.scope?.kind)
+	)
+		return null;
+	if (
+		descriptor.scope.kind === "local" &&
+		(typeof descriptor.scope.root !== "string" || !isAbsolute(descriptor.scope.root))
+	)
+		return null;
+	if (
+		runtimeTargetId(client, { ...options, scope: descriptor.scope }) !== id ||
+		runtimeSettingsPath(client, { ...options, scope: descriptor.scope }) !== descriptor.settingsPath
+	)
+		return null;
+	if (options.scope && runtimeTargetId(client, options) !== id) return null;
+	return descriptor;
+}
+
+function writeState(directory, state) {
+	if (state.scope?.kind === "local") {
+		const {
+			targets: _targets,
+			credential: _credential,
+			hashKey: _key,
+			signInRef: _signIn,
+			...target
+		} = state;
+		writeRuntimeJSON(directory, targetStateName(state.targetId), target);
+	} else writeRuntimeJSON(directory, STATE, state);
+}
+
+function scopedOptions(state, options) {
+	return { ...options, scope: state.scope ?? { kind: "global" }, targetId: state.targetId };
+}
+
+function observesHere(state, options, input) {
+	return runtimeScopeMatches(state.scope, { cwd: options.cwd, inputCwd: input?.cwd });
+}
+
+function invalidateMovedContext(client, options) {
+	const state = readState(client, options);
+	if (state?.scope.kind !== "local") return;
+	try {
+		const now = time(options);
+		const events = Object.entries(state.nativeSessions ?? {}).flatMap(([sessionRef, selected]) => {
+			if (!selected?.generation) return [];
+			return [
+				parseRuntimeEvent({
+					eventId: randomUUID(),
+					observedAt: iso(now),
+					sessionRef,
+					episodeRef: runtimeRef(state.hashKey, "native-lifecycle", randomUUID()),
+					kind: "session_state",
+					ancestry: "unknown",
+					invalidateGeneration: selected.generation,
+					lifecycle: "ambiguous",
+				}),
+			];
+		});
+		// Separate tombstone fences an observer that currently holds the shared lock.
+		writeRuntimeJSON(clientDirectory(client, options), `context-${state.targetId}.json`, {
+			revision: randomUUID(),
+			events: retainInvalidations(state.pendingInvalidations, events),
+		});
+	} catch {
+		/* Unsafe private storage is already unavailable to readState. */
+	}
+}
+
+function existingTargets(base, client, options) {
+	if (base.targets && typeof base.targets === "object" && !Array.isArray(base.targets))
+		return { ...base.targets };
+	const global = targetDescriptor(client, { ...options, scope: { kind: "global" } });
+	return { [global.id]: global };
+}
+
+function ensureClientParent(client, options) {
+	const profile = runtimeProfileId(client, options);
+	if (!profile) return;
+	for (const path of [join(root(options), "profiles")]) {
+		if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+		privatePath(path, true);
+	}
+}
+
+/** Attach a scope to an already approved enrollment; no browser or server request is made. */
+export async function attachRuntimeTarget(client, hookPath, options = {}) {
+	if (!validClient(client) || typeof hookPath !== "string" || options.canActivate?.() === false)
+		return false;
+	const base = readEnrollment(client, options);
+	if (!base) return false;
+	const directory = clientDirectory(client, options);
+	try {
+		return (
+			(await withChoiceLock(client, options, () =>
+				runtimeLock(
+					directory,
+					() => {
+						const current = readEnrollment(client, options);
+						if (
+							!current ||
+							current.generation !== base.generation ||
+							options.canActivate?.() === false
+						)
+							return false;
+						const descriptor = targetDescriptor(client, options);
+						const targets = existingTargets(current, client, options);
+						if (!targets[descriptor.id] && Object.keys(targets).length >= MAX_TARGETS) return false;
+						const previous = readState(client, options);
+						const unchanged =
+							previous?.hookPath === hookPath &&
+							previous.node === (options.node ?? process.execPath) &&
+							previous.clientBuild === runtimeBuild(options.clientBuild) &&
+							previous.proxyBuild === runtimeBuild(options.proxyBuild);
+						const target = {
+							...(previous ?? {}),
+							installationId: current.installationId,
+							generation: current.generation,
+							client,
+							policyVersion: current.policyVersion,
+							server: current.server,
+							activatedAt: current.activatedAt,
+							expiresAt: current.expiresAt,
+							metadataVersion: current.metadataVersion,
+							targetId: descriptor.id,
+							scope: descriptor.scope,
+							settingsPath: descriptor.settingsPath,
+							hookPath,
+							node: options.node ?? process.execPath,
+							clientBuild: runtimeBuild(options.clientBuild),
+							proxyBuild: runtimeBuild(options.proxyBuild),
+							...(unchanged
+								? {}
+								: {
+										nativeRegistration: nativeRegistration(
+											client,
+											runtimeBuild(options.clientBuild),
+											runtimeBuild(options.proxyBuild),
+											time(options),
+											current.metadataVersion,
+										),
+										nativeSessions: {},
+										sessions: {},
+									}),
+						};
+						const before = { ...targets };
+						targets[descriptor.id] = descriptor;
+						if (descriptor.scope.kind === "local") writeState(directory, target);
+						// Ownership is durable before the native hook can become active.
+						writeRuntimeJSON(directory, STATE, {
+							...current,
+							...(descriptor.scope.kind === "global" ? target : {}),
+							targets,
+						});
+						try {
+							syncRuntimeHooks(client, hookPath, {
+								...options,
+								settingsPath: descriptor.settingsPath,
+								targetId: descriptor.scope.kind === "local" ? descriptor.id : undefined,
+								generation: current.generation,
+								metadataVersion: current.metadataVersion,
+							});
+						} catch (error) {
+							writeRuntimeJSON(directory, STATE, { ...current, targets: before });
+							if (descriptor.scope.kind === "local") {
+								if (previous) writeState(directory, previous);
+								else rmSync(join(directory, targetStateName(descriptor.id)), { force: true });
+							}
+							throw error;
+						}
+						writeRuntimeJSON(
+							directory,
+							descriptor.scope.kind === "local" ? `status-${descriptor.id}.json` : STATUS,
+							{
+								installationId: current.installationId,
+								generation: current.generation,
+								expiresAt: current.expiresAt,
+							},
+						);
+						return true;
+					},
+					time(options),
+				),
+			)) === true
+		);
+	} catch {
+		return false;
+	}
+}
 
 function serverOrigin(value) {
 	try {
@@ -110,7 +369,7 @@ function pathExists(path) {
 }
 
 function readChoice(client, options) {
-	const path = join(root(options), choiceName(client));
+	const path = join(root(options), choiceName(client, options));
 	if (!pathExists(path)) return null;
 	const choice = readRuntimeJSON(path, 256);
 	if (!runtimeUuid(choice?.revision) || typeof choice.disabled !== "boolean")
@@ -141,7 +400,7 @@ function automaticRuntimeAvailable(client, options) {
 	return (
 		!readChoice(client, options) &&
 		!pathExists(clientDirectory(client, options)) &&
-		!pathExists(join(root(options), pendingName(client))) &&
+		!pathExists(join(root(options), pendingName(client, options))) &&
 		supportsAutomaticRuntimeHooks(client, options)
 	);
 }
@@ -163,36 +422,107 @@ export function automaticRuntimeIntent(client, options = {}) {
 	}
 }
 
-function readState(client, options) {
+// Cleanup needs ownership even after the enrollment can no longer collect.
+function readOwnedEnrollment(client, options) {
 	if (!validClient(client)) return null;
 	try {
 		privatePath(join(options.home ?? homedir(), ".pharaoh"), true);
 		privatePath(root(options), true);
-		if (readChoice(client, options)?.disabled) return null;
 		const directory = clientDirectory(client, options);
 		privatePath(directory, true);
 		const value = readRuntimeJSON(join(directory, STATE), 65_536);
+		return validIdentity(value) &&
+			value.client === client &&
+			(options.generation === undefined || options.generation === value.generation) &&
+			(value.profileSettingsPath ?? value.settingsPath) === runtimeProfilePath(client, options)
+			? value
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+function readEnrollment(client, options) {
+	try {
+		const value = readOwnedEnrollment(client, options);
 		if (
-			!validIdentity(value) ||
+			!value ||
+			readChoice(client, options)?.disabled ||
 			value.policyVersion !== RUNTIME_POLICY_VERSION ||
-			value.client !== client ||
 			typeof value.credential !== "string" ||
 			!SECRET.test(value.credential) ||
 			typeof value.hashKey !== "string" ||
 			!KEY.test(value.hashKey) ||
-			value.settingsPath !== runtimeSettingsPath(client, options) ||
 			!matchesSignIn(value, readOAuthCredentials(options)) ||
 			!Number.isFinite(Date.parse(value.activatedAt)) ||
 			(value.expiresAt !== null && !(Date.parse(value.expiresAt) > time(options)))
 		)
 			return null;
-		if (options.hookPath && options.hookPath !== value.hookPath) return null;
 		if (options.generation !== undefined && options.generation !== value.generation) return null;
-		const pending = readRuntimeJSON(join(root(options), pendingName(client)));
+		const pending = readRuntimeJSON(join(root(options), pendingName(client, options)));
 		return pending?.generation === value.generation ? null : value;
 	} catch {
 		return null;
 	}
+}
+
+function readState(client, options) {
+	const enrollment = readEnrollment(client, options);
+	if (!enrollment) return null;
+	const descriptor = activation(enrollment, client, options);
+	if (!descriptor) return null;
+	let state = enrollment;
+	if (descriptor.scope.kind === "local") {
+		state = readRuntimeJSON(
+			join(clientDirectory(client, options), targetStateName(descriptor.id)),
+			65_536,
+		);
+		if (
+			!state ||
+			state.targetId !== descriptor.id ||
+			state.installationId !== enrollment.installationId ||
+			state.generation !== enrollment.generation ||
+			state.settingsPath !== descriptor.settingsPath
+		)
+			return null;
+		// Distinct references prevent a session/turn identifier from joining evidence in another target.
+		const hashKey = runtimeRef(enrollment.hashKey, "activation", descriptor.id);
+		state = {
+			...state,
+			credential: enrollment.credential,
+			hashKey,
+			signInRef: runtimeRef(hashKey, "sign-in", readOAuthCredentials(options)?.runtime_session),
+		};
+	}
+	if (options.hookPath && options.hookPath !== state.hookPath) return null;
+	if (state.settingsPath !== descriptor.settingsPath) return null;
+	if (descriptor.scope.kind === "local") {
+		const movement = readRuntimeJSON(
+			join(clientDirectory(client, options), `context-${descriptor.id}.json`),
+		);
+		if (runtimeUuid(movement?.revision) && movement.revision !== state.contextRevision)
+			state = {
+				...state,
+				contextRevision: movement.revision,
+				sessions: {},
+				nativeSessions: {},
+				receipts: {},
+				selection: undefined,
+				pendingInvalidations: retainInvalidations(
+					state.pendingInvalidations,
+					Array.isArray(movement.events)
+						? movement.events.flatMap((event) => {
+								try {
+									return [parseRuntimeEvent(event)];
+								} catch {
+									return [];
+								}
+							})
+						: [],
+				),
+			};
+	}
+	return { ...state, targetId: descriptor.id, scope: descriptor.scope };
 }
 
 function control(state) {
@@ -326,13 +656,15 @@ export function runtimeStatus(client, options = {}) {
 	let pending;
 	let status;
 	let disabled;
+	let enrollment;
 	try {
 		privatePath(join(options.home ?? homedir(), ".pharaoh"), true);
 		privatePath(root(options), true);
-		pending = readRuntimeJSON(join(root(options), pendingName(client)));
+		pending = readRuntimeJSON(join(root(options), pendingName(client, options)));
 		disabled = readChoice(client, options)?.disabled;
+		enrollment = readEnrollment(client, options);
 		privatePath(clientDirectory(client, options), true);
-		status = readRuntimeJSON(join(clientDirectory(client, options), STATUS));
+		status = readRuntimeJSON(join(clientDirectory(client, options), statusName(client, options)));
 		if (
 			runtimeUuid(status?.installationId) &&
 			runtimeUuid(status?.generation) &&
@@ -345,14 +677,24 @@ export function runtimeStatus(client, options = {}) {
 		/* Doctor reports finite status only. */
 	}
 	return {
-		consent: state
-			? "active"
-			: validIdentity(pending)
-				? "revocation_pending"
-				: status && !disabled
-					? "paused"
-					: "off",
-		...(state && { installationId: state.installationId, generation: state.generation }),
+		consent:
+			state || enrollment
+				? "active"
+				: validIdentity(pending)
+					? "revocation_pending"
+					: status && !disabled
+						? "paused"
+						: "off",
+		...((state || enrollment) && {
+			installationId: (state || enrollment).installationId,
+			generation: (state || enrollment).generation,
+		}),
+		...(enrollment && {
+			activation: state ? "active" : "absent",
+			activeTargets: Object.values(existingTargets(enrollment, client, options)).filter(
+				(target) => target.committed !== false,
+			).length,
+		}),
 		receiptCoverage: state ? (state.receiptObserved ? "observed" : "unobserved") : "unsupported",
 		tokenCoverage:
 			client === "codex" && state
@@ -367,7 +709,11 @@ export function runtimeStatus(client, options = {}) {
 export function runtimeRequestMetadata(clientName, options = {}) {
 	const client = runtimeClient(clientName);
 	const state = client && readState(client, options);
-	return state
+	if (state && !observesHere(state, options)) {
+		invalidateMovedContext(client, options);
+		return undefined;
+	}
+	return state && observesHere(state, options)
 		? {
 				server: state.server,
 				metadata: {
@@ -379,6 +725,44 @@ export function runtimeRequestMetadata(clientName, options = {}) {
 		: undefined;
 }
 
+/** Bind the exact opaque server receipt to the target that received it. Nothing is sent here. */
+export function recordRuntimeReceipt(clientName, result, options = {}) {
+	try {
+		const client = runtimeClient(clientName);
+		const state = client && readState(client, options);
+		if (!state || !observesHere(state, options)) return false;
+		if (state.scope.kind !== "local") return true;
+		const receipt = extractRuntimeReceipt(result, time(options));
+		if (!receipt) return false;
+		return (
+			runtimeLock(
+				clientDirectory(client, options),
+				() => {
+					const current = readState(client, options);
+					if (
+						!current ||
+						current.generation !== state.generation ||
+						!observesHere(current, options)
+					)
+						return false;
+					const receipts = Object.fromEntries(
+						Object.entries(current.receipts ?? {})
+							.filter(([, expires]) => Date.parse(expires) > time(options))
+							.slice(-MAX_QUEUE + 1),
+					);
+					receipts[receipt.receipt] = receipt.expiresAt;
+					writeState(clientDirectory(client, options), { ...current, receipts });
+					return true;
+				},
+				time(options),
+			) === true
+		);
+	} catch {
+		// Optional receipt storage must not replace an already answered tool call.
+		return false;
+	}
+}
+
 /** Refresh installation evidence outside hooks, at most daily; never upgrade registered capability.
  * @param clientName - Negotiated local client label, not a model-supplied tool argument.
  * @param discover - Bounded executable/package build discovery run only when stale.
@@ -387,7 +771,8 @@ export function runtimeRequestMetadata(clientName, options = {}) {
  */
 export function refreshRuntimeBuildEvidence(clientName, discover, options = {}) {
 	const client = runtimeClient(clientName);
-	if (!client || !readState(client, options)) return false;
+	const initial = client && readState(client, options);
+	if (!initial || !observesHere(initial, options)) return false;
 	return (
 		runtimeLock(
 			clientDirectory(client, options),
@@ -405,7 +790,7 @@ export function refreshRuntimeBuildEvidence(clientName, discover, options = {}) 
 					"codex-mcp-client",
 				].includes(clientName?.toLowerCase());
 				if (!managedCli && previous?.capability !== "unsupported") {
-					writeRuntimeJSON(clientDirectory(client, options), STATE, {
+					writeState(clientDirectory(client, options), {
 						...state,
 						nativeRegistration: { ...previous, capability: "unsupported" },
 					});
@@ -418,7 +803,7 @@ export function refreshRuntimeBuildEvidence(clientName, discover, options = {}) 
 				} catch {
 					/* Failed discovery remains explicitly unknown. */
 				}
-				writeRuntimeJSON(clientDirectory(client, options), STATE, {
+				writeState(clientDirectory(client, options), {
 					...state,
 					nativeRegistration: {
 						...previous,
@@ -443,6 +828,8 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 	const approval = options.deviceApproval;
 	const automatic = approval !== undefined;
 	if (automatic && !validDeviceApproval(approval, client, options)) return false;
+	if (!automatic && readEnrollment(client, options) && !readState(client, options))
+		return attachRuntimeTarget(client, hookPath, options);
 	const launch = {
 		hookPath,
 		node: options.node ?? process.execPath,
@@ -458,6 +845,7 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 	)
 		return false;
 	ensureRuntimeRoot(options.home);
+	ensureClientParent(client, options);
 	return (
 		(await runtimeLock(
 			root(options),
@@ -480,7 +868,7 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 									generation: state.generation,
 									metadataVersion: state.metadataVersion,
 								});
-								writeRuntimeJSON(directory, STATE, {
+								writeState(directory, {
 									...state,
 									...launch,
 									nativeRegistration: nativeRegistration(
@@ -505,11 +893,12 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 					client,
 					server,
 					settingsPath,
+					profileSettingsPath: runtimeProfilePath(client, options),
 				};
 				const hashKey = randomBytes(32).toString("hex");
 				const signInRef = runtimeRef(hashKey, "sign-in", credentials.runtime_session);
 				const bound = { ...state, hashKey, signInRef };
-				const pending = join(root(options), pendingName(client));
+				const pending = join(root(options), pendingName(client, options));
 				const available = () => !automatic || options.canActivate?.() !== false;
 				const stillActive = (currentCredentials = readOAuthCredentials(options)) => {
 					const reservation = readRuntimeJSON(pending);
@@ -535,7 +924,10 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 						if (!available() || (automatic && !automaticRuntimeAvailable(client, options)))
 							return false;
 						// Keep the exact undo identity before any request could create server state.
-						writeRuntimeJSON(root(options), pendingName(client), { ...state, enabling: true });
+						writeRuntimeJSON(root(options), pendingName(client, options), {
+							...state,
+							enabling: true,
+						});
 						reserved = true;
 						mkdirSync(directory, { mode: 0o700 });
 						return true;
@@ -564,7 +956,7 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 						return false;
 					return await withChoiceLock(client, options, () => {
 						if (!stillActive()) return false;
-						writeRuntimeJSON(directory, STATE, {
+						const enrolled = {
 							...bound,
 							policyVersion: RUNTIME_POLICY_VERSION,
 							credential: answer.credential,
@@ -580,7 +972,18 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 								answer.metadataVersion === 2 ? 2 : 1,
 							),
 							sessions: {},
+						};
+						const descriptor = targetDescriptor(client, options);
+						writeRuntimeJSON(directory, STATE, {
+							...enrolled,
+							targets: { [descriptor.id]: descriptor },
 						});
+						if (descriptor.scope.kind === "local")
+							writeState(directory, {
+								...enrolled,
+								scope: descriptor.scope,
+								targetId: descriptor.id,
+							});
 						syncRuntimeHooks(client, hookPath, {
 							...options,
 							automatic,
@@ -588,14 +991,14 @@ export async function enableRuntime(client, server, hookPath, options = {}) {
 							generation: state.generation,
 							metadataVersion: answer.metadataVersion === 2 ? 2 : 1,
 						});
-						writeRuntimeJSON(directory, STATUS, {
+						writeRuntimeJSON(directory, statusName(client, options), {
 							installationId: state.installationId,
 							generation: state.generation,
 							expiresAt: answer.expiresAt,
 						});
 						rmSync(pending, { force: true });
 						if (!automatic && choice !== null)
-							writeRuntimeJSON(root(options), choiceName(client), {
+							writeRuntimeJSON(root(options), choiceName(client, options), {
 								revision: randomUUID(),
 								disabled: false,
 							});
@@ -621,7 +1024,7 @@ async function finishRevocation(client, options, hooksRemoved) {
 	} catch (error) {
 		return error.code === "ENOENT";
 	}
-	const path = join(root(options), pendingName(client));
+	const path = join(root(options), pendingName(client, options));
 	const pending = readRuntimeJSON(path);
 	if (!validIdentity(pending) || pending.client !== client) return !existsSync(path);
 	try {
@@ -654,7 +1057,7 @@ async function finishRevocation(client, options, hooksRemoved) {
 
 function removeRuntimeLocally(client, options) {
 	const directory = clientDirectory(client, options);
-	const pending = join(root(options), pendingName(client));
+	const pending = join(root(options), pendingName(client, options));
 	if (!existsSync(directory) && !existsSync(pending)) return true;
 	try {
 		privatePath(join(options.home ?? homedir(), ".pharaoh"), true);
@@ -664,7 +1067,7 @@ function removeRuntimeLocally(client, options) {
 			validIdentity(pendingControl) && pendingControl.client === client ? pendingControl : null;
 		if (owned?.enabling === true) {
 			owned = { ...owned, enabling: false };
-			writeRuntimeJSON(root(options), pendingName(client), owned);
+			writeRuntimeJSON(root(options), pendingName(client, options), owned);
 		}
 		if (existsSync(directory)) {
 			privatePath(directory, true);
@@ -678,18 +1081,90 @@ function removeRuntimeLocally(client, options) {
 					client,
 					server: state.server,
 					settingsPath: state.settingsPath,
+					targets: Object.values(existingTargets(state, client, options)),
 				};
-				writeRuntimeJSON(root(options), pendingName(client), owned);
+				writeRuntimeJSON(root(options), pendingName(client, options), owned);
 			}
 			rmSync(directory, { recursive: true, force: true });
 		}
-		if (owned)
-			syncRuntimeHooks(client, null, {
-				...options,
-				settingsPath: owned.settingsPath,
-				generation: owned.generation,
-			});
+		if (owned) {
+			for (const target of owned.targets ?? [{ settingsPath: owned.settingsPath }])
+				syncRuntimeHooks(client, null, {
+					...options,
+					scope: target.scope,
+					settingsPath: target.settingsPath,
+					generation: owned.generation,
+				});
+		}
 		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Detach one activation, fencing its sender and deleting only its unsent observations. */
+export async function detachRuntimeTarget(client, options = {}) {
+	if (!validClient(client)) return false;
+	let retire = false;
+	try {
+		const directory = clientDirectory(client, options);
+		if (!existsSync(directory)) return await revokeRuntime(client, options);
+		const changed = await withChoiceLock(client, options, () =>
+			runtimeLock(
+				directory,
+				() => {
+					const base = readOwnedEnrollment(client, options);
+					if (!base) return false;
+					const id = targetId(client, options);
+					const targets = existingTargets(base, client, options);
+					const descriptor = targets[id];
+					if (!descriptor) {
+						retire = Object.keys(targets).length === 0;
+						return !retire || removeRuntimeLocally(client, options);
+					}
+					targets[descriptor.id] = { ...descriptor, committed: false };
+					// Remove ownership from committed state first: new intake cannot revive this target.
+					writeRuntimeJSON(directory, STATE, { ...base, targets });
+					writeRuntimeJSON(
+						directory,
+						QUEUE,
+						readQueue(directory, time(options)).filter(
+							(event) =>
+								!isTargetEvent(event, { targetId: descriptor.id, scope: descriptor.scope }),
+						),
+						MAX_QUEUE_BYTES,
+					);
+					const lease = readRuntimeJSON(join(directory, LEASE));
+					if (lease?.targetId === descriptor.id) rmSync(join(directory, LEASE), { force: true });
+					if (descriptor.scope.kind === "local") {
+						rmSync(join(directory, targetStateName(descriptor.id)), { force: true });
+						rmSync(join(directory, `context-${descriptor.id}.json`), { force: true });
+					}
+					rmSync(
+						join(
+							directory,
+							descriptor.scope.kind === "local" ? `status-${descriptor.id}.json` : STATUS,
+						),
+						{ force: true },
+					);
+					syncRuntimeHooks(client, null, {
+						...options,
+						scope: descriptor.scope,
+						settingsPath: descriptor.settingsPath,
+						generation: base.generation,
+					});
+					delete targets[descriptor.id];
+					writeRuntimeJSON(directory, STATE, { ...base, targets });
+					retire = Object.keys(targets).length === 0;
+					// Retire under the same choice lock: an attach cannot be accepted
+					// between removing the last target and fencing this generation.
+					return !retire || removeRuntimeLocally(client, options);
+				},
+				time(options),
+			),
+		);
+		if (!retire) return changed === true;
+		return (await finishRevocation(client, options, changed === true)) && changed === true;
 	} catch {
 		return false;
 	}
@@ -699,6 +1174,21 @@ function removeRuntimeLocally(client, options) {
 export async function revokeRuntime(client, options = {}) {
 	if (!validClient(client)) return false;
 	try {
+		// A changed profile environment must not strand the only legacy enrollment.
+		if (!options.scope && !existsSync(clientDirectory(client, options))) {
+			const legacy = readRuntimeJSON(join(root(options), client, STATE), 65_536);
+			if (validIdentity(legacy) && legacy.client === client) {
+				const profilePath = legacy.profileSettingsPath ?? legacy.settingsPath;
+				if (typeof profilePath === "string" && isAbsolute(profilePath))
+					options = {
+						...options,
+						env: {
+							...(options.env ?? process.env),
+							[client === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]: dirname(profilePath),
+						},
+					};
+			}
+		}
 		if (!pathExists(root(options))) return true;
 		privatePath(join(options.home ?? homedir(), ".pharaoh"), true);
 		const removed = await withChoiceLock(client, options, () =>
@@ -719,7 +1209,7 @@ export async function disableRuntime(client, options = {}) {
 	try {
 		ensureRuntimeRoot(options.home);
 		const removed = await withChoiceLock(client, options, () => {
-			writeRuntimeJSON(root(options), choiceName(client), {
+			writeRuntimeJSON(root(options), choiceName(client, options), {
 				revision: randomUUID(),
 				disabled: true,
 			});
@@ -752,7 +1242,7 @@ export function selectRuntimeProfile(client, profileId, options = {}) {
 				installationId: state.installationId,
 				generation: state.generation,
 			};
-			writeRuntimeJSON(directory, STATE, {
+			writeState(directory, {
 				...state,
 				selection: { ...selection, controlled: options.controlled === true },
 			});
@@ -837,8 +1327,14 @@ function readQueue(directory, now, persistPrune = false) {
 	const parsed = Array.isArray(source)
 		? source.flatMap((value) => {
 				try {
-					const event = parseRuntimeEvent(value);
-					return [event];
+					const { __targetId, ...wire } = value;
+					const event = parseRuntimeEvent(wire);
+					return [
+						{
+							...event,
+							...(typeof __targetId === "string" && REF.test(__targetId) ? { __targetId } : {}),
+						},
+					];
 				} catch {
 					return [];
 				}
@@ -854,24 +1350,42 @@ function readQueue(directory, now, persistPrune = false) {
 		: parsed;
 	if (persistPrune && Array.isArray(source) && queue.length !== source.length) {
 		const kept = new Set(queue.map((event) => event.eventId));
-		const lost = parsed
-			.filter((event) => !kept.has(event.eventId))
-			.flatMap((event) => invalidationForDropped(event, now));
-		const state = readRuntimeJSON(join(directory, STATE), 65_536);
-		if (state && lost.length)
-			writeRuntimeJSON(directory, STATE, {
-				...state,
-				pendingInvalidations: retainInvalidations(state.pendingInvalidations, lost),
-			});
+		for (const event of parsed.filter((entry) => !kept.has(entry.eventId)))
+			persistDroppedInvalidation(directory, event, now);
 		writeRuntimeJSON(directory, QUEUE, queue, MAX_QUEUE_BYTES);
 	}
 	return queue;
 }
 
+function isTargetEvent(event, state) {
+	return event.__targetId ? event.__targetId === state.targetId : state.scope?.kind !== "local";
+}
+
+function persistDroppedInvalidation(directory, event, now) {
+	const enrollment = readRuntimeJSON(join(directory, STATE), 65_536);
+	const descriptor = event.__targetId && enrollment?.targets?.[event.__targetId];
+	const local = descriptor?.scope?.kind === "local";
+	const state = local
+		? readRuntimeJSON(join(directory, targetStateName(event.__targetId)), 65_536)
+		: enrollment;
+	const invalidations = invalidationForDropped(event, now);
+	if (!state || !invalidations.length) return;
+	writeState(directory, {
+		...state,
+		...(local ? { scope: descriptor.scope, targetId: descriptor.id } : {}),
+		pendingInvalidations: retainInvalidations(state.pendingInvalidations, invalidations),
+	});
+}
+
 /** Convert one native callback into a bounded private event, never a transcript record. */
 export function recordRuntimeHook(client, input, options = {}) {
 	const now = time(options);
-	if (!validClient(client) || !readState(client, options)) return false;
+	const initial = validClient(client) && readState(client, options);
+	if (!initial) return false;
+	if (!observesHere(initial, options, input)) {
+		invalidateMovedContext(client, options);
+		return false;
+	}
 	const nativeSession = nativeIdentifier(input?.session_id);
 	if (!nativeSession) return false;
 	const directory = clientDirectory(client, options);
@@ -880,9 +1394,15 @@ export function recordRuntimeHook(client, input, options = {}) {
 			directory,
 			() => {
 				let state = readState(client, options);
-				if (!state) return false;
+				if (!state || !observesHere(state, options, input)) return false;
 				const observation = nativeObservation(input, client, state.hashKey, now, options);
 				if (!observation) return false;
+				if (state.scope.kind === "local" && observation.receipt) {
+					const receipts = { ...(state.receipts ?? {}) };
+					if (!(Date.parse(receipts[observation.receipt]) > now)) delete observation.receipt;
+					else delete receipts[observation.receipt];
+					state = { ...state, receipts };
+				}
 				const sessionRef = runtimeRef(state.hashKey, "session", nativeSession);
 				const nativeTurn =
 					client === "codex"
@@ -950,7 +1470,7 @@ export function recordRuntimeHook(client, input, options = {}) {
 						nativeSessions,
 						pendingInvalidations: retainInvalidations(state.pendingInvalidations, lifecycleEvents),
 					};
-					writeRuntimeJSON(directory, STATE, state);
+					writeState(directory, state);
 				}
 				const sessions = Object.fromEntries(
 					Object.entries(state.sessions ?? {})
@@ -962,7 +1482,7 @@ export function recordRuntimeHook(client, input, options = {}) {
 				if (observation.boundary === "session" || observation.boundary === "switch") {
 					// Resume can retain the same native ID; never reuse its earlier turn implicitly.
 					delete sessions[sessionRef];
-					writeRuntimeJSON(directory, STATE, { ...state, sessions });
+					writeState(directory, { ...state, sessions });
 					return queuedInvalidation;
 				}
 				const start = observation.kind === "episode_start";
@@ -1014,7 +1534,7 @@ export function recordRuntimeHook(client, input, options = {}) {
 					...(exploration && { exploration }),
 				});
 				const queue = readQueue(directory, now);
-				queue.push(event);
+				queue.push({ ...event, __targetId: state.targetId });
 				if (queue.length > MAX_QUEUE) {
 					const oldest = queue.reduce(
 						(index, item, position) =>
@@ -1022,13 +1542,15 @@ export function recordRuntimeHook(client, input, options = {}) {
 						0,
 					);
 					const dropped = queue.splice(oldest, 1)[0];
-					state = {
-						...state,
-						pendingInvalidations: retainInvalidations(
-							state.pendingInvalidations,
-							invalidationForDropped(dropped, now),
-						),
-					};
+					if (isTargetEvent(dropped, state))
+						state = {
+							...state,
+							pendingInvalidations: retainInvalidations(
+								state.pendingInvalidations,
+								invalidationForDropped(dropped, now),
+							),
+						};
+					else persistDroppedInvalidation(directory, dropped, now);
 				}
 				const receiptObserved = state.receiptObserved || Boolean(event.receipt);
 				const usageObserved =
@@ -1036,7 +1558,7 @@ export function recordRuntimeHook(client, input, options = {}) {
 					Boolean(event.tokens && Object.values(event.tokens).some((value) => value !== null));
 				// Consume selection before the spool write. An interrupted write may lose coverage,
 				// but cannot attach the same owner selection to a second episode.
-				writeRuntimeJSON(directory, STATE, {
+				writeState(directory, {
 					...state,
 					sessions,
 					selection,
@@ -1048,7 +1570,7 @@ export function recordRuntimeHook(client, input, options = {}) {
 					receiptObserved !== Boolean(state.receiptObserved) ||
 					usageObserved !== Boolean(state.usageObserved)
 				)
-					writeRuntimeJSON(directory, STATUS, {
+					writeRuntimeJSON(directory, statusName(client, scopedOptions(state, options)), {
 						installationId: state.installationId,
 						generation: state.generation,
 						expiresAt: state.expiresAt,
@@ -1064,7 +1586,8 @@ export function recordRuntimeHook(client, input, options = {}) {
 
 /** Claim one short delivery lease without blocking a hook or spawning duplicate senders. */
 export function claimRuntimeDelivery(client, options = {}) {
-	if (!validClient(client) || !readState(client, options)) return null;
+	const initial = validClient(client) && readState(client, options);
+	if (!initial || !observesHere(initial, options)) return null;
 	const directory = clientDirectory(client, options);
 	return runtimeLock(
 		directory,
@@ -1074,11 +1597,13 @@ export function claimRuntimeDelivery(client, options = {}) {
 			const now = time(options);
 			const lease = readRuntimeJSON(join(directory, LEASE));
 			if (lease?.expires > now) return null;
-			const ordinary = readQueue(directory, now, true);
+			const ordinary = readQueue(directory, now, true).filter((event) =>
+				isTargetEvent(event, state),
+			);
 			if (!ordinary.length && !readState(client, options)?.pendingInvalidations?.length)
 				return null;
 			const id = randomUUID();
-			writeRuntimeJSON(directory, LEASE, { id, expires: now + 60_000 });
+			writeRuntimeJSON(directory, LEASE, { id, targetId: state.targetId, expires: now + 60_000 });
 			return id;
 		},
 		time(options),
@@ -1090,7 +1615,12 @@ export async function flushRuntimeQueue(client, leaseId, options = {}) {
 	if (!validClient(client) || !runtimeUuid(leaseId)) return;
 	const directory = clientDirectory(client, options);
 	const state = readState(client, options);
-	if (!state || readRuntimeJSON(join(directory, LEASE))?.id !== leaseId) return;
+	if (
+		!state ||
+		!observesHere(state, options) ||
+		readRuntimeJSON(join(directory, LEASE))?.id !== leaseId
+	)
+		return;
 	const stillActive = (credentials) =>
 		readState(client, options)?.generation === state.generation &&
 		readRuntimeJSON(join(directory, LEASE))?.id === leaseId &&
@@ -1109,13 +1639,16 @@ export async function flushRuntimeQueue(client, leaseId, options = {}) {
 				directory,
 				() => {
 					if (!stillActive()) return null;
-					const ordinary = readQueue(directory, time(options), true);
+					const ordinary = readQueue(directory, time(options), true).filter((event) =>
+						isTargetEvent(event, state),
+					);
 					return [...(readState(client, options)?.pendingInvalidations ?? []), ...ordinary];
 				},
 				time(options),
 			);
 			for (const event of (queue ?? []).slice(0, BATCH_SIZE)) {
-				body.events.push(event);
+				const { __targetId: _privateTarget, ...wire } = event;
+				body.events.push(wire);
 				if (Buffer.byteLength(JSON.stringify(body)) > BATCH_BYTES) {
 					body.events.pop();
 					break;
@@ -1123,6 +1656,8 @@ export async function flushRuntimeQueue(client, leaseId, options = {}) {
 			}
 			const { events } = body;
 			if (!events.length) return;
+			// Intake uses a nonblocking lock; never hold it while OAuth or HTTP waits.
+			// request rechecks the generation and lease immediately before dispatch.
 			const result = await request(
 				state.server,
 				"/api/runtime/events",
@@ -1198,7 +1733,7 @@ export async function flushRuntimeQueue(client, leaseId, options = {}) {
 									registration = { ...registration, capability: "unsupported" };
 								}
 							}
-							writeRuntimeJSON(directory, STATE, {
+							writeState(directory, {
 								...current,
 								pendingInvalidations: (current.pendingInvalidations ?? []).filter(
 									(event) => !accepted.has(event.eventId),

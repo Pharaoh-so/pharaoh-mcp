@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { shellWord } from "./local.mjs";
+import { memoryInstallScope, memoryScopeKey } from "./install-scope.mjs";
 
 const EVENTS = {
 	"claude-code": ["UserPromptSubmit", "Stop", "StopFailure", "SessionEnd"],
@@ -26,7 +27,12 @@ function matchesLegacyHook(client, root) {
 	return (value) => value.includes("pharaoh-memory-hook.mjs") && value.endsWith(suffix);
 }
 
-function matchesUserHook(value) {
+function matchesUserHook(value, scope = memoryInstallScope()) {
+	if (scope?.kind === "local")
+		return (
+			value.includes("pharaoh-memory-hook.mjs") &&
+			value.endsWith(` # pharaoh-project-memory:local-v1:${memoryScopeKey(scope)}`)
+		);
 	return (
 		value.includes("pharaoh-memory-hook.mjs") &&
 		(value.endsWith(` ${GLOBAL_MARKER}`) || LEGACY_MARKER.test(value))
@@ -89,14 +95,19 @@ export function updateUserHooks(
 	graphCues = false,
 	diagnostics = false,
 	capture = true,
+	scope = memoryInstallScope(),
 ) {
 	const additions = {};
 	const add = (event, entry) => {
 		additions[event] = additions[event] ? [additions[event], entry].flat() : entry;
 	};
 	if (hookPath) {
+		const marker =
+			scope?.kind === "local"
+				? `# pharaoh-project-memory:local-v1:${memoryScopeKey(scope)}`
+				: GLOBAL_MARKER;
 		const command = (mode) =>
-			`${[node, hookPath, client, mode].map(shellWord).join(" ")} ${GLOBAL_MARKER}`;
+			`${[node, hookPath, client, mode, ...(scope?.kind === "local" ? ["--install-root", scope.root] : [])].map(shellWord).join(" ")} ${marker}`;
 		additions.UserPromptSubmit = group(command("--user"));
 		if (diagnostics) {
 			const diagnostic = command("--diagnostics");
@@ -129,9 +140,15 @@ export function updateUserHooks(
 		}
 	}
 	const toolEvents = TOOL_EVENTS.filter(
-		(event) => additions[event] || hasHooks(config, [event], matchesUserHook),
+		(event) =>
+			additions[event] || hasHooks(config, [event], (value) => matchesUserHook(value, scope)),
 	);
-	return replaceHooks(config, [...EVENTS[client], ...toolEvents], matchesUserHook, additions);
+	return replaceHooks(
+		config,
+		[...EVENTS[client], ...toolEvents],
+		(value) => matchesUserHook(value, scope),
+		additions,
+	);
 }
 
 function hasHooks(config, events, matches) {
@@ -151,35 +168,41 @@ export function hasLegacyHooks(config, client, root) {
 	return hasHooks(config, EVENTS[client], matchesLegacyHook(client, root));
 }
 
-export function hasUserHooks(config, client) {
-	return hasHooks(config, [...EVENTS[client], ...TOOL_EVENTS], matchesUserHook);
+export function hasUserHooks(config, client, scope = memoryInstallScope()) {
+	return hasHooks(config, [...EVENTS[client], ...TOOL_EVENTS], (value) =>
+		matchesUserHook(value, scope),
+	);
 }
 
 /** Whether Pharaoh's edit-time memory cue (a PostToolUse `--graph` entry) is installed. */
-export function hasMemoryCueHook(config) {
-	return hasUserHookMode(config, ["PostToolUse"], "--graph");
+export function hasMemoryCueHook(config, scope) {
+	return hasUserHookMode(config, ["PostToolUse"], "--graph", scope);
 }
 
 /** Whether Pharaoh's automatic capture (a Stop `--capture` entry) is installed. */
-export function hasCaptureHook(config) {
-	return hasUserHookMode(config, ["Stop"], "--capture");
+export function hasCaptureHook(config, scope) {
+	return hasUserHookMode(config, ["Stop"], "--capture", scope);
 }
 
 /** Whether a Pharaoh user hook in one mode (`--graph`, `--capture`, `--diagnostics`) runs on `events`. */
-export function hasUserHookMode(config, events, mode) {
+export function hasUserHookMode(config, events, mode, scope) {
 	const flag = shellWord(mode);
-	return hasHooks(config, events, (command) => matchesUserHook(command) && command.includes(flag));
+	return hasHooks(
+		config,
+		events,
+		(command) => matchesUserHook(command, scope) && command.includes(flag),
+	);
 }
 
 /**
  * Whether both structural cue hooks are installed: the PreToolUse grep hook and the
  * PostToolUse group that also follows the codebase map. Removing either turns them off.
  */
-export function hasStructuralCueHooks(config, client) {
+export function hasStructuralCueHooks(config, client, scope) {
 	const cue = shellWord("--graph");
-	const graph = (command) => matchesUserHook(command) && command.includes(cue);
+	const graph = (command) => matchesUserHook(command, scope) && command.includes(cue);
 	return (
-		hasUserHooks({ hooks: { PreToolUse: config?.hooks?.PreToolUse } }, client) &&
+		hasUserHooks({ hooks: { PreToolUse: config?.hooks?.PreToolUse } }, client, scope) &&
 		Array.isArray(config?.hooks?.PostToolUse) &&
 		config.hooks.PostToolUse.some(
 			(group) =>

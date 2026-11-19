@@ -1,0 +1,29 @@
+{
+  "clientInfo": { "name": "codex-mcp-client", "version": "0.166.0", "title": "Codex" },
+  "evidence": {
+    "kind": "sanitized-interactive-transport-shape",
+    "upstreamCommit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+    "source": "https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/hooks/src/schema.rs",
+    "observed": ["SubagentStart child agent_id and root session_id", "PostToolUse shell payload tool_name is Bash", "initial and later additionalContext were present in child output"],
+    "synthetic": ["identifiers", "cwd", "tool input and response contents"]
+  },
+  "start": {
+    "hook_event_name": "SubagentStart",
+    "session_id": "11111111-1111-4111-8111-111111111111",
+    "agent_id": "22222222-2222-4222-8222-222222222222",
+    "agent_type": "default",
+    "turn_id": "33333333-3333-4333-8333-333333333333",
+    "cwd": "/fixture/repo"
+  },
+  "checkpoint": {
+    "hook_event_name": "PostToolUse",
+    "session_id": "11111111-1111-4111-8111-111111111111",
+    "agent_id": "22222222-2222-4222-8222-222222222222",
+    "agent_type": "default",
+    "turn_id": "33333333-3333-4333-8333-333333333333",
+    "cwd": "/fixture/repo",
+    "tool_name": "Bash",
+    "tool_input": { "command": "git status --short" },
+    "tool_response": { "stdout": "", "stderr": "", "exit_code": 0 }
+  }
+}

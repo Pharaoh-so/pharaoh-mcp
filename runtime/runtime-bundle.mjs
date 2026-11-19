@@ -13,6 +13,7 @@ const FILES = [
 	"runtime-native.mjs",
 	"runtime-metadata.mjs",
 	"runtime-storage.mjs",
+	"runtime-scope.mjs",
 	"update-notice.mjs",
 ];
 

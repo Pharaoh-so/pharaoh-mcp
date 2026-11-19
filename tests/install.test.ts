@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/runtime-client.mjs";
 import { syncUpdateNoticeHook, updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
@@ -24,6 +25,7 @@ import {
 } from "../runtime/update-notice.mjs";
 import { activationBox, pollOnce, requestDeviceCode } from "../src/auth.js";
 import { restartDesktop } from "../src/client-install.js";
+import { gitWorktreeRoot, resolveInstallScope } from "../src/install-scope.js";
 import type { Credentials } from "../src/credentials.js";
 import { abortOnEnter, askYesNo, printLines, showProgress } from "../src/helpers.js";
 import {
@@ -36,13 +38,14 @@ import {
 	startAgent,
 } from "../src/install.js";
 import { allowReadTools } from "../src/install-skills.js";
-import type { ClientTarget, LaunchConfig } from "../src/install-types.js";
+import type { ClientTarget, InstallScope, LaunchConfig } from "../src/install-types.js";
 import { RuntimeSetupError } from "../src/runtime.js";
 import {
 	configureClients,
 	discoverClients,
 	freshRuntimeClients,
 	legacyMigrations,
+	preflightInstallScope,
 	verifiedCodingClients,
 } from "../src/setup.js";
 import { SETUP_TOOL_PROMPT } from "../src/setup-prompt.generated.js";
@@ -112,14 +115,18 @@ describe("NPX developer install", () => {
 		return {
 			server: "https://mcp.pharaoh.so",
 			interactive: false,
+			scope: "global",
 			...overrides,
 			dependencies: {
 				discover: () => discoverClients(clientOptions),
 				migrations: (targets) => legacyMigrations(targets, clientOptions),
+				preflightScope: (targets, scope) =>
+					preflightInstallScope(targets, { ...clientOptions, scope }),
 				authenticate: async () => ({ credentials: CREDENTIALS }),
 				freshRuntimeClients: (targets) => freshRuntimeClients(targets, clientOptions),
 				verifiedRuntimeClients: (flags) => verifiedCodingClients({ ...clientOptions, ...flags }),
 				runtimeIntent: () => null,
+				attachRuntime: async () => false,
 				runtime: async () => launch,
 				// Registration writes the files; a CLI only marks an agent the installer can start.
 				configure: (targets, config, flags) =>
@@ -165,7 +172,18 @@ describe("NPX developer install", () => {
 		expect(status).toBe(0);
 		expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"))).toEqual({
 			theme: "dark",
-			mcpServers: { pharaoh: launch },
+			mcpServers: {
+				pharaoh: {
+					command: launch.command,
+					args: [
+						...launch.args,
+						"--feed-client",
+						"claude-code",
+						"--feed-registration",
+						expect.any(String),
+					],
+				},
+			},
 		});
 		const codex = readFileSync(join(home, ".codex", "config.toml"), "utf8");
 		expect(codex).toContain('model = "fixture-model"');
@@ -174,6 +192,165 @@ describe("NPX developer install", () => {
 		expect(active).toEqual(["claude-code", "codex"]);
 		// The user receives the complete investigation request, not only a setup command.
 		expect(output.join("\n")).toContain(SETUP_TOOL_PROMPT);
+	});
+
+	it("cancels the scope picker before authentication, runtime preparation or writes", async () => {
+		const authenticate = vi.fn(async () => ({ credentials: CREDENTIALS }));
+		const runtime = vi.fn(async () => launch);
+		const configured = vi.fn(() => []);
+		expect(
+			await runInstall(
+				options({
+					scope: undefined,
+					interactive: true,
+					dependencies: { choose: async () => null, authenticate, runtime, configure: configured },
+				}),
+			),
+		).toBe(0);
+		expect(authenticate).not.toHaveBeenCalled();
+		expect(runtime).not.toHaveBeenCalled();
+		expect(configured).not.toHaveBeenCalled();
+		expect(existsSync(join(home, ".claude.json"))).toBe(false);
+	});
+
+	it("passes the resolved Local scope into registration, extras and runtime enrollment", async () => {
+		const root = join(home, "Mixed Case Project");
+		mkdirSync(root);
+		let extraScope: unknown;
+		const intent = vi.fn(() => CLAUDE_INTENT);
+		const enabled = vi.fn(async () => true);
+		const status = await runInstall(
+			options({
+				scope: "local",
+				cwd: join(root, "src"),
+				afterConfigure: async (_credentials, _clients, _note, scope) => {
+					extraScope = scope;
+				},
+				dependencies: {
+					discover: () => [
+						{ client: "claude-code", path: join(home, ".claude.json"), cli: "claude" },
+					],
+					resolveRoot: () => root,
+					configure: (targets, config, flags) =>
+						configureClients(targets, config, { home, ...flags }),
+					runtimeIntent: intent,
+					enableRuntime: enabled,
+					authenticate: async () => ({
+						credentials: { ...CREDENTIALS, runtime_session: RUNTIME_SESSION },
+						runtimeApprovals: [APPROVAL],
+					}),
+					verifiedRuntimeClients: () => ["claude-code"],
+					updateNotice: async () => {},
+				},
+			}),
+		);
+		expect(status).toBe(0);
+		const scope = { kind: "local", root };
+		expect(extraScope).toEqual(scope);
+		expect(intent).toHaveBeenCalledWith("claude-code", { scope });
+		expect(enabled).toHaveBeenCalledWith(
+			"https://mcp.pharaoh.so",
+			APPROVAL,
+			RUNTIME_SESSION,
+			expect.any(Function),
+			{ scope },
+		);
+		const data = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"));
+		expect(data.mcpServers).toBeUndefined();
+		expect(data.projects[root].mcpServers.pharaoh.args).toEqual([
+			"/fixture/pharaoh.js",
+			"--install-scope",
+			"local",
+			"--install-root",
+			root,
+			"--feed-client",
+			"claude-code",
+			"--feed-registration",
+			expect.any(String),
+		]);
+	});
+
+	it("keeps unavailable clients out of both Local preflights without changing their settings", async () => {
+		const root = join(home, "local-repo");
+		mkdirSync(root);
+		const desktopPath = join(home, "claude_desktop_config.json");
+		const desktop = JSON.stringify({ mcpServers: { pharaoh: launch } });
+		const codexPath = join(home, ".codex", "config.toml");
+		const codex = "malformed = [";
+		writeFileSync(desktopPath, desktop);
+		writeFileSync(codexPath, codex);
+		const preflight = vi.fn((targets: readonly ClientTarget[], scope: InstallScope) =>
+			preflightInstallScope(targets, { home, scope }),
+		);
+		const extras = vi.fn(async (_scope: InstallScope, targets: readonly ClientTarget[]) => {
+			expect(targets.map((target) => target.client)).toEqual(["claude-code"]);
+			return [];
+		});
+		const status = await runInstall(
+			options({
+				scope: "local",
+				cwd: root,
+				preflightScope: extras,
+				dependencies: {
+					discover: () => [
+						{ client: "claude-code", path: join(home, ".claude.json"), cli: "claude" },
+						{ client: "claude-desktop", path: desktopPath },
+						{ client: "codex", path: codexPath },
+					],
+					resolveRoot: () => root,
+					preflightScope: preflight,
+					configure: (targets, config, flags) =>
+						configureClients(targets, config, { home, ...flags }),
+					updateNotice: async () => {},
+				},
+			}),
+		);
+		expect(status).toBe(0);
+		expect(preflight).toHaveBeenCalledTimes(2);
+		for (const [targets] of preflight.mock.calls)
+			expect(targets.map((target) => target.client)).toEqual(["claude-code"]);
+		expect(extras).toHaveBeenCalledTimes(2);
+		expect(readFileSync(desktopPath, "utf8")).toBe(desktop);
+		expect(readFileSync(codexPath, "utf8")).toBe(codex);
+		expect(
+			JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).projects[root].mcpServers.pharaoh
+				.args,
+		).toEqual([
+			...launch.args,
+			"--install-scope",
+			"local",
+			"--install-root",
+			root,
+			"--feed-client",
+			"claude-code",
+			"--feed-registration",
+			expect.any(String),
+		]);
+	});
+
+	it("preserves path case and spaces, and repeats invalid Local path input", async () => {
+		const responses = ["not a repository", "/Work/Mixed Case Repo"];
+		const result = await resolveInstallScope({
+			interactive: true,
+			kind: "local",
+			cwd: "/outside",
+			choose: async () => 0,
+			askPath: async () => responses.shift() ?? null,
+			resolveRoot: (value) => (value === "/Work/Mixed Case Repo" ? value : null),
+			write: (...lines) => output.push(...lines),
+		});
+		expect(result).toEqual({ kind: "local", root: "/Work/Mixed Case Repo" });
+		expect(output).toContain("That path is not inside a Git checkout.");
+	});
+
+	it("resolves nested checkout paths without accepting an inherited GIT_DIR", () => {
+		const root = join(home, "Mixed Case Repo");
+		const nested = join(root, "src");
+		mkdirSync(nested, { recursive: true });
+		const initialized = spawnSync("git", ["init", "--quiet", root], { encoding: "utf8" });
+		expect(initialized.status).toBe(0);
+		vi.stubEnv("GIT_DIR", join(home, "not-the-project"));
+		expect(gitWorktreeRoot(nested)).toBe(realpathSync(root));
 	});
 
 	it("offers the one connected agent CLI in the same menu, starting it when picked and not on Skip", async () => {
@@ -425,6 +602,24 @@ describe("NPX developer install", () => {
 		expect(codexHookUntrusted(codex)).toBe(true);
 		const notice = `[hooks.state."${hooks}:session_start:0:0"]\ntrusted_hash = "sha256:fixture"\n`;
 		writeFileSync(join(codex, "config.toml"), trusted + notice);
+		const allHooks = JSON.parse(readFileSync(hooks, "utf8")).hooks as Record<
+			string,
+			Array<{ hooks: Array<{ command: string }> }>
+		>;
+		const feedTrust = Object.entries(allHooks)
+			.flatMap(([event, groups]) =>
+				groups.flatMap((group, i) =>
+					group.hooks.flatMap((hook, j) =>
+						hook.command.includes("--pharaoh-native-feed-v1")
+							? [
+									`[hooks.state."${hooks}:${event.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase()}:${i}:${j}"]\ntrusted_hash = "sha256:fixture"\n`,
+								]
+							: [],
+					),
+				),
+			)
+			.join("");
+		writeFileSync(join(codex, "config.toml"), trusted + notice + feedTrust);
 		expect(codexHookUntrusted(codex)).toBe(false);
 		expect(codexHookUntrusted(join(home, "missing"))).toBe(false);
 	});
@@ -515,6 +710,7 @@ describe("NPX developer install", () => {
 			APPROVAL,
 			RUNTIME_SESSION,
 			expect.any(Function),
+			{ scope: { kind: "global" } },
 		);
 		expect(enableRuntime).toHaveBeenNthCalledWith(
 			2,
@@ -522,6 +718,7 @@ describe("NPX developer install", () => {
 			{ ...APPROVAL, ...CODEX_INTENT },
 			RUNTIME_SESSION,
 			expect.any(Function),
+			{ scope: { kind: "global" } },
 		);
 		expect(checks).toEqual([
 			["claude-code", true],
@@ -912,19 +1109,30 @@ describe("NPX developer install", () => {
 		const sessionStart = (path: string) =>
 			JSON.parse(readFileSync(path, "utf8")).hooks?.SessionStart;
 		const hook = join(home, ".pharaoh", "update-notice-hook.mjs");
-		expect(sessionStart(claude)).toEqual([
-			own,
-			{
-				hooks: [
-					{
-						type: "command",
-						command: `'${process.execPath}' '${hook}' 'claude-code' --pharaoh-update-notice-v1`,
-						timeout: 3,
-					},
-				],
-			},
-		]);
-		expect(sessionStart(codex)).toHaveLength(1);
+		const groupsWith = (path: string, marker: string) =>
+			sessionStart(path)?.filter((group: { hooks: Array<{ command?: string }> }) =>
+				group.hooks.some((handler) => handler.command?.endsWith(marker)),
+			);
+		expect(sessionStart(claude)[0]).toEqual(own);
+		for (const [path, client] of [
+			[claude, "claude-code"],
+			[codex, "codex"],
+		]) {
+			expect(groupsWith(path, "--pharaoh-update-notice-v1")).toEqual([
+				{
+					hooks: [
+						{
+							type: "command",
+							command: `'${process.execPath}' '${hook}' '${client}' --pharaoh-update-notice-v1`,
+							timeout: 3,
+						},
+					],
+				},
+			]);
+			expect(groupsWith(path, "--pharaoh-native-feed-v1")).toHaveLength(1);
+		}
+		const claudeFeed = groupsWith(claude, "--pharaoh-native-feed-v1");
+		const codexFeed = groupsWith(codex, "--pharaoh-native-feed-v1");
 		expect(readUpdateState(join(home, ".pharaoh"))).toEqual({ version: getPackageVersion() });
 		// A hook the person added after ours doesn't move ours: Codex records trust by position.
 		const later = { hooks: [{ type: "command", command: "later-hook" }] };
@@ -936,8 +1144,10 @@ describe("NPX developer install", () => {
 		expect([readFileSync(claude, "utf8"), readFileSync(codex, "utf8")]).toEqual(before);
 		for (const client of ["claude-code", "codex"] as const)
 			syncUpdateNoticeHook(client, null, { home, env: {} });
-		expect(sessionStart(claude)).toEqual([own, later]);
-		expect(sessionStart(codex)).toBeUndefined();
+		expect(groupsWith(claude, "--pharaoh-update-notice-v1")).toEqual([]);
+		expect(groupsWith(codex, "--pharaoh-update-notice-v1")).toEqual([]);
+		expect(sessionStart(claude)).toEqual([own, ...claudeFeed, later]);
+		expect(sessionStart(codex)).toEqual(codexFeed);
 	});
 
 	/** Breaks when: the notice shows the person more than one line a day, misses an install that is behind, speaks when current, or fails a session start. */
@@ -1022,17 +1232,45 @@ describe("NPX developer install", () => {
 		expect(output.join("\n")).toContain("install --migrate-legacy");
 		expect(await runInstall(options({ migrateLegacy: true }))).toBe(0);
 		expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh).toEqual(
-			launch,
+			{
+				command: launch.command,
+				args: [
+					...launch.args,
+					"--feed-client",
+					"claude-code",
+					"--feed-registration",
+					expect.any(String),
+				],
+			},
 		);
 	});
 
-	it("retains successful clients while reporting another client's real failure", async () => {
-		writeFileSync(join(home, ".codex", "config.toml"), "this is not TOML");
+	it.each([
+		"codex",
+		"claude-code",
+	] as const)("retains successful clients while reporting %s's real configuration failure", async (broken) => {
+		const path =
+			broken === "codex" ? join(home, ".codex", "config.toml") : join(home, ".claude.json");
+		writeFileSync(path, "malformed configuration");
 		expect(await runInstall(options())).toBe(1);
-		expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh).toEqual(
-			launch,
-		);
-		expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toBe("this is not TOML");
+		if (broken === "codex")
+			expect(
+				JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh,
+			).toEqual({
+				command: launch.command,
+				args: [
+					...launch.args,
+					"--feed-client",
+					"claude-code",
+					"--feed-registration",
+					expect.any(String),
+				],
+			});
+		else
+			expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain(
+				"[mcp_servers.pharaoh]",
+			);
+		expect(readFileSync(path, "utf8")).toBe("malformed configuration");
 		expect(output.join("\n")).toContain("setup failed");
 	});
 
@@ -1102,6 +1340,109 @@ describe("NPX developer install", () => {
 		expect(text).toContain("approved (5 min)");
 		const framed = box.filter((line) => line.length > 0);
 		expect(new Set(framed.map((line) => line.length)).size).toBe(1);
+	});
+
+	// Real child processes verify fallback, argument boundaries and output ordering without
+	// opening the host browser. The fixture supplies the OS identity and opener binaries.
+	function browserFixture(options: {
+		platform?: string;
+		wsl?: boolean;
+		disabled?: boolean;
+		fail?: string[];
+		traceLaunch?: boolean;
+	}) {
+		const calls = join(home, "browser-calls.jsonl");
+		const url = "https://mcp.pharaoh.so/activate?code=ABCD-1234&return=a%20b";
+		for (const name of ["open", "wslview", "rundll32.exe", "xdg-open"]) {
+			writeFileSync(
+				join(home, name),
+				`#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify([${JSON.stringify(name)}, process.argv.slice(2)]) + '\\n'); process.exit(${options.fail?.includes(name) ? 1 : 0});\n`,
+				{ mode: 0o755 },
+			);
+		}
+		const runner = join(home, "browser.mts");
+		writeFileSync(
+			runner,
+			`import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const read = fs.readFileSync;
+fs.readFileSync = (path, ...args) => path === '/proc/sys/kernel/osrelease' ? ${JSON.stringify(options.wsl ? "6.6.0-microsoft-standard-WSL2" : "6.6.0-linux")} : read(path, ...args);
+${options.traceLaunch ? "childProcess.execFile = () => process.stderr.write('BROWSER_REQUESTED\\n');" : ""}
+syncBuiltinESMExports();
+const { printActivationPrompt } = await import(${JSON.stringify(pathToFileURL(join(__dirname, "../src/auth.ts")).href)});
+Object.defineProperty(process, 'platform', { value: ${JSON.stringify(options.platform ?? "linux")} });
+printActivationPrompt({ user_code: 'ABCD-1234', verification_uri: 'https://mcp.pharaoh.so/activate', verification_uri_complete: ${JSON.stringify(url)}, expires_in: 300 });
+`,
+		);
+		const result = spawnSync(
+			process.execPath,
+			[createRequire(import.meta.url).resolve("tsx/cli"), runner],
+			{
+				encoding: "utf8",
+				timeout: 20_000,
+				env: {
+					...process.env,
+					PATH: home,
+					WSL_DISTRO_NAME: "",
+					WSL_INTEROP: "",
+					PHARAOH_MCP_DISABLE_BROWSER: options.disabled ? "1" : "0",
+				},
+			},
+		);
+		expect(result.status, result.stderr).toBe(0);
+		return {
+			url,
+			stderr: result.stderr,
+			calls: existsSync(calls)
+				? readFileSync(calls, "utf8")
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line))
+				: [],
+		};
+	}
+
+	it.each([
+		[[], ["wslview"]],
+		[["wslview"], ["wslview", "rundll32.exe"]],
+		[
+			["wslview", "rundll32.exe"],
+			["wslview", "rundll32.exe", "xdg-open"],
+		],
+		[
+			["wslview", "rundll32.exe", "xdg-open"],
+			["wslview", "rundll32.exe", "xdg-open"],
+		],
+	])("handles WSL browser commands failing: %j", (fail, commands) => {
+		const result = browserFixture({ wsl: true, fail });
+		expect(result.stderr).toContain(result.url);
+		expect(result.calls).toEqual(
+			commands.map((command) => [
+				command,
+				command === "rundll32.exe" ? ["url.dll,FileProtocolHandler", result.url] : [result.url],
+			]),
+		);
+	});
+
+	it("opens natively without a shell and leaves a usable URL when opening is disabled", () => {
+		const linux = browserFixture({});
+		expect(linux.calls).toEqual([["xdg-open", [linux.url]]]);
+		rmSync(join(home, "browser-calls.jsonl"));
+		const windows = browserFixture({ platform: "win32" });
+		expect(windows.calls).toEqual([["rundll32.exe", ["url.dll,FileProtocolHandler", windows.url]]]);
+		rmSync(join(home, "browser-calls.jsonl"));
+		const disabled = browserFixture({ wsl: true, disabled: true });
+		expect(disabled.calls).toEqual([]);
+		expect(disabled.stderr).toContain(disabled.url);
+	});
+
+	it("prints the complete activation URL before attempting to launch a browser", () => {
+		const result = browserFixture({ traceLaunch: true });
+		expect(result.stderr.indexOf(result.url)).toBeGreaterThan(-1);
+		expect(result.stderr.indexOf("BROWSER_REQUESTED")).toBeGreaterThan(
+			result.stderr.indexOf(result.url),
+		);
 	});
 
 	it("routes install --help before the question-tool CLI without starting sign-in", () => {

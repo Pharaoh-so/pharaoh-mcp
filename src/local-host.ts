@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import type { LocalWorktreeAnalysis } from "../runtime/local-worktree-hook.mjs";
 import { verifiedCodingClients } from "./client-install.js";
 import { readCredentials } from "./credentials.js";
+import type { InstallScope } from "./install-types.js";
 import type { LocalHost, LocalSignIn } from "./local/contracts.js";
 import {
 	fingerprintLocalSources,
@@ -40,15 +41,21 @@ export function savedSignIn(path?: string): LocalSignIn {
  *
  * @returns The user's saved sign-in, the entry registrations name, and the clients that run it
  */
-export function localHost(): LocalHost {
+export function localHost(scope?: InstallScope): LocalHost {
 	const entry = runningEntry(fileURLToPath(new URL("./index.js", import.meta.url)));
 	return {
 		signIn: savedSignIn(),
+		scope,
 		entry,
 		managedClients: () =>
 			verifiedCodingClients({
-				runningLaunch: { command: process.execPath, args: [entry] },
+				scope,
+				runningLaunch: {
+					command: process.execPath,
+					args: [entry, ...(scope?.kind === "local" ? process.argv.slice(2) : [])],
+				},
 				rejectProjectOverrides: true,
+				projectRoot: process.cwd(),
 			}),
 	};
 }

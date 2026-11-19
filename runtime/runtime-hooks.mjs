@@ -2,11 +2,13 @@
 
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { ensureLocalPrivatePaths } from "../project-memory/install-scope.mjs";
 import { RUNTIME_TOOL_NAMES, runtimeUuid } from "./runtime-native.mjs";
 import { ensurePrivateDirectory, privatePath } from "./runtime-storage.mjs";
 import { UPDATE_NOTICE_HOOK, UPDATE_NOTICE_MARKER } from "./update-notice.mjs";
+import { runtimeProfilePath, runtimeScopeArguments, runtimeTargetId } from "./runtime-scope.mjs";
+export { runtimeScopeMatches, runtimeScopeFromArguments } from "./runtime-scope.mjs";
 
 const MARKER = "--pharaoh-runtime-v1";
 const OWNED = / --pharaoh-runtime-v1(?: '[0-9a-f-]{36}')?$/;
@@ -31,6 +33,7 @@ export function updateRuntimeHooks(
 	generation,
 	selectionId,
 	metadataVersion = 1,
+	targetId,
 ) {
 	if (
 		config.hooks !== undefined &&
@@ -57,7 +60,11 @@ export function updateRuntimeHooks(
 	if (hookPath) {
 		const claude = client === "claude-code";
 		if (!runtimeUuid(generation)) throw new Error("Invalid runtime hook generation.");
-		const command = `${[node, hookPath, client].map(shellWord).join(" ")} ${shellWord(generation)}${runtimeUuid(selectionId) ? ` ${shellWord(selectionId)}` : ""} ${MARKER}`;
+		const selector =
+			typeof targetId === "string" && /^[a-f0-9]{64}$/.test(targetId)
+				? ` --target ${shellWord(targetId)}`
+				: "";
+		const command = `${[node, hookPath, client].map(shellWord).join(" ")}${selector} ${shellWord(generation)}${runtimeUuid(selectionId) ? ` ${shellWord(selectionId)}` : ""} ${MARKER}`;
 		const events = [
 			...COMMON,
 			...(claude ? ["PreToolUse", "PostToolUseFailure", "StopFailure"] : ["Interrupt"]),
@@ -88,13 +95,14 @@ export function updateRuntimeHooks(
 
 /** Resolve the active native settings file without creating or reading it. */
 export function runtimeSettingsPath(client, options = {}) {
-	const home = options.home ?? homedir();
-	const env = options.env ?? process.env;
-	const directory =
-		(client === "codex" ? env.CODEX_HOME : env.CLAUDE_CONFIG_DIR) ??
-		join(home, client === "codex" ? ".codex" : ".claude");
-	if (!isAbsolute(directory)) throw new Error("Unsupported native hook configuration.");
-	return resolve(directory, client === "codex" ? "hooks.json" : "settings.json");
+	if (options.scope?.kind === "local") {
+		if (!isAbsolute(options.scope.root)) throw new Error("Invalid local runtime root.");
+		return resolve(
+			options.scope.root,
+			client === "codex" ? ".codex/hooks.json" : ".claude/settings.local.json",
+		);
+	}
+	return runtimeProfilePath(client, options);
 }
 
 function settingsIdentity(stat) {
@@ -115,7 +123,9 @@ function readHookSettings(client, path, removalMarker, local = false) {
 	const windows = local && process.platform === "win32";
 	if (
 		!isAbsolute(path) ||
-		basename(path) !== (client === "codex" ? "hooks.json" : "settings.json") ||
+		!(client === "codex" ? ["hooks.json"] : ["settings.json", "settings.local.json"]).includes(
+			basename(path),
+		) ||
 		!["claude-code", "codex"].includes(client) ||
 		(!windows && typeof process.getuid !== "function")
 	)
@@ -165,6 +175,7 @@ export function supportsAutomaticRuntimeHooks(client, options) {
 /** Install/remove independently marked user hooks without following configuration symlinks. */
 export function syncRuntimeHooks(client, hookPath, options = {}) {
 	const path = options.settingsPath ?? runtimeSettingsPath(client, options);
+	if (hookPath) ensureLocalPrivatePaths(options.scope, [path]);
 	const { config, exists, identity } = readHookSettings(client, path);
 	if (hookPath && client === "claude-code" && config.disableAllHooks === true)
 		throw new Error("Claude Code hooks are disabled.");
@@ -179,17 +190,20 @@ export function syncRuntimeHooks(client, hookPath, options = {}) {
 		options.generation,
 		undefined,
 		options.metadataVersion,
+		options.targetId ??
+			(options.scope?.kind === "local" ? runtimeTargetId(client, options) : undefined),
 	);
-	writeHookSettings(path, config, next, exists, identity);
+	writeHookSettings(path, config, next, exists, identity, false, options.scope);
 }
 
-function writeHookSettings(path, config, next, exists, identity, windows = false) {
+function writeHookSettings(path, config, next, exists, identity, windows = false, scope) {
 	if (JSON.stringify(next) === JSON.stringify(config)) return;
+	const temporary = join(dirname(path), `${randomUUID()}.runtime.tmp`);
+	ensureLocalPrivatePaths(scope, [path, temporary]);
 	if (!exists) {
 		if (windows) ensurePrivateDirectory(dirname(path));
 		else mkdirSync(dirname(path), { mode: 0o700 });
 	}
-	const temporary = join(dirname(path), `${randomUUID()}.runtime.tmp`);
 	try {
 		writeFileSync(temporary, `${JSON.stringify(next, null, "\t")}\n`, { flag: "wx", mode: 0o600 });
 		if (windows) privatePath(temporary);
@@ -208,10 +222,29 @@ const powerShellWord = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
 /** A handler this hook family wrote: its command ends with the marker, or (Windows) its args do. */
 function ownsHandler(handler, marker, script) {
+	const command = String(handler?.command ?? "");
+	const markerAt = command.lastIndexOf(` ${marker}`);
+	const suffix = markerAt < 0 ? null : command.slice(markerAt + marker.length + 1);
+	const scoped =
+		typeof suffix === "string" &&
+		/^(?: '--server' '(?:[^']|'\\'')*')?(?: '--install-scope' 'local' '--install-root' '(?:[^']|'\\'')*')?$/.test(
+			suffix,
+		);
 	return (
-		String(handler?.command ?? "").endsWith(` ${marker}`) ||
+		command.endsWith(` ${marker}`) ||
+		scoped ||
 		(Array.isArray(handler?.args) &&
-			handler.args.length === 3 &&
+			(handler.args.length === 3 ||
+				(handler.args.length === 5 &&
+					handler.args[3] === "--server" &&
+					typeof handler.args[4] === "string") ||
+				([7, 9].includes(handler.args.length) &&
+					(handler.args.length === 7 ||
+						(handler.args[3] === "--server" && typeof handler.args[4] === "string")) &&
+					handler.args.at(-4) === "--install-scope" &&
+					handler.args.at(-3) === "local" &&
+					handler.args.at(-2) === "--install-root" &&
+					isAbsolute(handler.args.at(-1)))) &&
 			handler.args[2] === marker &&
 			String(handler.args[0]).endsWith(script))
 	);
@@ -221,16 +254,17 @@ function ownsHandler(handler, marker, script) {
  * One hook handler. `mode` runs the stable launcher's hook mode instead of a script directly
  * (`hookPath` is then the launcher), so the command never changes when Pharaoh updates.
  */
-function markedHandler(client, hookPath, node, marker, mode = []) {
+function markedHandler(client, hookPath, node, marker, mode = [], scope, server) {
 	const base = { type: "command", timeout: 3 };
+	const scopeArgs = [...(server ? ["--server", server] : []), ...runtimeScopeArguments(scope)];
 	if (process.platform === "win32" && client === "claude-code")
-		return { ...base, command: node, args: [hookPath, client, marker] };
-	const command = `${[node, hookPath, ...mode, client].map(shellWord).join(" ")} ${marker}`;
+		return { ...base, command: node, args: [hookPath, client, marker, ...scopeArgs] };
+	const command = `${[node, hookPath, ...mode, client].map(shellWord).join(" ")} ${marker}${scopeArgs.length ? ` ${scopeArgs.map(shellWord).join(" ")}` : ""}`;
 	if (process.platform === "win32")
 		return {
 			...base,
 			command,
-			commandWindows: `& ${[node, hookPath, client].map(powerShellWord).join(" ")} ${marker}`,
+			commandWindows: `& ${[node, hookPath, client].map(powerShellWord).join(" ")} ${marker}${scopeArgs.length ? ` ${scopeArgs.map(powerShellWord).join(" ")}` : ""}`,
 		};
 	return { ...base, command };
 }
@@ -273,6 +307,7 @@ function settingsWithoutHandlers(client, path, adding, marker, script) {
 /** Merge or remove only Pharaoh's local-readiness hooks; native trust remains with the client. */
 export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
 	const path = options.settingsPath ?? runtimeSettingsPath(client, options);
+	if (hookPath) ensureLocalPrivatePaths(options.scope, [path]);
 	const { config, exists, identity, hooks, ...removal } = settingsWithoutHandlers(
 		client,
 		path,
@@ -288,6 +323,8 @@ export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
 			options.node ?? process.execPath,
 			LOCAL_MARKER,
 			options.viaLauncher === true ? ["hook", "local-worktree"] : [],
+			options.scope,
+			options.server,
 		);
 		const events =
 			client === "claude-code"
@@ -325,6 +362,7 @@ export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
 		exists,
 		identity,
 		process.platform === "win32",
+		options.scope,
 	);
 }
 
@@ -338,6 +376,7 @@ export function syncLocalWorktreeHooks(client, hookPath, options = {}) {
  */
 export function syncUpdateNoticeHook(client, hookPath, options = {}) {
 	const path = options.settingsPath ?? runtimeSettingsPath(client, options);
+	if (hookPath) ensureLocalPrivatePaths(options.scope, [path]);
 	const { config, exists, identity, hooks, changed } = settingsWithoutHandlers(
 		client,
 		path,
@@ -351,6 +390,8 @@ export function syncUpdateNoticeHook(client, hookPath, options = {}) {
 			hookPath,
 			options.node ?? process.execPath,
 			UPDATE_NOTICE_MARKER,
+			[],
+			options.scope,
 		);
 		// Already in place: keep its position, since Codex records trust by position.
 		const owned = Object.values(config.hooks ?? {})
@@ -373,5 +414,6 @@ export function syncUpdateNoticeHook(client, hookPath, options = {}) {
 		exists,
 		identity,
 		process.platform === "win32",
+		options.scope,
 	);
 }

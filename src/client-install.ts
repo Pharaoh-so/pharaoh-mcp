@@ -18,15 +18,20 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { ensureLocalPrivatePaths } from "../project-memory/install-scope.mjs";
+import { shellWord } from "../project-memory/local.mjs";
+import { nativeFeedRegistration, nativeFeedSettingsPath } from "../runtime/feed-hooks.mjs";
 import { LAUNCHER_NAME, readPointer, usableVersion } from "../runtime/launcher-v1.mjs";
 import { DEFAULT_SERVER } from "./helpers.js";
+import { gitWorktreeRoot } from "./install-scope.js";
 import type {
 	ClientId,
 	ClientInstallOptions,
 	ClientOutcome,
 	ClientTarget,
+	InstallScope,
 	LaunchConfig,
 	LegacyMigration,
 } from "./install-types.js";
@@ -42,6 +47,7 @@ interface Receipt {
 	path: string;
 	entry: string;
 	block?: string;
+	scope?: InstallScope;
 }
 interface Provenance {
 	version: 1;
@@ -144,8 +150,10 @@ function settings(options: ClientInstallOptions) {
 
 function execute(options: ClientInstallOptions, command: string, args: readonly string[]): string {
 	const env = options.env ?? process.env;
+	const cwd = options.scope?.kind === "local" ? options.scope.root : undefined;
 	try {
-		if (options.execute) return options.execute(command, args, { env, timeout: 30_000 });
+		if (options.execute)
+			return options.execute(command, args, { env, timeout: 30_000, ...(cwd ? { cwd } : {}) });
 		return execFileSync(command, [...args], {
 			env,
 			timeout: 30_000,
@@ -153,6 +161,7 @@ function execute(options: ClientInstallOptions, command: string, args: readonly 
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
 			shell: false,
+			...(cwd ? { cwd } : {}),
 		});
 	} catch (error) {
 		const stderr = object(error) && "stderr" in error ? String(error.stderr) : "";
@@ -171,10 +180,14 @@ function execute(options: ClientInstallOptions, command: string, args: readonly 
 }
 
 function availableCli(options: ClientInstallOptions, command: string): boolean {
+	return cliVersion(options, command) !== null;
+}
+
+function cliVersion(options: ClientInstallOptions, command: string): string | null {
 	try {
-		return /\b\d+\.\d+\.\d+\b/.test(execute(options, command, ["--version"]));
+		return execute(options, command, ["--version"]).match(/\b\d+\.\d+\.\d+\b/)?.[0] ?? null;
 	} catch {
-		return false;
+		return null;
 	}
 }
 
@@ -334,8 +347,10 @@ function windowsApp(env: NodeJS.ProcessEnv, name: string): boolean {
 export function discoverClients(options: ClientInstallOptions = {}): ClientTarget[] {
 	const { home, env, platform } = settings(options);
 	const targets: ClientTarget[] = [];
-	const claudeCli = availableCli(options, "claude");
-	const codexCli = availableCli(options, "codex");
+	const claudeVersion = cliVersion(options, "claude");
+	const codexVersion = cliVersion(options, "codex");
+	const claudeCli = claudeVersion !== null;
+	const codexCli = codexVersion !== null;
 	const packagedClaudeEvidence = packagedApp(options, (entry) => /claude|anthropic/i.test(entry));
 	const windowsClaude =
 		platform === "win32"
@@ -395,7 +410,7 @@ export function discoverClients(options: ClientInstallOptions = {}): ClientTarge
 		targets.push({
 			client: "claude-code",
 			path: codePath,
-			...(claudeCli ? { cli: "claude" } : {}),
+			...(claudeVersion ? { cli: "claude", version: claudeVersion } : {}),
 			...(chatPath ? { shadowPath: chatPath } : {}),
 			...(invalidClaudeRoot
 				? {
@@ -408,7 +423,7 @@ export function discoverClients(options: ClientInstallOptions = {}): ClientTarge
 		targets.push({
 			client: "codex",
 			path: join(codexRoot, "config.toml"),
-			...(codexCli ? { cli: "codex" } : {}),
+			...(codexVersion ? { cli: "codex", version: codexVersion } : {}),
 			...(invalidCodexRoot
 				? { ambiguousReason: "CODEX_HOME must identify an absolute configuration directory." }
 				: packagedCodex === "ambiguous"
@@ -485,6 +500,106 @@ function entry(document: Document, client: ClientId): unknown {
 	return entries(document, client).pharaoh;
 }
 
+/** The portion of Claude's shared JSON belonging to one explicitly selected checkout. */
+function targetDocument(document: Document, target: ClientTarget, create = false): Document {
+	if (target.client !== "claude-code" || target.scope?.kind !== "local") return document;
+	if (document.projects !== undefined && !object(document.projects))
+		throw new Error("The Claude project configuration is malformed.");
+	const projects = object(document.projects) ? document.projects : {};
+	const value = projects[target.scope.root];
+	if (value !== undefined && !object(value))
+		throw new Error("The Claude project entry is malformed.");
+	const project = object(value) ? value : {};
+	if (create) {
+		projects[target.scope.root] = project;
+		document.projects = projects;
+	}
+	return project;
+}
+
+function targetEntry(document: Document, target: ClientTarget): unknown {
+	return entry(targetDocument(document, target), target.client);
+}
+
+function trackedProjectSettings(target: ClientTarget): boolean {
+	if (target.scope?.kind !== "local" || target.client !== "codex" || !existsSync(target.path))
+		return false;
+	try {
+		execFileSync(
+			"git",
+			[
+				"--no-optional-locks",
+				"--no-replace-objects",
+				"-c",
+				"core.fsmonitor=false",
+				"-C",
+				target.scope.root,
+				"ls-files",
+				"--error-unmatch",
+				"--",
+				relative(target.scope.root, target.path),
+			],
+			{
+				env: {
+					...Object.fromEntries(
+						Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+					),
+					GIT_NO_LAZY_FETCH: "1",
+					GIT_ALLOW_PROTOCOL: "",
+				},
+				timeout: 5_000,
+				maxBuffer: 16_384,
+				stdio: ["ignore", "ignore", "ignore"],
+			},
+		);
+		return true;
+	} catch (error) {
+		if ((error as { status?: number }).status === 1) return false;
+		throw new Error("The project settings could not be checked for tracked files.");
+	}
+}
+
+function targetUnrelated(document: Document, target: ClientTarget): string {
+	if (target.client !== "claude-code" || target.scope?.kind !== "local")
+		return unrelated(document, target.client);
+	const copy = structuredClone(document);
+	const project = targetDocument(copy, target);
+	if (object(project.mcpServers)) {
+		delete project.mcpServers.pharaoh;
+		if (!Object.keys(project.mcpServers).length) delete project.mcpServers;
+	}
+	if (!Object.keys(project).length && object(copy.projects)) {
+		delete copy.projects[target.scope.root];
+		if (!Object.keys(copy.projects).length) delete copy.projects;
+	}
+	return canonical(copy);
+}
+
+/** Bind discovered clients to the selected checkout without changing shared client discovery. */
+export function scopeInstallTargets(
+	targets: readonly ClientTarget[],
+	scope: InstallScope,
+): ClientTarget[] {
+	if (scope.kind === "global") return targets.map((target) => ({ ...target, scope }));
+	return targets.map((target) => ({
+		...target,
+		scope,
+		...(target.client === "codex" ? { path: join(scope.root, ".codex", "config.toml") } : {}),
+		...(target.client === "claude-desktop"
+			? { unavailableReason: "Claude Desktop does not support checkout-local installation." }
+			: !target.cli
+				? { unavailableReason: "Local installation requires this client's CLI." }
+				: target.client === "codex" &&
+						(!target.version ||
+							(target.version !== "0.166.0" && !isNewerVersion(target.version, "0.166.0")))
+					? {
+							unavailableReason:
+								"Local installation requires Codex CLI 0.166.0 or newer for project hooks.",
+						}
+					: {}),
+	}));
+}
+
 function disabled(document: Document, value: unknown): boolean {
 	return (
 		(object(value) && (value.enabled === false || value.disabled === true)) ||
@@ -531,12 +646,15 @@ function managedPin(value: unknown, launch: LaunchConfig): boolean {
 		basename(value.command) !== basename(launch.command)
 	)
 		return false;
+	const actual = proxyLaunchOptions(value.args);
+	const wanted = proxyLaunchOptions(launch.args);
+	if (!actual || !wanted) return false;
 	const target = launch.args[0];
 	const root = basename(target) === LAUNCHER_NAME ? dirname(target) : versionEntry(target)?.root;
 	return (
 		root !== undefined &&
 		versionEntry(value.args[0])?.root === root &&
-		canonical(value.args.slice(1)) === canonical(launch.args.slice(1))
+		canonical(actual.baseArgs.slice(1)) === canonical(wanted.baseArgs.slice(1))
 	);
 }
 
@@ -588,7 +706,7 @@ export function legacyMigrations(
 	return targets.flatMap((target) => {
 		if (target.ambiguousReason || target.unavailableReason) return [];
 		try {
-			const document = parse(target, snapshot(target.path).text);
+			const document = targetDocument(parse(target, snapshot(target.path).text), target);
 			const value = entry(document, target.client);
 			return !disabled(document, value) && legacy(value)
 				? [
@@ -613,25 +731,38 @@ export function freshRuntimeClients(
 	const { platform } = settings(options);
 	if (platform !== "darwin" && platform !== "linux") return [];
 	const records = Object.values(readProvenance(options).data.registrations);
-	return targets.flatMap((target) => {
-		const { client } = target;
-		if (client === "claude-desktop" || target.unavailableReason || target.ambiguousReason)
-			return [];
-		try {
-			const document = parse(target, snapshot(target.path).text);
-			if (
-				entry(document, client) !== undefined ||
-				disabled(document, undefined) ||
-				records.some((record) => record?.client === client && record.path === resolve(target.path))
-			)
+	return (options.scope ? scopeInstallTargets(targets, options.scope) : targets).flatMap(
+		(target) => {
+			const { client } = target;
+			if (client === "claude-desktop" || target.unavailableReason || target.ambiguousReason)
 				return [];
-			if (client === "claude-code" && projectOverrides(document)) return [];
-			return [client];
-		} catch {
-			// Unreadable or ambiguous local settings cannot authorize automatic enrollment.
-			return [];
-		}
-	});
+			try {
+				const document = targetDocument(parse(target, snapshot(target.path).text), target);
+				if (
+					entry(document, client) !== undefined ||
+					disabled(document, undefined) ||
+					records.some(
+						(record) =>
+							record?.client === client &&
+							record.path === resolve(target.path) &&
+							(record.scope?.kind === "local" ? record.scope.root : undefined) ===
+								(target.scope?.kind === "local" ? target.scope.root : undefined),
+					)
+				)
+					return [];
+				if (
+					client === "claude-code" &&
+					target.scope?.kind !== "local" &&
+					projectOverrides(document)
+				)
+					return [];
+				return [client];
+			} catch {
+				// Unreadable or ambiguous local settings cannot authorize automatic enrollment.
+				return [];
+			}
+		},
+	);
 }
 
 function provenancePath(options: ClientInstallOptions): string {
@@ -647,9 +778,132 @@ function readProvenance(options: ClientInstallOptions): { before: Snapshot; data
 	return { before, data: data as unknown as Provenance };
 }
 
+/** Known checkout roots, retained so cleanup and overlap checks cover inactive registrations too. */
+export function recordedLocalRoots(options: ClientInstallOptions = {}): string[] {
+	return [
+		...new Set(
+			Object.values(readProvenance(options).data.registrations).flatMap((receipt) =>
+				receipt.scope?.kind === "local" ? [receipt.scope.root] : [],
+			),
+		),
+	];
+}
+
+function globalTarget(target: ClientTarget, options: ClientInstallOptions): ClientTarget {
+	const { home, env } = settings(options);
+	return {
+		...target,
+		scope: { kind: "global" },
+		path:
+			target.client === "codex"
+				? join(configuredRoot(env.CODEX_HOME, join(home, ".codex")), "config.toml")
+				: target.path,
+	};
+}
+
+function localCleanupRecovery(
+	target: ClientTarget & { scope: { kind: "local"; root: string } },
+): string {
+	if (gitWorktreeRoot(target.scope.root) === target.scope.root)
+		return `npx @pharaoh-so/mcp@latest cleanup --client ${target.client} --scope local --path ${shellWord(target.scope.root)}`;
+	const project =
+		target.client === "claude-code" ? ` (project key ${JSON.stringify(target.scope.root)})` : "";
+	return `The recorded checkout is missing or no longer a Git root: ${target.scope.root}. Remove only its Pharaoh registration from ${target.path}${project}, then retry Global setup.`;
+}
+
+/** Read-only overlap check; custom and owned activation both require explicit cleanup first. */
+export function preflightInstallScope(
+	targets: readonly ClientTarget[],
+	options: ClientInstallOptions = {},
+): ClientOutcome[] {
+	const scope = options.scope ?? { kind: "global" };
+	const data = readProvenance(options).data;
+	return targets.flatMap((candidate) => {
+		try {
+			if (trackedProjectSettings(candidate))
+				return [
+					result(
+						candidate,
+						"ambiguous",
+						"Local setup preserves tracked Codex configuration. Use Global or an untracked project config.",
+					),
+				];
+			const global = globalTarget(candidate, options);
+			if (scope.kind === "local") {
+				const globalDocument = parse(global, snapshot(global.path).text);
+				const value = entry(globalDocument, global.client);
+				if (value === undefined || disabled(globalDocument, value)) return [];
+				const managed = owned(global, value, data) !== undefined;
+				return [
+					result(
+						candidate,
+						"ambiguous",
+						"Global Pharaoh activation is still enabled. Local setup made no changes.",
+						managed
+							? `npx @pharaoh-so/mcp@latest cleanup --client ${candidate.client} --scope global`
+							: "Remove or disable the existing global Pharaoh registration, then retry Local setup.",
+					),
+				];
+			}
+			const localTargets = Object.values(data.registrations).flatMap((receipt) =>
+				receipt.client === candidate.client && receipt.scope?.kind === "local"
+					? [
+							{
+								client: receipt.client,
+								path: receipt.path,
+								scope: receipt.scope,
+							} satisfies ClientTarget,
+						]
+					: [],
+			);
+			if (candidate.client === "claude-code") {
+				let globalDocument: Document;
+				try {
+					globalDocument = parse(global, snapshot(global.path).text);
+				} catch {
+					// This client's guarded writer will report its malformed configuration
+					// without changing it. Other Global clients can still be installed.
+					return [];
+				}
+				if (object(globalDocument.projects))
+					for (const root of Object.keys(globalDocument.projects))
+						localTargets.push({ ...global, scope: { kind: "local", root } });
+			}
+			for (const local of localTargets) {
+				const document = parse(local, snapshot(local.path).text);
+				const selected = targetDocument(document, local);
+				const value = entry(selected, local.client);
+				if (value === undefined || disabled(selected, value)) continue;
+				const managed = owned(local, value, data) !== undefined;
+				return [
+					result(
+						candidate,
+						"ambiguous",
+						"A Local Pharaoh installation would overlap this Global setup. No changes were made.",
+						managed && local.scope?.kind === "local"
+							? localCleanupRecovery({ ...local, scope: local.scope })
+							: "Remove or disable the existing Local Pharaoh registration, then retry Global setup.",
+					),
+				];
+			}
+			return [];
+		} catch {
+			return [
+				result(
+					candidate,
+					"ambiguous",
+					"Existing activation could not be checked safely. Review the client configuration before changing scope.",
+				),
+			];
+		}
+	});
+}
+
 function receiptKey(target: ClientTarget, value: unknown): string {
 	return createHash("sha256")
-		.update(`${target.client}\0${resolve(target.path)}\0${JSON.stringify(value)}`)
+		.update(
+			`${target.client}\0${resolve(target.path)}\0${JSON.stringify(value)}${target.scope?.kind === "local" ? `\0local\0${target.scope.root}` : ""}`,
+		)
 		.digest("hex");
 }
 
@@ -663,12 +917,13 @@ function owned(target: ClientTarget, value: unknown, data: Provenance): Receipt 
 }
 
 /** Replace a validated file only while its read version remains current. */
-function atomicReplace(path: string, before: Snapshot, next: string): void {
+function atomicReplace(path: string, before: Snapshot, next: string, scope?: InstallScope): void {
 	const parent = dirname(path);
 	mkdirSync(parent, { recursive: true, mode: 0o700 });
 	if (lstatSync(parent).isSymbolicLink() || !lstatSync(parent).isDirectory())
 		throw new Error("The configuration directory is not a regular directory.");
 	const temporary = join(parent, `.pharaoh-${randomUUID()}.tmp`);
+	ensureLocalPrivatePaths(scope, [path, temporary]);
 	try {
 		const fd = openSync(
 			temporary,
@@ -703,6 +958,7 @@ function remember(
 		path: resolve(target.path),
 		entry: JSON.stringify(value),
 		...(block ? { block } : {}),
+		...(target.scope?.kind === "local" ? { scope: target.scope } : {}),
 	};
 	atomicReplace(path, before, `${JSON.stringify(data, null, "\t")}\n`);
 }
@@ -768,10 +1024,11 @@ function desktopPrecedence(
 	}
 }
 
-function projectOverrides(document: Document): string | undefined {
+function projectOverrides(document: Document, currentRoot?: string): string | undefined {
 	if (!object(document.projects)) return;
-	const retained = Object.values(document.projects).some(
-		(project) =>
+	const retained = Object.entries(document.projects).some(
+		([root, project]) =>
+			(!currentRoot || (isAbsolute(root) && withinProject(root, currentRoot))) &&
 			object(project) &&
 			(disabled(project, undefined) ||
 				(object(project.mcpServers) && project.mcpServers.pharaoh !== undefined)),
@@ -781,6 +1038,19 @@ function projectOverrides(document: Document): string | undefined {
 		: undefined;
 }
 
+function withinProject(root: string, cwd: string): boolean {
+	// Match the active checkout (including subdirectories), never a sibling's override.
+	const canonical = (path: string) => {
+		try {
+			return realpathSync(path);
+		} catch {
+			return resolve(path);
+		}
+	};
+	const path = relative(canonical(root), canonical(cwd));
+	return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
 function configureJson(
 	target: ClientTarget,
 	launch: LaunchConfig,
@@ -788,35 +1058,64 @@ function configureJson(
 ): ClientOutcome {
 	const before = snapshot(target.path);
 	const document = json(before.text);
-	const current = entry(document, target.client);
-	if (disabled(document, current))
+	const selected = targetDocument(document, target);
+	const current = entry(selected, target.client);
+	if (disabled(selected, current))
 		return result(target, "preserved-disabled", "The disabled registration was kept.");
 	const receipt = owned(target, current, readProvenance(options).data);
-	if (!replaceable(current, receipt, launch, options))
+	if (!replaceable(current, receipt, launch, options) && !adoptableLocal(target, current, launch))
 		return result(
 			target,
 			"preserved-custom",
 			"The existing registration was kept.",
 			legacy(current) ? RECOVERY : undefined,
 		);
-	const notes = [projectOverrides(document), desktopPrecedence(target, launch, options)];
-	if (current !== undefined && canonical(current) === canonical(launch))
+	const notes =
+		target.scope?.kind === "local"
+			? []
+			: [projectOverrides(document), desktopPrecedence(target, launch, options)];
+	if (current !== undefined && canonical(current) === canonical(launch)) {
+		if (target.scope?.kind === "local" && !receipt) remember(target, current, options);
 		return result(target, "already-configured", notes.filter(Boolean).join(" "));
+	}
 	// A pgrep that couldn't tell adds no note: the install can't say Desktop is open.
 	const desktopOpen = target.client === "claude-desktop" && (desktopPids(options)?.length ?? 0) > 0;
 	if (desktopOpen) notes.push(current === undefined ? DESKTOP_OPEN.created : DESKTOP_OPEN.updated);
 	const detail = notes.filter(Boolean).join(" ");
-	const servers = entries(document, target.client);
+	const destination = targetDocument(document, target, true);
+	const servers = entries(destination, target.client);
 	servers.pharaoh = { command: launch.command, args: [...launch.args] };
-	document.mcpServers = servers;
+	destination.mcpServers = servers;
 	const next = `${JSON.stringify(document, null, "\t")}\n`;
 	const verified = json(next);
-	if (unrelated(verified, target.client) !== unrelated(parse(target, before.text), target.client))
+	if (targetUnrelated(verified, target) !== targetUnrelated(parse(target, before.text), target))
 		throw new Error("The configuration update changed unrelated settings.");
 	remember(target, servers.pharaoh, options);
 	atomicReplace(target.path, before, next);
 	const outcome = result(target, "configured", detail, undefined, current === undefined);
 	return desktopOpen ? { ...outcome, desktopOpen: true } : outcome;
+}
+
+/** Explicit Local install may adopt the same plain stable launcher, with no custom arguments. */
+function adoptableLocal(target: ClientTarget, current: unknown, launch: LaunchConfig): boolean {
+	if (target.scope?.kind !== "local" || !persistentLaunch(current)) return false;
+	if (
+		Object.keys(current).some(
+			(key) =>
+				key !== "command" &&
+				key !== "args" &&
+				!(key === "type" && "type" in current && current.type === "stdio"),
+		)
+	)
+		return false;
+	const scopeIndex = launch.args.indexOf("--install-scope");
+	const base = scopeIndex < 0 ? launch.args : launch.args.slice(0, scopeIndex);
+	return (
+		basename(base[0] ?? "") === LAUNCHER_NAME &&
+		current.command === launch.command &&
+		(canonical(current.args) === canonical(base) ||
+			canonical(current.args) === canonical(launch.args))
+	);
 }
 
 function tomlBlock(launch: LaunchConfig): string {
@@ -846,20 +1145,22 @@ function configureCodex(
 	launch: LaunchConfig,
 	options: ClientInstallOptions & { migrateLegacy?: boolean },
 ): ClientOutcome {
+	if (trackedProjectSettings(target))
+		return result(target, "preserved-custom", "The tracked Codex project configuration was kept.");
 	const before = snapshot(target.path);
 	const document = toml(before.text);
 	const current = entry(document, target.client);
 	if (disabled(document, current))
 		return result(target, "preserved-disabled", "The disabled Codex registration was kept.");
 	const receipt = owned(target, current, readProvenance(options).data);
-	if (!replaceable(current, receipt, launch, options))
+	if (!replaceable(current, receipt, launch, options) && !adoptableLocal(target, current, launch))
 		return result(
 			target,
 			"preserved-custom",
 			"The existing Codex registration was kept.",
 			legacy(current) ? RECOVERY : undefined,
 		);
-	if (target.cli) {
+	if (target.cli && target.scope?.kind !== "local") {
 		const effective = readCodex(target, options);
 		if (effective?.enabled === false)
 			return result(target, "preserved-disabled", "The effective Codex registration is disabled.");
@@ -900,8 +1201,11 @@ function configureCodex(
 			throw new Error("Codex did not report an enabled matching stdio registration.");
 		return result(target, "configured", undefined, undefined, current === undefined);
 	}
-	if (current !== undefined && canonical(current) === canonical(launch))
+	if (current !== undefined && canonical(current) === canonical(launch)) {
+		ensureLocalPrivatePaths(target.scope, [target.path]);
+		if (target.scope?.kind === "local" && !receipt) remember(target, current, options);
 		return result(target, "already-configured");
+	}
 	const block = tomlBlock(launch);
 	let next: string;
 	if (current === undefined) {
@@ -922,8 +1226,9 @@ function configureCodex(
 		unrelated(verified, target.client) !== unrelated(document, target.client)
 	)
 		throw new Error("The Codex table could not be appended without changing unrelated settings.");
+	ensureLocalPrivatePaths(target.scope, [target.path]);
 	remember(target, entry(verified, target.client), options, block);
-	atomicReplace(target.path, before, next);
+	atomicReplace(target.path, before, next, target.scope);
 	return result(target, "configured", undefined, undefined, current === undefined);
 }
 
@@ -935,13 +1240,51 @@ export function configureClients(
 ): ClientOutcome[] {
 	if (!isAbsolute(launch.command) || !launch.args.length || !isAbsolute(launch.args[0]))
 		throw new Error("Client registration requires an absolute persistent runtime launch.");
-	return targets.map((target) => {
+	return (options.scope ? scopeInstallTargets(targets, options.scope) : targets).map((target) => {
 		if (target.unavailableReason) return result(target, "unavailable", target.unavailableReason);
 		if (target.ambiguousReason) return result(target, "ambiguous", target.ambiguousReason);
 		try {
-			return target.client === "codex"
-				? configureCodex(target, launch, options)
-				: configureJson(target, launch, options);
+			let configured = launch;
+			let nativeFeed: ClientOutcome["nativeFeed"];
+			if (
+				options.nativeFeed &&
+				target.client !== "claude-desktop" &&
+				settings(options).platform !== "win32"
+			) {
+				const { home } = settings(options);
+				const parsed = proxyLaunchOptions(launch.args);
+				if (!parsed) throw new Error("Invalid managed proxy arguments.");
+				try {
+					const registration = nativeFeedRegistration(target.client, { home });
+					configured = {
+						...launch,
+						args: [
+							...parsed.baseArgs,
+							"--feed-client",
+							target.client,
+							"--feed-registration",
+							registration,
+						],
+					};
+					const settingsOptions = { ...options, scope: target.scope ?? options.scope };
+					nativeFeed = {
+						registration,
+						home,
+						serverArgv: parsed.serverArgv,
+						settingsPath: nativeFeedSettingsPath(target.client, settingsOptions),
+					};
+				} catch {
+					// Optional feed state must not prevent a normal hosted tool registration.
+				}
+			}
+			const outcome =
+				target.client === "codex"
+					? configureCodex(target, configured, options)
+					: configureJson(target, configured, options);
+			return nativeFeed &&
+				(outcome.status === "configured" || outcome.status === "already-configured")
+				? { ...outcome, nativeFeed }
+				: outcome;
 		} catch (error) {
 			return result(
 				target,
@@ -1088,13 +1431,73 @@ function sameRunningRuntime(configured: LaunchConfig, running: LaunchConfig): bo
 	return realpathSync(configured.command) === realpathSync(running.command);
 }
 
+/** Parse only installer-owned options while preserving local activation and literal server tokens. */
+function proxyLaunchOptions(args: readonly string[]): {
+	baseArgs: string[];
+	serverArgv: string[];
+	client?: string;
+	registration?: string;
+} | null {
+	const parsed: {
+		baseArgs: string[];
+		serverArgv: string[];
+		client?: string;
+		registration?: string;
+	} = {
+		baseArgs: [args[0]],
+		serverArgv: [],
+	};
+	const seen = new Set<string>();
+	for (let index = 1; index < args.length; index += 2) {
+		const key = args[index];
+		const value = args[index + 1];
+		if (!value || seen.has(key)) return null;
+		seen.add(key);
+		if (key === "--server") {
+			parsed.serverArgv = [key, value];
+			parsed.baseArgs.push(key, value);
+		} else if (key === "--install-scope" && value === "local") parsed.baseArgs.push(key, value);
+		else if (key === "--install-root" && isAbsolute(value)) parsed.baseArgs.push(key, value);
+		else if (key === "--feed-client" && ["claude-code", "codex"].includes(value))
+			parsed.client = value;
+		else if (
+			key === "--feed-registration" &&
+			/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+		)
+			parsed.registration = value;
+		else return null;
+	}
+	if (seen.has("--install-scope") !== seen.has("--install-root")) return null;
+	return Boolean(parsed.client) === Boolean(parsed.registration) ? parsed : null;
+}
+
+/** Compare activation scope while allowing a common install launch to omit adapter-specific feed flags. */
+function sameLocalLaunch(
+	configured: LaunchConfig,
+	running: LaunchConfig,
+	client: "claude-code" | "codex",
+): boolean {
+	const actual = proxyLaunchOptions(configured.args);
+	const expected = proxyLaunchOptions(running.args);
+	return (
+		!!actual &&
+		!!expected &&
+		canonical(actual.baseArgs) === canonical(expected.baseArgs) &&
+		(!actual.client || actual.client === client) &&
+		(!expected.client ||
+			(actual.client === expected.client && actual.registration === expected.registration))
+	);
+}
+
 function supportsRegisteredProxy(
 	launch: LaunchConfig,
 	home: string,
 	required: { minimumVersion: string; server: string },
 ): boolean {
-	const [registered, flag, configuredServer, ...rest] = launch.args;
-	if (flag !== undefined && (flag !== "--server" || !configuredServer || rest.length)) return false;
+	const [registered] = launch.args;
+	const parsed = proxyLaunchOptions(launch.args);
+	if (!parsed) return false;
+	const configuredServer = parsed.serverArgv[1];
 	if (new URL(configuredServer ?? DEFAULT_SERVER).origin !== new URL(required.server).origin)
 		return false;
 	// A registration through the stable launcher runs the version current.json names.
@@ -1139,6 +1542,8 @@ export function verifiedCodingClients(
 		runningLaunch?: LaunchConfig;
 		requiredProxy?: { minimumVersion: string; server: string };
 		rejectProjectOverrides?: boolean;
+		/** Checkout whose project override can suppress automatic repair. */
+		projectRoot?: string;
 	} = {},
 ): Array<"claude-code" | "codex"> {
 	let data: Provenance;
@@ -1163,20 +1568,25 @@ export function verifiedCodingClients(
 			path: join(resolve(env.CODEX_HOME || join(home, ".codex")), "config.toml"),
 		});
 	}
-	return targets.flatMap((target) => {
+	return scopeInstallTargets(targets, options.scope ?? { kind: "global" }).flatMap((target) => {
+		if (target.client === "claude-desktop") return [];
 		try {
 			const directory = lstatSync(dirname(target.path), { throwIfNoEntry: false });
 			if (!directory?.isDirectory() || directory.isSymbolicLink()) return [];
-			const document = parse(target, snapshot(target.path).text);
+			const document = targetDocument(parse(target, snapshot(target.path).text), target);
 			const value = entry(document, target.client);
 			if (
 				disabled(document, value) ||
-				(options.rejectProjectOverrides &&
+				(target.scope?.kind !== "local" &&
+					options.rejectProjectOverrides &&
 					target.client === "claude-code" &&
-					projectOverrides(document)) ||
+					projectOverrides(document, options.projectRoot)) ||
 				!persistentLaunch(value) ||
 				!owned(target, value, data) ||
 				(options.runningLaunch && !sameRunningRuntime(value, options.runningLaunch)) ||
+				(target.scope?.kind === "local" &&
+					options.runningLaunch &&
+					!sameLocalLaunch(value, options.runningLaunch, target.client)) ||
 				(options.requiredProxy && !supportsRegisteredProxy(value, home, options.requiredProxy))
 			)
 				return [];
@@ -1192,20 +1602,72 @@ export function verifiedCodingClients(
 export function cleanupManagedClients(options: ClientInstallOptions = {}): ClientOutcome[] {
 	const { data } = readProvenance(options);
 	const targets = new Map<string, ClientTarget>();
+	const requested = options.scope ?? { kind: "global" };
+	const key = (target: ClientTarget) =>
+		`${target.client}:${target.path}:${target.scope?.kind === "local" ? target.scope.root : "global"}`;
 	for (const value of Object.values(data.registrations)) {
 		if (
 			object(value) &&
 			typeof value.path === "string" &&
 			isAbsolute(value.path) &&
 			["claude-code", "codex", "claude-desktop"].includes(value.client)
-		)
-			targets.set(`${value.client}:${value.path}`, { client: value.client, path: value.path });
+		) {
+			if (options.client && value.client !== options.client) continue;
+			const scope: InstallScope = value.scope ?? { kind: "global" };
+			if (
+				scope.kind !== requested.kind ||
+				(scope.kind === "local" && requested.kind === "local" && scope.root !== requested.root)
+			)
+				continue;
+			const target = { client: value.client, path: value.path, scope };
+			targets.set(key(target), target);
+		}
+	}
+	// An active custom registration without a receipt must be reported, not silently
+	// treated as removed. These paths are known; cleanup does not execute client discovery.
+	const { home, env } = settings(options);
+	const known: ClientTarget[] = [
+		{
+			client: "claude-code",
+			path: env.CLAUDE_CONFIG_DIR
+				? join(configuredRoot(env.CLAUDE_CONFIG_DIR, ""), ".claude.json")
+				: join(home, ".claude.json"),
+			scope: requested,
+		},
+		{
+			client: "codex",
+			path:
+				requested.kind === "local"
+					? join(requested.root, ".codex", "config.toml")
+					: join(configuredRoot(env.CODEX_HOME, join(home, ".codex")), "config.toml"),
+			scope: requested,
+		},
+	];
+	const desktop = requested.kind === "global" ? desktopPath(options) : null;
+	if (desktop) known.push({ client: "claude-desktop", path: desktop, scope: requested });
+	for (const target of known) {
+		if (options.client && target.client !== options.client) continue;
+		if (targets.has(key(target))) continue;
+		try {
+			if (targetEntry(parse(target, snapshot(target.path).text), target) !== undefined)
+				targets.set(key(target), target);
+		} catch {
+			targets.set(key(target), target);
+		}
 	}
 	return [...targets.values()].map((target) => {
 		try {
+			if (trackedProjectSettings(target))
+				return result(
+					target,
+					"preserved-custom",
+					"The tracked Codex project configuration was kept.",
+				);
 			const before = snapshot(target.path);
 			const document = parse(target, before.text);
-			const current = entry(document, target.client);
+			const current = targetEntry(document, target);
+			if (current === undefined)
+				return result(target, "already-configured", "The selected registration is already absent.");
 			const receipt = owned(target, current, data);
 			if (!receipt)
 				return result(
@@ -1217,7 +1679,7 @@ export function cleanupManagedClients(options: ClientInstallOptions = {}): Clien
 			if (target.client === "codex") {
 				if (receipt.block && before.text?.split(receipt.block).length === 2)
 					next = before.text.replace(receipt.block, "");
-				else if (availableCli(options, "codex")) {
+				else if (target.scope?.kind !== "local" && availableCli(options, "codex")) {
 					if (!unchanged(target.path, before))
 						throw new Error("The Codex configuration changed during cleanup.");
 					// A receipt may refer to a profile different from the current CODEX_HOME.
@@ -1244,11 +1706,16 @@ export function cleanupManagedClients(options: ClientInstallOptions = {}): Clien
 						"The managed Codex registration needs its CLI for removal.",
 					);
 			} else {
-				delete entries(document, target.client).pharaoh;
+				delete entries(targetDocument(document, target), target.client).pharaoh;
 				next = `${JSON.stringify(document, null, "\t")}\n`;
 			}
 			parse(target, next);
-			atomicReplace(target.path, before, next);
+			atomicReplace(
+				target.path,
+				before,
+				next,
+				target.client === "codex" ? target.scope : undefined,
+			);
 			return result(target, "configured", "Removed the managed registration.");
 		} catch (error) {
 			return result(

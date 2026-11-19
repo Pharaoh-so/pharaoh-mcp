@@ -1,11 +1,13 @@
 /** Exercise the independent consent, native reduction, profile binding and delivery boundary. */
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -14,12 +16,15 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	automaticRuntimeIntent,
+	attachRuntimeTarget,
 	claimRuntimeDelivery,
 	configuredRuntimeHooks,
 	disableRuntime,
+	detachRuntimeTarget,
 	enableRuntime,
 	flushRuntimeQueue,
 	recordRuntimeHook,
+	recordRuntimeReceipt,
 	revokeRuntime,
 	type RuntimeClient,
 	type RuntimeOAuthCredentials,
@@ -32,6 +37,7 @@ import {
 } from "../runtime/runtime-client.mjs";
 import { type RuntimeEvent, RUNTIME_POLICY_VERSION } from "../runtime/runtime-contract.mjs";
 import { EVENT_TTL_MS, RUNTIME_META } from "../runtime/runtime-native.mjs";
+import { runtimeTargetId } from "../runtime/runtime-scope.mjs";
 
 const SERVER = "https://mcp.example.test";
 const NOW = Date.parse("2026-11-05T18:00:00.000Z");
@@ -762,6 +768,15 @@ describe.skipIf(typeof process.getuid !== "function")(
 				tool_response: { content: [JSON.stringify(meta)] },
 			});
 			hook("claude-code", "Stop", { last_assistant_message: SENTINEL });
+			expect(runtimeStatus("claude-code", options).receiptCoverage).toBe("observed");
+			expect(
+				JSON.parse(
+					readFileSync(
+						join(home, ".pharaoh", "runtime-observations", "claude-code", "status.json"),
+						"utf8",
+					),
+				).receiptObserved,
+			).toBe(true);
 			holdReceipt = true;
 			await flush("claude-code");
 			const events = batches[0].events;
@@ -871,6 +886,369 @@ describe.skipIf(typeof process.getuid !== "function")(
 			});
 			expect(attempts[0]).not.toHaveProperty("nativeCallRef");
 			expect(new Set(attempts.map((event) => event.eventId)).size).toBe(25);
+		});
+
+		function localTarget(name: string): RuntimeOptions {
+			const root = join(home, name);
+			mkdirSync(root);
+			execFileSync("git", ["init", "-q", root], { stdio: "ignore" });
+			return { ...options, scope: { kind: "local", root }, cwd: root };
+		}
+
+		async function flushTarget(target: RuntimeOptions) {
+			const lease = claimRuntimeDelivery("claude-code", target);
+			if (!lease) throw new Error("expected a scoped delivery");
+			await flushRuntimeQueue("claude-code", lease, target);
+		}
+
+		it("shares enrollment across Local targets while keeping sessions and native evidence separate", async () => {
+			metadataVersion = 2;
+			const a = localTarget("Repo A");
+			const b = localTarget("Repo B");
+			const hookPath = join(home, "pinned", "hook.mjs");
+			expect(await enableRuntime("claude-code", SERVER, hookPath, a)).toBe(true);
+			expect(
+				await attachRuntimeTarget("claude-code", hookPath, { ...b, clientBuild: "unknown" }),
+			).toBe(true);
+			expect(runtimeStatus("claude-code", a).generation).toBe(
+				runtimeStatus("claude-code", b).generation,
+			);
+			expect(runtimeRequestMetadata("claude-code", a)?.metadata).toEqual(
+				runtimeRequestMetadata("claude-code", b)?.metadata,
+			);
+			expect(runtimeRequestMetadata("claude-code", options)).toBeUndefined();
+			expect(existsSync(join(home, ".claude", "settings.json"))).toBe(false);
+			expect(hook("claude-code", "SessionStart", { cwd: a.cwd, model: "claude-opus-5-5" }, a)).toBe(
+				false,
+			);
+			expect(hook("claude-code", "UserPromptSubmit", { cwd: a.cwd, prompt_id: TURN }, a)).toBe(
+				true,
+			);
+			expect(hook("claude-code", "UserPromptSubmit", { cwd: b.cwd, prompt_id: TURN }, b)).toBe(
+				true,
+			);
+			await flushTarget(a);
+			await flushTarget(b);
+			const starts = batches
+				.flatMap((batch) => batch.events)
+				.filter((event) => event.kind === "episode_start");
+			expect(starts).toHaveLength(2);
+			expect(starts[0].sessionRef).not.toBe(starts[1].sessionRef);
+			expect(starts[0].episodeRef).not.toBe(starts[1].episodeRef);
+			expect(starts[0].exploration?.modelId).toBe("claude-opus-5-5");
+			expect(starts[1].exploration?.modelId).toBeNull();
+			expect(starts[1].exploration?.clientBuild).toBe("unknown");
+			for (const batch of batches)
+				for (const privateValue of [a.cwd!, b.cwd!, "__targetId", "targetId", SESSION])
+					expect(batch.body).not.toContain(privateValue);
+		});
+
+		it("preserves the active Local observer when reattaching updated hooks fails, then retries", async () => {
+			const target = localTarget("reattach");
+			const oldHook = join(home, "old-pinned", "hook.mjs");
+			const newHook = join(home, "new-pinned", "hook.mjs");
+			expect(await enableRuntime("claude-code", SERVER, oldHook, target)).toBe(true);
+			expect(hook("claude-code", "UserPromptSubmit", { cwd: target.cwd }, target)).toBe(true);
+			const statePath = join(
+				home,
+				".pharaoh",
+				"runtime-observations",
+				"claude-code",
+				`target-${runtimeTargetId("claude-code", target)}.json`,
+			);
+			const before = JSON.parse(readFileSync(statePath, "utf8"));
+			const settings = join(target.cwd!, ".claude", "settings.local.json");
+			const originalSettings = readFileSync(settings, "utf8");
+			try {
+				writeFileSync(settings, "{ malformed");
+				expect(await attachRuntimeTarget("claude-code", newHook, target)).toBe(false);
+				expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual(before);
+				expect(
+					runtimeRequestMetadata("claude-code", { ...target, hookPath: oldHook }),
+				).toBeDefined();
+			} finally {
+				writeFileSync(settings, originalSettings);
+			}
+			expect(await attachRuntimeTarget("claude-code", newHook, target)).toBe(true);
+			expect(runtimeRequestMetadata("claude-code", { ...target, hookPath: newHook })).toBeDefined();
+			expect(
+				runtimeRequestMetadata("claude-code", { ...target, hookPath: oldHook }),
+			).toBeUndefined();
+			expect(
+				hook(
+					"claude-code",
+					"UserPromptSubmit",
+					{ cwd: target.cwd },
+					{ ...target, hookPath: newHook },
+				),
+			).toBe(true);
+		});
+
+		it("rejects inherited Local observations outside the target and accepts nested cwd", async () => {
+			const a = localTarget("a");
+			const b = localTarget("b");
+			const nested = join(a.cwd!, "nested");
+			mkdirSync(nested);
+			expect(await enableRuntime("claude-code", SERVER, join(home, "hook.mjs"), a)).toBe(true);
+			expect(hook("claude-code", "UserPromptSubmit", { cwd: b.cwd }, { ...a, cwd: b.cwd })).toBe(
+				false,
+			);
+			expect(hook("claude-code", "UserPromptSubmit", { cwd: b.cwd }, a)).toBe(false);
+			expect(runtimeRequestMetadata("claude-code", { ...a, cwd: b.cwd })).toBeUndefined();
+			expect(hook("claude-code", "UserPromptSubmit", { cwd: nested }, { ...a, cwd: nested })).toBe(
+				true,
+			);
+		});
+
+		it("only joins Local receipts registered by that target's proxy", async () => {
+			const a = localTarget("a");
+			const b = localTarget("b");
+			const hookPath = join(home, "hook.mjs");
+			expect(await enableRuntime("claude-code", SERVER, hookPath, a)).toBe(true);
+			expect(await attachRuntimeTarget("claude-code", hookPath, b)).toBe(true);
+			const receipt = randomUUID();
+			const result = {
+				_meta: { [RUNTIME_META]: { receipt, expiresAt: new Date(NOW + 60_000).toISOString() } },
+			};
+			expect(recordRuntimeReceipt("claude-code", result, a)).toBe(true);
+			const tool = {
+				tool_name: "mcp__pharaoh__get_codebase_map",
+				tool_use_id: "tool-private",
+				tool_response: result,
+			};
+			expect(hook("claude-code", "PostToolUse", { ...tool, cwd: b.cwd }, b)).toBe(true);
+			expect(hook("claude-code", "PostToolUse", { ...tool, cwd: a.cwd }, a)).toBe(true);
+			await flushTarget(b);
+			await flushTarget(a);
+			expect(batches[0].events[0]).not.toHaveProperty("receipt");
+			expect(batches[1].events[0].receipt).toBe(receipt);
+		});
+
+		it("keeps receipt storage failures nonfatal and allows a later retry", async () => {
+			const target = localTarget("receipt-storage");
+			expect(await enableRuntime("claude-code", SERVER, join(home, "hook.mjs"), target)).toBe(true);
+			const directory = join(home, ".pharaoh", "runtime-observations", "claude-code");
+			const moved = `${directory}-moved`;
+			const metadata = {
+				[RUNTIME_META]: { receipt: randomUUID(), expiresAt: new Date(NOW + 60_000).toISOString() },
+			};
+			let interrupted = false;
+			const result = {
+				get _meta() {
+					// Reproduce storage disappearing after enrollment validation, before the write.
+					if (!interrupted) {
+						renameSync(directory, moved);
+						interrupted = true;
+					}
+					return metadata;
+				},
+			};
+			try {
+				expect(recordRuntimeReceipt("claude-code", result, target)).toBe(false);
+			} finally {
+				if (existsSync(moved)) renameSync(moved, directory);
+			}
+			expect(recordRuntimeReceipt("claude-code", result, target)).toBe(true);
+		});
+
+		it("records native events and Local receipts while an earlier batch is in flight", async () => {
+			const target = localTarget("in-flight");
+			expect(await enableRuntime("claude-code", SERVER, join(home, "hook.mjs"), target)).toBe(true);
+			expect(hook("claude-code", "UserPromptSubmit", { cwd: target.cwd }, target)).toBe(true);
+			let started = () => {};
+			const dispatched = new Promise<void>((resolve) => {
+				started = resolve;
+			});
+			let resume = () => {};
+			const held = new Promise<void>((resolve) => {
+				resume = resolve;
+			});
+			let first = true;
+			const lease = claimRuntimeDelivery("claude-code", target);
+			if (!lease) throw new Error("expected queued native event");
+			const sending = flushRuntimeQueue("claude-code", lease, {
+				...target,
+				fetchImpl: async (url, init) => {
+					if (first && new URL(String(url)).pathname.endsWith("/events")) {
+						first = false;
+						started();
+						await held;
+					}
+					return options.fetchImpl?.(url, init) ?? Response.error();
+				},
+			});
+			await dispatched;
+			const receipt = randomUUID();
+			const result = {
+				_meta: {
+					[RUNTIME_META]: {
+						receipt,
+						expiresAt: new Date(NOW + 60_000).toISOString(),
+					},
+				},
+			};
+			try {
+				expect(recordRuntimeReceipt("claude-code", result, target)).toBe(true);
+				expect(
+					hook(
+						"claude-code",
+						"PostToolUse",
+						{
+							cwd: target.cwd,
+							tool_name: "mcp__pharaoh__get_codebase_map",
+							tool_use_id: "in-flight-receipt",
+							tool_response: result,
+						},
+						target,
+					),
+				).toBe(true);
+				expect(hook("claude-code", "Stop", { cwd: target.cwd }, target)).toBe(true);
+			} finally {
+				resume();
+			}
+			await sending;
+			const events = batches.flatMap((batch) => batch.events);
+			expect(events.map((event) => event.kind)).toContain("episode_end");
+			expect(events.find((event) => event.receipt === receipt)).toBeDefined();
+		});
+
+		it.each([
+			"expired",
+			"changed sign-in",
+		])("cleans a Local target with %s enrollment", async (reason) => {
+			const target = localTarget("inactive");
+			expect(await enableRuntime("claude-code", SERVER, join(home, "hook.mjs"), target)).toBe(true);
+			if (reason === "changed sign-in") signIn = credentialsFor(SERVER);
+			else {
+				const path = join(home, ".pharaoh", "runtime-observations", "claude-code", "state.json");
+				const state = JSON.parse(readFileSync(path, "utf8"));
+				writeFileSync(
+					path,
+					JSON.stringify({ ...state, expiresAt: new Date(NOW + 1).toISOString() }),
+				);
+				target.now = NOW + 2;
+			}
+			expect(runtimeRequestMetadata("claude-code", target)).toBeUndefined();
+			expect(await detachRuntimeTarget("claude-code", target)).toBe(true);
+			const settings = JSON.parse(
+				readFileSync(join(target.cwd!, ".claude", "settings.local.json"), "utf8"),
+			);
+			expect(settings.hooks).toEqual({});
+			expect(existsSync(join(home, ".pharaoh", "runtime-observations", "claude-code"))).toBe(false);
+		});
+
+		it("retries failed Local hook cleanup and an offline last-target revocation", async () => {
+			const target = localTarget("cleanup-retry");
+			expect(await enableRuntime("claude-code", SERVER, join(home, "hook.mjs"), target)).toBe(true);
+			const path = join(target.cwd!, ".claude", "settings.local.json");
+			const installed = readFileSync(path, "utf8");
+			writeFileSync(path, "{ malformed");
+			expect(await detachRuntimeTarget("claude-code", target)).toBe(false);
+			expect(runtimeRequestMetadata("claude-code", target)).toBeUndefined();
+			writeFileSync(path, installed);
+			offline = true;
+			expect(await detachRuntimeTarget("claude-code", target)).toBe(false);
+			expect(JSON.parse(readFileSync(path, "utf8")).hooks).toEqual({});
+			expect(runtimeStatus("claude-code", target).consent).toBe("revocation_pending");
+			offline = false;
+			expect(await detachRuntimeTarget("claude-code", target)).toBe(true);
+			expect(runtimeStatus("claude-code", target).consent).toBe("off");
+		});
+
+		it("fences a concurrent attachment before retiring the last Local target", async () => {
+			const a = localTarget("retiring");
+			const b = localTarget("attaching");
+			const hookPath = join(home, "hook.mjs");
+			expect(await enableRuntime("claude-code", SERVER, hookPath, a)).toBe(true);
+			const detaching = detachRuntimeTarget("claude-code", a);
+			const attaching = attachRuntimeTarget("claude-code", hookPath, b);
+			expect(await detaching).toBe(true);
+			expect(await attaching).toBe(false);
+			expect(runtimeRequestMetadata("claude-code", b)).toBeUndefined();
+			expect(existsSync(join(b.cwd!, ".claude", "settings.local.json"))).toBe(false);
+		});
+
+		it("detaches one Local target and its queued data without revoking another", async () => {
+			const a = localTarget("a");
+			const b = localTarget("b");
+			const hookPath = join(home, "hook.mjs");
+			expect(await enableRuntime("claude-code", SERVER, hookPath, a)).toBe(true);
+			expect(await attachRuntimeTarget("claude-code", hookPath, b)).toBe(true);
+			hook("claude-code", "UserPromptSubmit", { cwd: a.cwd }, a);
+			hook("claude-code", "UserPromptSubmit", { cwd: b.cwd }, b);
+			expect(await detachRuntimeTarget("claude-code", a)).toBe(true);
+			expect(runtimeRequestMetadata("claude-code", a)).toBeUndefined();
+			expect(runtimeRequestMetadata("claude-code", b)).toBeDefined();
+			expect(hook("claude-code", "Stop", { cwd: a.cwd }, a)).toBe(false);
+			await flushTarget(b);
+			expect(batches.flatMap((batch) => batch.events)).toHaveLength(1);
+			expect(await detachRuntimeTarget("claude-code", b)).toBe(true);
+			expect(runtimeStatus("claude-code", b).consent).toBe("off");
+			expect(await detachRuntimeTarget("claude-code", b)).toBe(true);
+		});
+
+		it("keeps a client-wide opt-out effective for all Local targets", async () => {
+			const a = localTarget("a");
+			const b = localTarget("b");
+			const hookPath = join(home, "hook.mjs");
+			expect(await enableRuntime("claude-code", SERVER, hookPath, a)).toBe(true);
+			expect(await attachRuntimeTarget("claude-code", hookPath, b)).toBe(true);
+			expect(await disableRuntime("claude-code", a)).toBe("disabled");
+			expect(automaticRuntimeIntent("claude-code", a)).toBeNull();
+			expect(automaticRuntimeIntent("claude-code", b)).toBeNull();
+			expect(await attachRuntimeTarget("claude-code", hookPath, b)).toBe(false);
+		});
+
+		it("does not trust GIT_DIR to move an unrelated cwd into a Local target", async () => {
+			const a = localTarget("a");
+			const b = localTarget("b");
+			expect(await enableRuntime("claude-code", SERVER, join(home, "hook.mjs"), a)).toBe(true);
+			const previous = process.env.GIT_DIR;
+			process.env.GIT_DIR = join(a.cwd!, ".git");
+			try {
+				expect(hook("claude-code", "UserPromptSubmit", { cwd: b.cwd }, { ...a, cwd: b.cwd })).toBe(
+					false,
+				);
+			} finally {
+				if (previous === undefined) delete process.env.GIT_DIR;
+				else process.env.GIT_DIR = previous;
+			}
+		});
+
+		it("does not inherit Local activation in a linked worktree", async () => {
+			const a = localTarget("main-checkout");
+			execFileSync(
+				"git",
+				[
+					"-C",
+					a.cwd!,
+					"-c",
+					"user.name=Fixture",
+					"-c",
+					"user.email=fixture@example.test",
+					"commit",
+					"--allow-empty",
+					"-qm",
+					"fixture",
+				],
+				{ stdio: "ignore" },
+			);
+			const sibling = join(home, "sibling");
+			execFileSync("git", ["-C", a.cwd!, "worktree", "add", "-qb", "sibling", sibling], {
+				stdio: "ignore",
+			});
+			expect(await enableRuntime("claude-code", SERVER, join(home, "hook.mjs"), a)).toBe(true);
+			expect(runtimeRequestMetadata("claude-code", { ...a, cwd: sibling })).toBeUndefined();
+			expect(
+				hook("claude-code", "UserPromptSubmit", { cwd: sibling }, { ...a, cwd: sibling }),
+			).toBe(false);
+		});
+
+		it("keeps legacy custom-profile opt-outs and pending revocations fenced", async () => {
+			expect(await disableRuntime("codex", options)).toBe("disabled");
+			const custom = { ...options, env: { CODEX_HOME: join(home, "custom-codex") } };
+			expect(automaticRuntimeIntent("codex", custom)).toBeNull();
+			expect(await attachRuntimeTarget("codex", join(home, "hook.mjs"), custom)).toBe(false);
 		});
 	},
 );

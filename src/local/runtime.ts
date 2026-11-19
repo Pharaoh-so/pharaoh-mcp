@@ -168,7 +168,14 @@ export function createLocalBlastRuntime(
 		host.managedClients().includes(client);
 	const currentCheckout = (): CheckoutEvidence => {
 		try {
-			return resolveLocalCheckout(process.cwd());
+			const evidence = resolveLocalCheckout(process.cwd());
+			if (
+				host.scope?.kind === "local" &&
+				evidence.kind === "checkout" &&
+				evidence.checkout.root !== host.scope.root
+			)
+				return { kind: "unverified" };
+			return evidence;
 		} catch {
 			return { kind: "unverified" };
 		}
@@ -183,10 +190,10 @@ export function createLocalBlastRuntime(
 			if (!client || !managed(client)) return;
 			const evidence = currentCheckout();
 			if (evidence.kind === "checkout") {
-				const binding = localWorktreeBinding(client, entry, signIn.read());
+				const binding = localWorktreeBinding(client, entry, signIn.read(), host.scope);
 				generation = observeRuntimeGeneration(client, binding, evidence.checkout, {
 					resolveCheckout: resolveLocalCheckout,
-					memoryRuntime: nativeMemoryRuntimeBinding(client, entry),
+					memoryRuntime: nativeMemoryRuntimeBinding(client, entry, host.scope),
 				});
 			}
 		},
@@ -198,7 +205,7 @@ export function createLocalBlastRuntime(
 				Object.keys(args).length === 1 &&
 				managed(client) &&
 				verifyRuntimeSession(generation, args.challenge, {
-					binding: localWorktreeBinding(client, entry, signIn.read()),
+					binding: localWorktreeBinding(client, entry, signIn.read(), host.scope),
 				});
 			if (!verified) return localRefusal("unverified_worktree");
 			return {
@@ -225,7 +232,7 @@ export function createLocalBlastRuntime(
 			if (!credentials) return undefined;
 			const checkout = consumeLocalWorktreeContext(token, args, {
 				client,
-				binding: localWorktreeBinding(client, entry, credentials),
+				binding: localWorktreeBinding(client, entry, credentials, host.scope),
 				resolveCheckout: resolveLocalCheckout,
 				generation,
 			});

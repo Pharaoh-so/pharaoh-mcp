@@ -15,6 +15,11 @@ import { readHookPreferences } from "../project-memory/preferences.mjs";
 import { legacyMemoryHooksMayRun } from "../project-memory/user-target.mjs";
 import { nativeIdentifier } from "./runtime-native.mjs";
 import {
+	runtimeScopeArguments,
+	runtimeScopeFromArguments,
+	runtimeScopeMatches,
+} from "./runtime-scope.mjs";
+import {
 	ensurePrivateDirectory,
 	privatePath,
 	readRuntimeJSON,
@@ -578,7 +583,7 @@ function matchingRepo(value, repoSlug) {
  * @param credentials - Private credentials; refresh rotates this generation.
  * @returns A local hash, or undefined when the sign-in cannot be bound.
  */
-export function localWorktreeBinding(client, launchEntry, credentials) {
+export function localWorktreeBinding(client, launchEntry, credentials, scope) {
 	if (
 		!CLIENTS.includes(client) ||
 		typeof launchEntry !== "string" ||
@@ -591,16 +596,31 @@ export function localWorktreeBinding(client, launchEntry, credentials) {
 	try {
 		const origin = new URL(credentials.sse_url).origin;
 		if (origin !== "null")
-			return hash(JSON.stringify([client, launchEntry, origin, credentials.refresh_token]));
+			return hash(
+				JSON.stringify([
+					client,
+					launchEntry,
+					origin,
+					credentials.refresh_token,
+					...(scope?.kind === "local" ? [scope.root] : []),
+				]),
+			);
 	} catch {
 		// Malformed or absent credentials do not bind a grant.
 	}
 }
 
 /** Bind a native memory call to the verified managed launch across normal auth replay. */
-export function nativeMemoryRuntimeBinding(client, launchEntry) {
+export function nativeMemoryRuntimeBinding(client, launchEntry, scope) {
 	if (CLIENTS.includes(client) && typeof launchEntry === "string" && isAbsolute(launchEntry)) {
-		return hash(JSON.stringify(["pharaoh-native-memory-v1", client, launchEntry]));
+		return hash(
+			JSON.stringify([
+				"pharaoh-native-memory-v1",
+				client,
+				launchEntry,
+				...(scope?.kind === "local" ? [scope.root] : []),
+			]),
+		);
 	}
 }
 
@@ -1190,6 +1210,8 @@ async function runHook(client, loadAnalysis) {
 	if (!CLIENTS.includes(client)) return;
 	const input = await readHookInput();
 	if (!input) return;
+	const scope = runtimeScopeFromArguments(process.argv.slice(2));
+	if (!scope || !runtimeScopeMatches(scope, { inputCwd: input.cwd })) return;
 	const save =
 		(input.hook_event_name === "PreToolUse" || input.hook_event_name === "PostToolUse") &&
 		!claimedTool(input);
@@ -1209,16 +1231,23 @@ async function runHook(client, loadAnalysis) {
 			? launcher
 			: fileURLToPath(new URL("../dist/index.js", import.meta.url));
 	const home = homedir();
+	const serverIndex = process.argv.indexOf("--server");
+	const server = serverIndex < 0 ? undefined : process.argv[serverIndex + 1];
+	if (serverIndex >= 0 && (!server || server.startsWith("--"))) return;
 	const managed = verifiedCodingClients({
-		runningLaunch: { command: process.execPath, args: [entry] },
+		runningLaunch: {
+			command: process.execPath,
+			args: [entry, ...(server ? ["--server", server] : []), ...runtimeScopeArguments(scope)],
+		},
 		rejectProjectOverrides: true,
+		scope,
 	}).includes(client);
 	const analyzer = managed ? installedLocalAnalyzer() : undefined;
 	const verified = analyzer && localWorktreeDiagnosticsReady(home);
 	const credentials = verified
 		? readRuntimeJSON(join(home, ".pharaoh", "credentials.json"), 65_536)
 		: undefined;
-	const binding = localWorktreeBinding(client, entry, credentials);
+	const binding = localWorktreeBinding(client, entry, credentials, scope);
 	const deadline = performance.now() + 1_500;
 	const saveOptions =
 		save && analyzer && binding
@@ -1233,7 +1262,7 @@ async function runHook(client, loadAnalysis) {
 	const result = handleLocalWorktreeHook(input, {
 		client,
 		binding,
-		memoryRuntime: managed ? nativeMemoryRuntimeBinding(client, entry) : undefined,
+		memoryRuntime: managed ? nativeMemoryRuntimeBinding(client, entry, scope) : undefined,
 		resolveCheckout: resolveLocalCheckout,
 		home,
 		...saveOptions,

@@ -1,3 +1,5 @@
+import type { MemoryInstallScope } from "./install-scope.mjs";
+
 export type MemoryHookClient = "claude-code" | "codex";
 export type MemoryHookState = "installed" | "declined" | "absent" | "unsupported" | "unknown";
 export type HookPreferences = Partial<
@@ -22,13 +24,22 @@ export function writeHookPreferences(
 ): void;
 export function resetHookPreferences(disable: boolean, home?: string): void;
 export function setMemoryCapture(enabled: boolean, home?: string): void;
+export function nativeMemoryClient(
+	info: { name?: string } | undefined,
+): MemoryHookClient | undefined;
 export function memoryHookStateForClient(
 	info: { name?: string; version?: string } | undefined,
-	options?: { home?: string; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform },
+	options?: {
+		home?: string;
+		env?: NodeJS.ProcessEnv;
+		platform?: NodeJS.Platform;
+		scope?: MemoryInstallScope;
+	},
 ): MemoryHookState;
 export function memoryDiagnosticsForClient(
 	info: { name?: string; version?: string },
 	home?: string,
+	scope?: MemoryInstallScope,
 ):
 	| {
 			clientName: MemoryHookClient;

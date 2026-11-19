@@ -1,0 +1,5 @@
+These fixtures preserve the event/identity fields and canonical tool names observed in isolated interactive Codex 0.166.0 and Claude Code 2.1.327/2.1.328 transport checks on 2026-11-19. Both checks used ordinary native hook trust and subscription authentication. Each child received an initial `SubagentStart` marker and a later `PostToolUse` marker; recipient-side output contained both.
+
+Identifiers, paths, tool inputs and responses here are synthetic. There are no copied transcripts, prompts, credentials or repository contents. These are adapter regression inputs, not a claim that the production feed's relevance, performance, sibling races, compaction, reconnect or unsupported surfaces have been proven.
+
+Codex's shell hook payload names the tool `Bash`, although the underlying API tool is `exec_command`. Its exact release's schema and hook tests are at commit `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`. Patch handling was not exercised by the interactive read-only transport check and needs a separate release fixture before being advertised as verified.
