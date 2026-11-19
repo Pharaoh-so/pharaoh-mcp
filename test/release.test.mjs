@@ -467,6 +467,18 @@ test("native context stays optional until a complete source-bound package is int
 	const packed = [...raw, ...modules.flatMap((name) => [`dist/${name}.js`, `dist/${name}.d.ts`])];
 	verifyPackPaths(paths, [], paths);
 	verifyPackPaths([...paths, ...packed], ["runtime"], [...paths, ...source]);
+	assert.throws(
+		() => verifyPackPaths(paths, [], [...paths, ...source]),
+		/Missing Native context npm assets/,
+	);
+	assert.throws(
+		() => verifyPackPaths(paths, [], [...paths, "src/native-feed-status.ts"]),
+		/Native context is absent or incomplete in the verified source/,
+	);
+	assert.throws(
+		() => verifyPackPaths([...paths, "dist/native-feed-status.js"], [], paths),
+		/Native context is absent or incomplete in the verified source/,
+	);
 	for (const omitted of packed)
 		assert.throws(
 			() =>
