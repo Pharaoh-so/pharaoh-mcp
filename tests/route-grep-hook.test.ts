@@ -11,7 +11,7 @@
  *   PreToolUse deny Claude Code understands
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -173,12 +173,44 @@ describe("route-grep-hook as Claude Code runs it", () => {
 		expect(garbage.stdout).toBe("");
 	});
 
+	it.each([
+		"invalid JSON",
+		JSON.stringify({ version: 1, clients: { "claude-code": { graph: "false" } } }),
+	])("allows Grep when preferences are invalid: %s", (text) => {
+		const root = join(home, ".pharaoh", "project-memory-client");
+		mkdirSync(root, { recursive: true, mode: 0o700 });
+		writeFileSync(join(root, "hook-preferences-v1.json"), text, { mode: 0o600 });
+		expect(
+			runHook(
+				{ session_id: "invalid", tool_name: "Grep", tool_input: { pattern: "resolveWidget" } },
+				true,
+			),
+		).toBe("");
+	});
+
+	it("allows Grep when the preferences are not private", () => {
+		const root = join(home, ".pharaoh", "project-memory-client");
+		mkdirSync(root, { recursive: true, mode: 0o700 });
+		writeFileSync(
+			join(root, "hook-preferences-v1.json"),
+			JSON.stringify({ version: 1, clients: {} }),
+			{ mode: 0o600 },
+		);
+		chmodSync(root, 0o755);
+		expect(
+			runHook(
+				{ session_id: "unsafe", tool_name: "Grep", tool_input: { pattern: "resolveWidget" } },
+				true,
+			),
+		).toBe("");
+	});
+
 	it("checks the same credentials file the proxy writes", () => {
 		expect(CREDENTIALS_FILE.join("/")).toBe(".pharaoh/credentials.json");
 		expect(CREDENTIALS_PATH.endsWith(join(...CREDENTIALS_FILE))).toBe(true);
 	});
 
-	it("imports nothing but Node built-ins, so the plugin runs it as is", () => {
+	it("keeps the classifier importable without loading the preference reader", () => {
 		const source = readFileSync(HOOK_SCRIPT, "utf-8");
 		const imports = [...source.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]);
 

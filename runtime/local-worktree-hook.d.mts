@@ -68,10 +68,15 @@ export function localWorktreeBinding(
 	client: string,
 	launchEntry: string,
 	credentials: { refresh_token: string; sse_url: string } | null | undefined,
+	scope?: { kind: "global" } | { kind: "local"; root: string },
 ): string | undefined;
 
 /** Derive a stable managed launch reference that survives normal sign-in replay. */
-export function nativeMemoryRuntimeBinding(client: string, launchEntry: string): string | undefined;
+export function nativeMemoryRuntimeBinding(
+	client: string,
+	launchEntry: string,
+	scope?: { kind: "global" } | { kind: "local"; root: string },
+): string | undefined;
 
 /** Evaluate one native command hook event. */
 export function handleLocalWorktreeHook(

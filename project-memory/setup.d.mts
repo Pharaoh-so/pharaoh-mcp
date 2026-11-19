@@ -1,3 +1,5 @@
+import type { MemoryInstallScope } from "./install-scope.mjs";
+
 type MemoryCredentials = {
 	sse_url: string;
 	project_memory?: Array<{ repo: string; revision: string | null }>;
@@ -10,6 +12,8 @@ type MemoryHookChoices = {
 	accepted: string[];
 	declined: string[];
 	graphClients: string[];
+	/** Clients whose selected installation may retain or enable diagnostic hooks. */
+	diagnosticClients?: string[];
 	notices: string[];
 	removeUnentitled?: boolean;
 };
@@ -21,6 +25,7 @@ type MemoryHookSetup = {
 	cwd?: string;
 	node?: string;
 	packageRoot?: URL;
+	scope?: MemoryInstallScope;
 };
 
 export function chooseMemoryHooks(options: {
@@ -30,6 +35,7 @@ export function chooseMemoryHooks(options: {
 	ask: (question: string, defaultAnswer: boolean) => Promise<boolean | null>;
 	home?: string;
 	env?: NodeJS.ProcessEnv;
+	scope?: MemoryInstallScope;
 }): Promise<MemoryHookChoices>;
 
 export function applyMemoryHookChoices(
@@ -38,7 +44,12 @@ export function applyMemoryHookChoices(
 ): string[];
 
 export function syncMemoryHooks(
-	options?: MemoryHookSetup & { clients?: string[]; graphClients?: string[]; enable?: boolean },
+	options?: MemoryHookSetup & {
+		clients?: string[];
+		graphClients?: string[];
+		diagnosticClients?: string[];
+		enable?: boolean;
+	},
 ): string[];
 
 export function ensureMemoryHooks(

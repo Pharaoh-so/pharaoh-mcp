@@ -37,6 +37,7 @@ const PACKAGE_NAME = "@pharaoh-so/mcp";
 /** Hook families a hook command can name, and their script in a version's package. */
 const HOOKS = {
 	"local-worktree": "runtime/local-worktree-hook.mjs",
+	"native-feed": "runtime/native-feed-hook.mjs",
 };
 const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
 const LOCK = ".activate-lock";

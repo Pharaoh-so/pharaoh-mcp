@@ -7,8 +7,8 @@
  * stuck when the repo isn't mapped or the code changed since the last push.
  *
  * Text searches (strings, config, comments, non-code files) always run. The
- * plugin runs this file as is (no build step), so it imports only Node
- * built-ins and is plain JavaScript typed with JSDoc. Any error lets the
+ * plugin runs this file as is (no build step), with its shared preference
+ * reader copied alongside it. It is plain JavaScript typed with JSDoc. Any error lets the
  * search run: a hook must never break Grep.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -167,12 +167,16 @@ export function classifyBashGrep(command) {
 }
 
 /** Hook entry point: read the payload from stdin, reply with a PreToolUse deny or nothing. */
-function main() {
+async function main() {
 	try {
 		/** @type {GrepHookInput} */
 		const input = JSON.parse(readFileSync(0, "utf-8"));
 		// Without a session there's nowhere to remember the redirect: never refuse twice.
 		if (!input.session_id) return;
+		// Only the executable hook needs preferences. The memory bundle imports
+		// this file's classifier from its flat bundle and never runs this entry point.
+		const { readHookPreferences } = await import("../project-memory/client-settings.mjs");
+		if (readHookPreferences()["claude-code"]?.graph === false) return;
 		const signedIn = existsSync(join(homedir(), ...CREDENTIALS_FILE));
 		const stateDir =
 			process.env.PHARAOH_ROUTE_GREP_STATE_DIR ?? join(tmpdir(), "pharaoh-route-grep");

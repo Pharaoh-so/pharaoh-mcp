@@ -6,7 +6,8 @@
  * and OpenClaw skills in ~/.openclaw/skills/. Also merges the Pharaoh MCP
  * server config into OpenClaw.
  */
-import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	constants,
@@ -21,14 +22,18 @@ import {
 	readSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
+import { ensureLocalPrivatePaths } from "../project-memory/install-scope.mjs";
 import { readPointer, withActivateLockSync } from "../runtime/launcher-v1.mjs";
 import { ensurePharaohHome } from "./credentials.js";
 import { writeStderr } from "./helpers.js";
+import type { InstallScope } from "./install-types.js";
 import { resolveLaunchNode } from "./runtime.js";
 import { CLAUDE_CLI_SETUP_URL, type ClaudeCli, claudeCliFor } from "./setup.js";
 import { getPackageVersion, PACKAGE_NAME, pinnedPackageSpec } from "./version.js";
@@ -234,6 +239,11 @@ function publishClaudePlugin(home: string): void {
 	);
 	cpSync(BUNDLED_SKILLS_DIR, join(staging, "skills"), { recursive: true });
 	cpSync(BUNDLED_HOOKS_DIR, join(staging, "hooks"), { recursive: true });
+	mkdirSync(join(staging, "project-memory"));
+	cpSync(
+		join(PKG_ROOT, "project-memory", "client-settings.mjs"),
+		join(staging, "project-memory", "client-settings.mjs"),
+	);
 	pinHookNode(join(staging, "hooks", "hooks.json"));
 	rmSync(previous, { recursive: true, force: true });
 	if (existsSync(plugin)) renameSync(plugin, previous);
@@ -261,7 +271,12 @@ function publishClaudePlugin(home: string): void {
 /** Version in an installed plugin's manifest, or null when there's no readable plugin. */
 function installedPluginVersion(plugin: string): string | null {
 	const manifest = join(plugin, ".claude-plugin", "plugin.json");
-	if (!existsSync(manifest) || !existsSync(join(plugin, "hooks"))) return null;
+	if (
+		!existsSync(manifest) ||
+		!existsSync(join(plugin, "hooks")) ||
+		!existsSync(join(plugin, "project-memory", "client-settings.mjs"))
+	)
+		return null;
 	try {
 		return (JSON.parse(readFileSync(manifest, "utf-8")) as { version?: string }).version ?? null;
 	} catch {
@@ -384,6 +399,7 @@ export function uninstallClaudePlugin(
 	removeAdditionalAgentInstructionLines(home);
 	removeManagedAgentSkills(home, "codex");
 	removeManagedAgentSkills(home, "claude-code");
+	removeClaudeExtras(home);
 }
 
 /**
@@ -633,6 +649,196 @@ export const PHARAOH_COMMAND_MARKER = "# managed-by: pharaoh-mcp";
  */
 const RETIRED_COMMANDS: readonly string[] = ["sessions.md"];
 
+/** Exact owned command bytes and newly added permissions; never claims pre-existing rules. */
+interface ClaudeExtras {
+	version: 1;
+	commands: Record<string, string>;
+	allowRules: string[];
+}
+
+const CLAUDE_EXTRAS_FILE = "claude-extras-v1.json";
+
+function extrasRoot(home: string, scope?: InstallScope): string {
+	const root = join(home, ".pharaoh");
+	if (scope?.kind !== "local") return root;
+	return join(root, "local-extras", commandDigest(scope.root));
+}
+
+/** Scope paths never follow a project configuration directory symlink. */
+function claudeExtrasDirectory(home: string, scope?: InstallScope): string {
+	return join(scope?.kind === "local" ? scope.root : home, ".claude");
+}
+
+function claudeExtrasSettings(home: string, scope?: InstallScope): string {
+	return join(
+		claudeExtrasDirectory(home, scope),
+		scope?.kind === "local" ? "settings.local.json" : "settings.json",
+	);
+}
+
+/** The private receipt lives outside the project and is keyed by its exact checkout. */
+function ensureExtrasRoot(home: string, scope?: InstallScope): string {
+	const roots = [join(home, ".pharaoh")];
+	if (scope?.kind === "local")
+		roots.push(join(home, ".pharaoh", "local-extras"), extrasRoot(home, scope));
+	for (const root of roots) {
+		const entry = lstatSync(root, { throwIfNoEntry: false });
+		if (entry && !entry.isDirectory())
+			throw new Error("Unsafe Claude install ownership directory.");
+		ensurePharaohHome(root);
+	}
+	return roots[roots.length - 1];
+}
+
+function readClaudeExtras(home: string, scope?: InstallScope): ClaudeExtras {
+	const root = extrasRoot(home, scope);
+	if (scope?.kind === "local") {
+		const uid = process.getuid?.();
+		for (const parent of [join(home, ".pharaoh"), join(home, ".pharaoh", "local-extras")]) {
+			const entry = lstatSync(parent, { throwIfNoEntry: false });
+			if (
+				entry &&
+				(!entry.isDirectory() ||
+					(uid !== undefined && (entry.uid !== uid || (entry.mode & 0o077) !== 0)))
+			)
+				throw new Error("Unsafe Local ownership directory.");
+		}
+	}
+	const path = join(root, CLAUDE_EXTRAS_FILE);
+	const empty: ClaudeExtras = { version: 1, commands: {}, allowRules: [] };
+	const entry = lstatSync(path, { throwIfNoEntry: false });
+	if (!entry) return empty;
+	const rootEntry = lstatSync(root);
+	const uid = process.getuid?.();
+	if (
+		!rootEntry.isDirectory() ||
+		!entry.isFile() ||
+		entry.size > 16 * 1024 ||
+		(uid !== undefined &&
+			(rootEntry.uid !== uid ||
+				entry.uid !== uid ||
+				(rootEntry.mode & 0o077) !== 0 ||
+				(entry.mode & 0o077) !== 0))
+	)
+		throw new Error("Unsafe Claude install ownership file.");
+	const read = readBoundedText(path, 16 * 1024, true);
+	if (typeof read === "string") throw new Error("Unreadable Claude install ownership file.");
+	const owned = JSON.parse(read.text) as ClaudeExtras;
+	if (
+		owned.version !== 1 ||
+		!owned.commands ||
+		typeof owned.commands !== "object" ||
+		Array.isArray(owned.commands) ||
+		!Array.isArray(owned.allowRules) ||
+		Object.entries(owned.commands).some(
+			([name, hash]) => !/^[a-z][a-z0-9-]*\.md$/.test(name) || !/^[a-f0-9]{64}$/.test(hash),
+		) ||
+		owned.allowRules.some((rule) => !PHARAOH_ALLOW_RULES.includes(rule))
+	)
+		throw new Error("Invalid Claude install ownership file.");
+	return owned;
+}
+
+function writeClaudeExtras(home: string, owned: ClaudeExtras, scope?: InstallScope): void {
+	const root = ensureExtrasRoot(home, scope);
+	if (!lstatSync(root).isDirectory()) throw new Error("Unsafe Claude install ownership directory.");
+	const path = join(root, CLAUDE_EXTRAS_FILE);
+	const entry = lstatSync(path, { throwIfNoEntry: false });
+	if (entry && !entry.isFile()) throw new Error("Unsafe Claude install ownership file.");
+	const temporary = join(root, `.${CLAUDE_EXTRAS_FILE}.${randomUUID()}.tmp`);
+	try {
+		writeFileSync(temporary, `${JSON.stringify(owned)}\n`, { mode: 0o600, flag: "wx" });
+		renameSync(temporary, path);
+	} finally {
+		rmSync(temporary, { force: true });
+	}
+}
+
+function commandDigest(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+/** Remove only byte-identical managed commands and permissions this installer added. */
+function removeClaudeExtras(home: string, scope?: InstallScope): void {
+	try {
+		const owned = readClaudeExtras(home, scope);
+		const claudeDirectory = claudeExtrasDirectory(home, scope);
+		const claudePath = lstatSync(claudeDirectory, { throwIfNoEntry: false });
+		if (!claudePath) {
+			rmSync(join(extrasRoot(home, scope), CLAUDE_EXTRAS_FILE), { force: true });
+			return;
+		}
+		const claudeEntry = statSync(claudeDirectory, { throwIfNoEntry: false });
+		if (!claudeEntry?.isDirectory()) throw new Error("Unsafe Claude directory.");
+		const directory = join(claudeDirectory, "commands");
+		const commandDirectory = lstatSync(directory, { throwIfNoEntry: false });
+		if (commandDirectory && !commandDirectory.isDirectory())
+			throw new Error("Unsafe commands directory.");
+		const names = new Set([...Object.keys(owned.commands), ...getCommandNames()]);
+		for (const name of names) {
+			const path = join(directory, name);
+			const entry = lstatSync(path, { throwIfNoEntry: false });
+			if (!entry) {
+				delete owned.commands[name];
+				continue;
+			}
+			if (scope?.kind === "local" && gitPathStatus(scope.root, path)) {
+				writeStderr(`Pharaoh: kept tracked command ${path}.\n`);
+				continue;
+			}
+			const content = entry.isFile() ? readFileSync(path, "utf8") : null;
+			const bundled = join(BUNDLED_COMMANDS_DIR, name);
+			const ours =
+				content !== null &&
+				(owned.commands[name]
+					? commandDigest(content) === owned.commands[name]
+					: existsSync(bundled) && isPharaohCommand(content, readFileSync(bundled, "utf8")));
+			if (ours) {
+				rmSync(path);
+				delete owned.commands[name];
+			} else writeStderr(`Pharaoh: kept changed or unverified command ${path}.\n`);
+		}
+		const settingsPath = claudeExtrasSettings(home, scope);
+		if (scope?.kind === "local" && gitPathStatus(scope.root, settingsPath)) {
+			writeStderr(`Pharaoh: kept tracked settings at ${settingsPath}.\n`);
+			writeClaudeExtras(home, owned, scope);
+			return;
+		}
+		const settingsEntry = lstatSync(settingsPath, { throwIfNoEntry: false });
+		if (settingsEntry?.isFile()) {
+			const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as ClaudeSettings;
+			const allow = settings.permissions?.allow;
+			if (Array.isArray(allow) && owned.allowRules.some((rule) => allow.includes(rule))) {
+				settings.permissions = {
+					...settings.permissions,
+					allow: allow.filter((rule) => !owned.allowRules.includes(rule)),
+				};
+				writeNoFollow(settingsPath, JSON.stringify(settings, null, "\t"), REWRITE_NO_FOLLOW);
+			}
+			if (
+				Array.isArray(allow) &&
+				allow.some((rule) => PHARAOH_ALLOW_RULES.includes(rule) && !owned.allowRules.includes(rule))
+			)
+				writeStderr("Pharaoh: kept pre-existing or unverified Claude permission rules.\n");
+			owned.allowRules = [];
+		} else if (!settingsEntry) owned.allowRules = [];
+		if (Object.keys(owned.commands).length || owned.allowRules.length)
+			writeClaudeExtras(home, owned, scope);
+		else rmSync(join(extrasRoot(home, scope), CLAUDE_EXTRAS_FILE), { force: true });
+	} catch {
+		// ALLOWED-CATCH: ambiguous ownership or user-edited JSON never authorizes deletion.
+		writeStderr(
+			"Pharaoh: could not verify all Claude extras; preserved them for manual cleanup.\n",
+		);
+	}
+}
+
+function getCommandNames(): string[] {
+	return existsSync(BUNDLED_COMMANDS_DIR)
+		? readdirSync(BUNDLED_COMMANDS_DIR).filter((name) => /^[a-z][a-z0-9-]*\.md$/.test(name))
+		: [];
+}
+
 /** The full marker line, with the one thing a reader of the file needs to know. */
 const COMMAND_MARKER_LINE = `${PHARAOH_COMMAND_MARKER} (rewritten by npx ${PACKAGE_NAME} on upgrade; rename this file to keep your own version)`;
 
@@ -653,13 +859,11 @@ function markCommand(bundled: string): string {
 }
 
 /**
- * Whether an existing command file is Pharaoh's and may be rewritten: marked
- * by this installer, or shaped exactly like the file an earlier installer
- * copied (its header and the `$ARGUMENTS` footer the generator appends).
+ * Recognize an untracked command only when its bytes match the current package.
+ * A marker alone cannot distinguish an older copy from a user's edited command.
  */
 function isPharaohCommand(existing: string, bundled: string): boolean {
-	if (existing.includes(PHARAOH_COMMAND_MARKER)) return true;
-	return existing.startsWith(commandHeader(bundled)) && existing.trimEnd().endsWith("$ARGUMENTS");
+	return existing === markCommand(bundled) || existing === bundled;
 }
 
 /**
@@ -672,7 +876,10 @@ function isPharaohCommand(existing: string, bundled: string): boolean {
  * @param home - Home directory override (defaults to os.homedir()).
  * @returns How many commands were written, and the names of the files kept and removed.
  */
-function installClaudeCodeCommands(home: string): {
+function installClaudeCodeCommands(
+	home: string,
+	scope?: InstallScope,
+): {
 	installed: number;
 	kept: string[];
 	removed: string[];
@@ -680,33 +887,67 @@ function installClaudeCodeCommands(home: string): {
 	const result = { installed: 0, kept: [] as string[], removed: [] as string[] };
 	if (!existsSync(BUNDLED_COMMANDS_DIR)) return result;
 
-	const commandsDst = join(home, ".claude", "commands");
+	// The user may keep the Claude root in dotfiles through a directory symlink.
+	// Only the managed commands directory and its leaves must refuse symlinks.
+	const claudeDirectory = claudeExtrasDirectory(home, scope);
+	if (scope?.kind === "local") assertProjectDirectories(scope.root, [".claude", "commands"]);
+	mkdirSync(claudeDirectory, { recursive: true });
+	const commandsDst = join(claudeDirectory, "commands");
+	const commandDirectory = lstatSync(commandsDst, { throwIfNoEntry: false });
+	if (
+		!statSync(claudeDirectory).isDirectory() ||
+		(commandDirectory && !commandDirectory.isDirectory())
+	)
+		throw new Error("Unsafe Claude commands directory.");
 	mkdirSync(commandsDst, { recursive: true });
+	const owned = readClaudeExtras(home, scope);
 
 	for (const entry of readdirSync(BUNDLED_COMMANDS_DIR, { withFileTypes: true })) {
 		if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
 		const bundled = readFileSync(join(BUNDLED_COMMANDS_DIR, entry.name), "utf-8");
 		const dst = join(commandsDst, entry.name);
 		const existing = lstatSync(dst, { throwIfNoEntry: false });
+		const content = existing?.isFile() ? readFileSync(dst, "utf8") : null;
 		if (
 			existing &&
-			(!existing.isFile() || !isPharaohCommand(readFileSync(dst, "utf-8"), bundled))
+			(content === null ||
+				(owned.commands[entry.name]
+					? commandDigest(content) !== owned.commands[entry.name]
+					: !isPharaohCommand(content, bundled)))
 		) {
 			result.kept.push(entry.name);
 			continue;
 		}
-		writeFileSync(dst, markCommand(bundled));
+		try {
+			ensureLocalPrivatePaths(scope, [dst]);
+		} catch {
+			result.kept.push(entry.name);
+			continue;
+		}
+		const marked = markCommand(bundled);
+		const next = scope?.kind === "local" ? bindLocalSkill(marked, scope.root) : marked;
+		writeFileSync(dst, next);
+		owned.commands[entry.name] = commandDigest(next);
 		result.installed++;
 	}
 
 	for (const name of RETIRED_COMMANDS) {
 		const dst = join(commandsDst, name);
 		if (!lstatSync(dst, { throwIfNoEntry: false })?.isFile()) continue;
-		if (!readFileSync(dst, "utf-8").includes(PHARAOH_COMMAND_MARKER)) continue;
+		if (scope?.kind === "local" && gitPathStatus(scope.root, dst)) {
+			result.kept.push(name);
+			continue;
+		}
+		if (commandDigest(readFileSync(dst, "utf8")) !== owned.commands[name]) {
+			result.kept.push(name);
+			continue;
+		}
 		rmSync(dst);
+		delete owned.commands[name];
 		result.removed.push(name);
 	}
 
+	writeClaudeExtras(home, owned, scope);
 	return result;
 }
 
@@ -740,7 +981,12 @@ function codexSkillName(name: string): string {
 	return name === "pharaoh" ? name : `${SKILL_PREFIX}${name}`;
 }
 
-function renderAgentSkill(source: string, name: string, client: AgentInstructionClient): string {
+function renderAgentSkill(
+	source: string,
+	name: string,
+	client: AgentInstructionClient,
+	scope?: InstallScope,
+): string {
 	let text = source.replace(
 		/^(---\n[\s\S]*?)(name:\s*).+(\n[\s\S]*?---)/,
 		`$1$2${codexSkillName(name)}$3`,
@@ -757,7 +1003,74 @@ function renderAgentSkill(source: string, name: string, client: AgentInstruction
 	if (name === "plan" && client === "codex") {
 		text = text.replace("(AskUserQuestion in Claude Code)", "(when available in Codex)");
 	}
-	return text;
+	return scope?.kind === "local" ? bindLocalSkill(text, scope.root) : text;
+}
+
+/** Inherited skill files explain their boundary even before any tool can run. */
+function bindLocalSkill(text: string, root: string): string {
+	const end = text.startsWith("---\n") ? text.indexOf("\n---", 4) : -1;
+	const offset = end < 0 ? 0 : text.indexOf("\n", end + 4) + 1;
+	const boundary = `\nThis Pharaoh installation belongs only to the Git worktree whose canonical root is ${JSON.stringify(root)}. Before using this skill, verify the current Git worktree root. If it differs, including a sibling or linked worktree, ignore this skill and do not run its Pharaoh tools.\n\n`;
+	return text.slice(0, offset) + boundary + text.slice(offset);
+}
+
+/** Validate every project-owned ancestor before creating or reading below it. */
+function assertProjectDirectories(root: string, parts: string[]): void {
+	if (!isAbsolute(root) || !lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
+		throw new Error("The Local install root is not a regular directory.");
+	let path = root;
+	for (const part of parts) {
+		path = join(path, part);
+		const entry = lstatSync(path, { throwIfNoEntry: false });
+		if (entry && !entry.isDirectory()) throw new Error(`Unsafe Local directory: ${path}`);
+	}
+}
+
+/** Git reads use literal pathspecs; a failed or ambiguous read never authorizes a write. */
+function gitPathStatus(root: string, path: string): boolean {
+	const name = relative(root, path);
+	if (!name || name.startsWith("..") || isAbsolute(name)) return false;
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+	try {
+		execFileSync(
+			"git",
+			[
+				"--literal-pathspecs",
+				"--no-optional-locks",
+				"-C",
+				root,
+				"-c",
+				"core.fsmonitor=false",
+				"-c",
+				"core.untrackedCache=false",
+				"ls-files",
+				"--error-unmatch",
+				"--",
+				name,
+			],
+			{ env, timeout: 2_000, maxBuffer: 64 * 1024, stdio: "pipe" },
+		);
+		return true;
+	} catch (error) {
+		if ((error as { status?: number }).status === 1) return false;
+		throw new Error(`Could not verify Local file ownership: ${path}`);
+	}
+}
+
+function agentSkillRoot(
+	home: string,
+	client: AgentInstructionClient,
+	scope?: InstallScope,
+): string {
+	if (scope?.kind === "local") {
+		const directory = client === "codex" ? ".agents" : ".claude";
+		assertProjectDirectories(scope.root, [directory, "skills"]);
+		return join(scope.root, directory);
+	}
+	return client === "codex"
+		? join(home, ".agents")
+		: process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
 }
 
 function skillHash(text: string): string {
@@ -797,11 +1110,9 @@ function mayUpdateManagedSkill(
 function installManagedAgentSkills(
 	home: string,
 	client: AgentInstructionClient,
+	scope?: InstallScope,
 ): { installed: number; kept: string[] } {
-	const root =
-		client === "codex"
-			? join(home, ".agents")
-			: process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+	const root = agentSkillRoot(home, client, scope);
 	if (!isAbsolute(root)) throw new Error("The agent configuration directory must be absolute.");
 	const target = join(root, "skills");
 	for (const path of [root, target]) {
@@ -819,11 +1130,22 @@ function installManagedAgentSkills(
 			`$1$2${codexSkillName(name)}$3`,
 		);
 		const directory = join(target, codexSkillName(name));
-		if (!mayUpdateManagedSkill(directory, name, legacy, client === "codex")) {
+		if (
+			!mayUpdateManagedSkill(directory, name, legacy, client === "codex" && scope?.kind !== "local")
+		) {
 			kept.push(codexSkillName(name));
 			continue;
 		}
-		const text = renderAgentSkill(source, name, client);
+		try {
+			ensureLocalPrivatePaths(scope, [
+				join(directory, "SKILL.md"),
+				join(directory, CODEX_SKILL_MARKER),
+			]);
+		} catch {
+			kept.push(codexSkillName(name));
+			continue;
+		}
+		const text = renderAgentSkill(source, name, client, scope);
 		mkdirSync(directory, { recursive: true });
 		writeNoFollow(
 			join(directory, "SKILL.md"),
@@ -844,11 +1166,12 @@ function installManagedAgentSkills(
 	return { installed, kept };
 }
 
-function removeManagedAgentSkills(home: string, client: AgentInstructionClient): void {
-	const root =
-		client === "codex"
-			? join(home, ".agents")
-			: process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+function removeManagedAgentSkills(
+	home: string,
+	client: AgentInstructionClient,
+	scope?: InstallScope,
+): void {
+	const root = agentSkillRoot(home, client, scope);
 	if (!isAbsolute(root)) return;
 	const target = join(root, "skills");
 	for (const path of [root, target]) {
@@ -863,7 +1186,21 @@ function removeManagedAgentSkills(home: string, client: AgentInstructionClient):
 				/^(---\n[\s\S]*?)(name:\s*).+(\n[\s\S]*?---)/,
 				`$1$2${codexSkillName(name)}$3`,
 			);
-			if (mayUpdateManagedSkill(directory, name, legacy, client === "codex"))
+			if (
+				scope?.kind === "local" &&
+				["SKILL.md", CODEX_SKILL_MARKER].some((name) =>
+					gitPathStatus(scope.root, join(directory, name)),
+				)
+			)
+				continue;
+			if (
+				mayUpdateManagedSkill(
+					directory,
+					name,
+					legacy,
+					client === "codex" && scope?.kind !== "local",
+				)
+			)
 				rmSync(directory, { recursive: true, force: true });
 		} catch {
 			// ALLOWED-CATCH: a custom or unreadable skill is retained during cleanup.
@@ -1012,8 +1349,8 @@ export type AllowReadToolsResult =
 	| "runtime-hooks-only"
 	| "error";
 
-/** Handlers Pharaoh's setup writes without asking: runtime, saved-worktree and update-notice hooks. */
-const PHARAOH_SETUP_HOOK = /--pharaoh-(?:runtime|local-worktree|update-notice)-v1/;
+/** Handlers Pharaoh's setup writes without asking: runtime, saved-worktree, update-notice and native context hooks. */
+const PHARAOH_SETUP_HOOK = /--pharaoh-(?:runtime|local-worktree|update-notice|native-feed)-v1/;
 
 /** Whether every handler in a settings file's `hooks` is one Pharaoh's setup wrote. */
 function onlyPharaohHooks(hooks: unknown): boolean {
@@ -1045,15 +1382,34 @@ function onlyPharaohHooks(hooks: unknown): boolean {
  *   nothing was missing, "no-settings" when there is no file, "error" when
  *   the file is not valid JSON (left untouched).
  */
-export function allowReadTools(home = homedir()): AllowReadToolsResult {
-	const settingsPath = join(home, ".claude", "settings.json");
+export function allowReadTools(
+	home = homedir(),
+	options?: { scope?: InstallScope },
+): AllowReadToolsResult {
+	const scope = options?.scope;
+	const settingsPath = claudeExtrasSettings(home, scope);
+	if (scope?.kind === "local") {
+		try {
+			assertProjectDirectories(scope.root, [".claude"]);
+			ensureLocalPrivatePaths(scope, [settingsPath]);
+			mkdirSync(dirname(settingsPath), { recursive: true });
+			if (!lstatSync(settingsPath, { throwIfNoEntry: false }))
+				writeNoFollow(settingsPath, "{}", APPEND_NO_FOLLOW);
+		} catch {
+			return "error";
+		}
+	}
 	if (!existsSync(settingsPath)) return "no-settings";
+	if (!statSync(dirname(settingsPath)).isDirectory() || !lstatSync(settingsPath).isFile())
+		return "error";
 
 	let settings: ClaudeSettings;
+	let originalSettings: string;
 	try {
-		settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as ClaudeSettings;
+		originalSettings = readFileSync(settingsPath, "utf-8");
+		settings = JSON.parse(originalSettings) as ClaudeSettings;
 		// A settings file holding only the hooks Pharaoh's setup writes on its own (runtime,
-		// saved-worktree, update notice) does not opt a person into tool permissions.
+		// saved-worktree, update notice, native context) does not opt a person into tool permissions.
 		if (settings.hooks && Object.keys(settings).length === 1 && onlyPharaohHooks(settings.hooks))
 			return "runtime-hooks-only";
 	} catch {
@@ -1067,9 +1423,32 @@ export function allowReadTools(home = homedir()): AllowReadToolsResult {
 	const next = [...kept, ...PHARAOH_ALLOW_RULES.filter((rule) => !kept.includes(rule))];
 	if (!migrated && next.length === allow.length) return "current";
 
-	settings.permissions = { ...settings.permissions, allow: next };
-	writeFileSync(settingsPath, JSON.stringify(settings, null, "\t"));
-	return migrated ? "migrated" : "added";
+	let writtenSettings: string | undefined;
+	try {
+		const owned = readClaudeExtras(home, scope);
+		settings.permissions = { ...settings.permissions, allow: next };
+		writtenSettings = JSON.stringify(settings, null, "\t");
+		writeNoFollow(settingsPath, writtenSettings, REWRITE_NO_FOLLOW);
+		owned.allowRules = [
+			...new Set([...owned.allowRules, ...next.filter((rule) => !allow.includes(rule))]),
+		];
+		writeClaudeExtras(home, owned, scope);
+		return migrated ? "migrated" : "added";
+	} catch {
+		// ALLOWED-CATCH: a failed ownership receipt must not leave new untracked permissions.
+		// Restore only our exact write; a concurrent user edit always wins.
+		if (writtenSettings !== undefined) {
+			try {
+				if (readFileSync(settingsPath, "utf8") === writtenSettings)
+					writeNoFollow(settingsPath, originalSettings, REWRITE_NO_FOLLOW);
+			} catch {
+				writeStderr(
+					`Pharaoh: permission setup could not be rolled back; inspect ${settingsPath}.\n`,
+				);
+			}
+		}
+		return "error";
+	}
 }
 
 /**
@@ -1078,19 +1457,26 @@ export function allowReadTools(home = homedir()): AllowReadToolsResult {
  *
  * @param result - What `allowReadTools` returned.
  */
-export function describeAllowReadTools(result: AllowReadToolsResult): string | null {
+export function describeAllowReadTools(
+	result: AllowReadToolsResult,
+	options?: { scope?: InstallScope },
+): string | null {
 	const count = PHARAOH_ALLOW_RULES.length;
+	const path =
+		options?.scope?.kind === "local"
+			? join(options.scope.root, ".claude", "settings.local.json")
+			: "~/.claude/settings.json";
 	switch (result) {
 		case "added":
-			return `✓ Claude Code: ${count} read-only Pharaoh tools allowed in ~/.claude/settings.json`;
+			return `✓ Claude Code: ${count} read-only Pharaoh tools allowed in ${path}`;
 		case "migrated":
-			return `✓ Claude Code: ~/.claude/settings.json now allows ${count} read-only Pharaoh tools by name, not all of them`;
+			return `✓ Claude Code: ${path} now allows ${count} read-only Pharaoh tools by name, not all of them`;
 		case "current":
 		case "no-settings":
 		case "runtime-hooks-only":
 			return null;
 		case "error":
-			return "Pharaoh: ~/.claude/settings.json could not be read safely. Pharaoh's tools ask before they run.";
+			return `Pharaoh: ${path} could not be read safely. Pharaoh's tools ask before they run.`;
 	}
 }
 
@@ -1243,10 +1629,14 @@ const PROJECT_CWD_CLIENTS: ReadonlySet<string> = new Set(["claude-code"]);
 function readBoundedText(
 	path: string,
 	cap = INSTRUCTION_READ_CAP,
+	noFollow = false,
 ): { text: string } | "missing" | "unknown" {
 	let fd: number;
 	try {
-		fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+		fd = openSync(
+			path,
+			constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (noFollow ? NO_FOLLOW : 0),
+		);
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
 		return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
@@ -1739,8 +2129,14 @@ export interface InstallResult {
  */
 export function runInstallSkills(
 	home = homedir(),
-	options?: { silent?: boolean; claude?: ClaudeCli; clients?: readonly AgentInstructionClient[] },
+	options?: {
+		silent?: boolean;
+		claude?: ClaudeCli;
+		clients?: readonly AgentInstructionClient[];
+		scope?: InstallScope;
+	},
 ): InstallResult {
+	if (options?.scope?.kind === "local") return runLocalInstallSkills(home, options.scope, options);
 	const silent = options?.silent ?? false;
 	const hasClaudeCode = options?.clients
 		? options.clients.includes("claude-code")
@@ -1871,4 +2267,259 @@ export function runInstallSkills(
 	}
 
 	return { keptCommands, warnings, errors };
+}
+
+/** Local skills are loose, root-bound files; no home-level plugin is installed. */
+function runLocalInstallSkills(
+	home: string,
+	scope: Extract<InstallScope, { kind: "local" }>,
+	options: { silent?: boolean; clients?: readonly AgentInstructionClient[] },
+): InstallResult {
+	const result: InstallResult = { keptCommands: [], warnings: [], errors: [] };
+	const clients = options.clients ?? ["claude-code", "codex"];
+	for (const client of clients) {
+		try {
+			const skills = installManagedAgentSkills(home, client, scope);
+			if (skills.kept.length)
+				result.warnings.push(
+					`Pharaoh skipped ${client} skills whose files were tracked, could not be kept private, or were user-owned: ${skills.kept.join(", ")}.`,
+				);
+			if (!options.silent)
+				writeStderr(
+					`Pharaoh: installed ${skills.installed} ${client} skills in ${agentSkillRoot(home, client, scope)}/skills.\n`,
+				);
+			if (client === "claude-code") {
+				const commands = installClaudeCodeCommands(home, scope);
+				result.keptCommands.push(...commands.kept);
+				if (commands.kept.length)
+					result.warnings.push(
+						"Pharaoh skipped Local slash commands whose files were tracked, could not be kept private, or were user-owned.",
+					);
+				result.warnings.push(
+					"Local Claude Code uses project skills; the optional global Grep-routing plugin is not installed.",
+				);
+			}
+		} catch (error) {
+			result.errors.push(
+				`Pharaoh: Local ${client} skills could not be installed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	if (!options.silent)
+		for (const line of [...result.warnings, ...result.errors]) writeStderr(`${line}\n`);
+	return result;
+}
+
+/** Only enabled Pharaoh handlers can conflict with the opposite install scope. */
+function hasActivePharaohHook(hooks: unknown): boolean {
+	if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return false;
+	return Object.values(hooks).some(
+		(groups) =>
+			Array.isArray(groups) &&
+			groups.some(
+				(group) =>
+					group?.enabled !== false &&
+					group?.disabled !== true &&
+					Array.isArray(group?.hooks) &&
+					group.hooks.some(
+						(hook: {
+							enabled?: boolean;
+							disabled?: boolean;
+							command?: unknown;
+							args?: unknown;
+						}) => {
+							if (hook?.enabled === false || hook?.disabled === true) return false;
+							const command = `${typeof hook?.command === "string" ? hook.command : ""} ${Array.isArray(hook?.args) ? hook.args.join(" ") : ""}`;
+							return /pharaoh-project-memory|--pharaoh-(?:runtime|local-worktree|update-notice)-v1|route-grep\.mjs/.test(
+								command,
+							);
+						},
+					),
+			),
+	);
+}
+
+function hooksDisabled(path: string): boolean {
+	const file = readBoundedText(path);
+	if (typeof file === "string") return false;
+	try {
+		const settings = path.endsWith(".toml") ? parseToml(file.text) : JSON.parse(file.text);
+		return settings?.disableAllHooks === true || settings?.features?.hooks === false;
+	} catch {
+		return false;
+	}
+}
+
+function settingsActivation(path: string, disabledHooks = false): string | null {
+	const file = readBoundedText(path);
+	if (file === "missing") return null;
+	if (file === "unknown") return `Cannot inspect Pharaoh activation safely in ${path}.`;
+	try {
+		const settings = path.endsWith(".toml") ? parseToml(file.text) : JSON.parse(file.text);
+		if (!settings || typeof settings !== "object" || Array.isArray(settings))
+			return `Cannot inspect Pharaoh activation in ${path}.`;
+		if (
+			settings.enabledPlugins?.[PLUGIN_ID] === true ||
+			settings.enabledPlugins?.[LEGACY_PLUGIN_ID] === true ||
+			(!disabledHooks && hasActivePharaohHook(settings.hooks))
+		)
+			return `Pharaoh is still active in ${path}. Clean up that scope before switching.`;
+		return null;
+	} catch {
+		return `Cannot inspect Pharaoh activation in ${path}.`;
+	}
+}
+
+function scopeExtrasConflicts(
+	scope: InstallScope,
+	clients: readonly AgentInstructionClient[],
+	home: string,
+): string[] {
+	const problems: string[] = [];
+	if (scope.kind === "local" && !lstatSync(scope.root, { throwIfNoEntry: false })) return problems;
+	for (const client of clients) {
+		const root = agentSkillRoot(home, client, scope);
+		if (scope.kind === "local")
+			assertProjectDirectories(scope.root, [client === "codex" ? ".codex" : ".claude"]);
+		const settings =
+			scope.kind === "local"
+				? [
+						join(
+							scope.root,
+							client === "codex" ? ".codex" : ".claude",
+							client === "codex" ? "hooks.json" : "settings.local.json",
+						),
+						...(client === "claude-code"
+							? [join(scope.root, ".claude", "settings.json")]
+							: [join(scope.root, ".codex", "config.toml")]),
+					]
+				: [
+						join(
+							client === "codex" ? process.env.CODEX_HOME || join(home, ".codex") : root,
+							client === "codex" ? "hooks.json" : "settings.json",
+						),
+						...(client === "codex"
+							? [join(process.env.CODEX_HOME || join(home, ".codex"), "config.toml")]
+							: []),
+					];
+		const disabledHooks = settings.some(hooksDisabled);
+		for (const file of settings) {
+			const problem = settingsActivation(file, disabledHooks);
+			if (problem) problems.push(problem);
+		}
+		for (const name of CODEX_SKILLS) {
+			const directory = join(root, "skills", codexSkillName(name));
+			if (existsSync(join(directory, CODEX_SKILL_MARKER))) {
+				problems.push(
+					`Pharaoh skills remain in ${directory}. Clean up that scope before switching.`,
+				);
+				break;
+			}
+		}
+	}
+	return problems;
+}
+
+/** Read-only overlap check; a removed MCP entry does not prove its hooks disappeared. */
+export function preflightInstallExtras(
+	scope: InstallScope,
+	clients: readonly AgentInstructionClient[],
+	home = homedir(),
+	localRoots: readonly string[] = [],
+): string[] {
+	try {
+		const selected: string[] = [];
+		if (scope.kind === "local") {
+			for (const client of clients) {
+				const directory = client === "codex" ? ".codex" : ".claude";
+				assertProjectDirectories(scope.root, [directory]);
+				const path = join(
+					scope.root,
+					directory,
+					client === "codex" ? "hooks.json" : "settings.local.json",
+				);
+				const entry = lstatSync(path, { throwIfNoEntry: false });
+				if (entry && !entry.isFile())
+					selected.push(`Local settings are not a regular file: ${path}.`);
+				else if (gitPathStatus(scope.root, path))
+					selected.push(`Local settings are tracked by Git: ${path}. Pharaoh left them unchanged.`);
+			}
+		}
+		const opposite: InstallScope[] =
+			scope.kind === "local"
+				? [{ kind: "global" }]
+				: [...new Set(localRoots)].map((root) => ({ kind: "local", root }));
+		return [
+			...selected,
+			...opposite.flatMap((target) => scopeExtrasConflicts(target, clients, home)),
+		];
+	} catch (error) {
+		return [
+			`Pharaoh could not inspect other-scope extras safely: ${error instanceof Error ? error.message : String(error)}`,
+		];
+	}
+}
+
+/** Prove the shared marketplace is our private package before disabling its Global key. */
+function ownsSharedMarketplace(home: string): boolean {
+	const root = join(home, ".pharaoh");
+	const owner = lstatSync(root, { throwIfNoEntry: false });
+	const uid = process.getuid?.();
+	if (
+		!owner?.isDirectory() ||
+		(uid !== undefined && (owner.uid !== uid || (owner.mode & 0o077) !== 0))
+	)
+		return false;
+	for (const path of [
+		claudeMarketplaceDir(home),
+		join(claudeMarketplaceDir(home), "pharaoh"),
+		join(claudeMarketplaceDir(home), "pharaoh", ".claude-plugin"),
+	])
+		if (!lstatSync(path, { throwIfNoEntry: false })?.isDirectory()) return false;
+	const manifest = readBoundedText(
+		join(claudeMarketplaceDir(home), "pharaoh", ".claude-plugin", "plugin.json"),
+	);
+	if (typeof manifest === "string") return false;
+	try {
+		const value = JSON.parse(manifest.text);
+		return value.name === "pharaoh" && typeof value.version === "string";
+	} catch {
+		return false;
+	}
+}
+
+/** Remove only selected-scope assets; shared credentials and marketplace bytes survive. */
+export function cleanupInstallExtras(
+	scope: InstallScope,
+	clients: readonly AgentInstructionClient[],
+	home = homedir(),
+): string[] {
+	const messages: string[] = [];
+	for (const client of clients) {
+		try {
+			removeManagedAgentSkills(home, client, scope);
+			if (client !== "claude-code") continue;
+			removeClaudeExtras(home, scope);
+			if (scope.kind !== "global" || claudePluginState(home) !== "enabled") continue;
+			if (!ownsSharedMarketplace(home)) {
+				messages.push(
+					"Pharaoh kept an unverified Global plugin; disable it in Claude Code before switching scopes.",
+				);
+				continue;
+			}
+			const path = claudeExtrasSettings(home);
+			const file = readBoundedText(path);
+			if (typeof file === "string") throw new Error(`Could not read ${path}.`);
+			const settings = JSON.parse(file.text);
+			if (settings.enabledPlugins?.[PLUGIN_ID] === true) {
+				settings.enabledPlugins[PLUGIN_ID] = false;
+				writeNoFollow(path, JSON.stringify(settings, null, "\t"), REWRITE_NO_FOLLOW);
+			}
+		} catch (error) {
+			messages.push(
+				`Pharaoh preserved unverified ${client} extras: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return messages;
 }

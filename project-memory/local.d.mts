@@ -1,5 +1,8 @@
 import type { Stats } from "node:fs";
 
+/** Quote one value as a literal POSIX shell argument. */
+export function shellWord(value: string): string;
+
 /** Opaque reference derived from a native client and conversation ID. */
 export interface ConversationMemoryBinding {
 	readonly client: "claude-code" | "codex";

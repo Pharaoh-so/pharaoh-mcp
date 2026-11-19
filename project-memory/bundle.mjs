@@ -11,7 +11,10 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
-const LIMIT = 256 * 1024;
+// Executable files encoded as base64 need more room than any one file.
+// These artifact bounds are independent of memory capture and diagnostic limits.
+const BUNDLE_LIMIT = 320 * 1024;
+const FILE_LIMIT = 256 * 1024;
 export const LEGACY_MEMORY_RUNTIME_FILES = [
 	"execute-turn.mjs",
 	"hook-config.mjs",
@@ -33,6 +36,7 @@ export const MEMORY_RUNTIME_FILES = [
 	"diagnostics-collector.mjs",
 	"diagnostics-sender.mjs",
 	"graph-cues.mjs",
+	"install-scope.mjs",
 	"preferences.mjs",
 	"route-grep.mjs",
 ];
@@ -75,7 +79,7 @@ export function packagedMemoryBundle(packageRoot = new URL("../", import.meta.ur
 		return [name, bytes.toString("base64")];
 	});
 	const sha256 = digest(files);
-	if (Buffer.byteLength(JSON.stringify(files)) >= LIMIT)
+	if (Buffer.byteLength(JSON.stringify(files)) >= BUNDLE_LIMIT)
 		throw new Error("Project memory bundle is oversized.");
 	return { sha256, files };
 }
@@ -111,7 +115,7 @@ export function installMemoryBundle(root, target, bundle) {
 		for (const [name, content] of bundle.files) {
 			const path = join(destination, name);
 			if (
-				privateMemoryPath(path, false).size > LIMIT ||
+				privateMemoryPath(path, false).size > FILE_LIMIT ||
 				readFileSync(path).toString("base64") !== content
 			) {
 				throw new Error(

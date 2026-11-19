@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { syncNativeFeedHooks } from "../runtime/feed-hooks.mjs";
 import {
 	automaticRuntimeIntent,
 	disableRuntime,
@@ -26,7 +27,12 @@ import {
 	listClients,
 	restartDesktop,
 } from "./client-install.js";
-import { type Credentials, readCredentials, saveAuthorizedCredentials } from "./credentials.js";
+import {
+	bootstrapLegacyFeedSignIn,
+	type Credentials,
+	readCredentials,
+	saveAuthorizedCredentials,
+} from "./credentials.js";
 import {
 	abortOnEnter,
 	askYesNo,
@@ -41,18 +47,25 @@ import {
 	showProgress,
 	tokenToCredentials,
 } from "./helpers.js";
-import type { ClientId, ClientOutcome, LaunchConfig } from "./install-types.js";
+import { askInstallPath, gitWorktreeRoot, resolveInstallScope } from "./install-scope.js";
+import type { ClientId, ClientOutcome, InstallScope, LaunchConfig } from "./install-types.js";
 import { installedLocalAnalyzer } from "./local/worker-host.js";
 import { recordInstalledVersion } from "./memory-hint.js";
 import { loadAndRefresh } from "./refresh.js";
 import { adoptLauncher, ensureRuntime, RuntimeSetupError, registryKey } from "./runtime.js";
-import { describeRuntimeDisable, enableInstalledRuntime } from "./runtime-command.js";
+import {
+	attachInstalledRuntime,
+	describeRuntimeDisable,
+	enableInstalledRuntime,
+} from "./runtime-command.js";
 import {
 	type ClientTarget,
 	configureClients,
 	discoverClients,
 	freshRuntimeClients,
 	legacyMigrations,
+	preflightInstallScope,
+	scopeInstallTargets,
 	verifiedCodingClients,
 } from "./setup.js";
 import { SETUP_TOOL_PROMPT } from "./setup-prompt.generated.js";
@@ -85,6 +98,8 @@ export interface AgentLaunch {
 	command: string;
 	/** The setup prompt, as the agent's first message. */
 	args: string[];
+	/** Explicit Local installs start the agent inside the selected checkout. */
+	cwd?: string;
 }
 
 /**
@@ -126,7 +141,11 @@ export function startAgent(agent: AgentLaunch): Promise<boolean> {
 			process.off("SIGINT", ignore);
 			resolve(started);
 		};
-		spawn(agent.command, agent.args, { stdio: "inherit", env })
+		spawn(agent.command, agent.args, {
+			stdio: "inherit",
+			env,
+			...(agent.cwd ? { cwd: agent.cwd } : {}),
+		})
 			.once("error", () => done(false))
 			.once("exit", () => done(true));
 	});
@@ -134,7 +153,8 @@ export function startAgent(agent: AgentLaunch): Promise<boolean> {
 
 /** The command a person can paste to start an agent with the setup prompt. */
 function agentCommand(agent: AgentLaunch): string {
-	return `${agent.command} ${agent.args.map((arg) => JSON.stringify(arg)).join(" ")}`;
+	const command = `${agent.command} ${agent.args.map((arg) => JSON.stringify(arg)).join(" ")}`;
+	return agent.cwd ? `cd -- '${agent.cwd.replaceAll("'", "'\\''")}' && ${command}` : command;
 }
 
 /** What a computer with no supported client hears, instead of a sign-in it couldn't use. */
@@ -189,7 +209,7 @@ type CodexHooks = Record<string, Array<{ hooks?: Array<{ command?: unknown; args
 
 /** Pharaoh's hook commands: project memory, saved-worktree, runtime and update-notice hooks. */
 const PHARAOH_HOOK =
-	/pharaoh-project-memory:|--pharaoh-(?:local-worktree|runtime|update-notice)-v1/;
+	/pharaoh-project-memory:|--pharaoh-(?:local-worktree|runtime|update-notice|native-feed)-v1/;
 
 /**
  * Whether Codex has a Pharaoh hook it hasn't trusted yet: a hooks.json entry with
@@ -231,6 +251,16 @@ export function validateInstallArguments(args: readonly string[]): string | null
 		if (args[i] === "--server") {
 			if (!args[i + 1] || args[i + 1].startsWith("--")) return "--server needs a URL.";
 			i++;
+		} else if (args[i] === "--scope") {
+			if (args[i + 1] !== "global" && args[i + 1] !== "local")
+				return "--scope must be global or local.";
+			i++;
+		} else if (args[i] === "--path") {
+			if (!args[i + 1] || args[i + 1].startsWith("--"))
+				return "--path needs a repository directory.";
+			if (!args.includes("--scope") || args[args.indexOf("--scope") + 1] !== "local")
+				return "--path requires --scope local.";
+			i++;
 		} else if (!["--migrate-legacy", "--memory-hooks", "--skip-runtime"].includes(args[i])) {
 			return "Unknown install option. Run pharaoh-mcp install --help.";
 		}
@@ -265,7 +295,11 @@ interface InstallAuthResult {
 export async function installUpdateNotice(
 	clients: readonly ("claude-code" | "codex")[],
 	node: string,
-	{ home = homedir(), env = process.env }: { home?: string; env?: NodeJS.ProcessEnv } = {},
+	{
+		home = homedir(),
+		env = process.env,
+		scope,
+	}: { home?: string; env?: NodeJS.ProcessEnv; scope?: InstallScope } = {},
 ): Promise<void> {
 	const directory = join(home, ".pharaoh");
 	const hook = clients.length ? copyUpdateNoticeHook(directory) : null;
@@ -274,7 +308,7 @@ export async function installUpdateNotice(
 		return;
 	for (const client of clients) {
 		try {
-			syncUpdateNoticeHook(client, hook, { node, home, env });
+			syncUpdateNoticeHook(client, hook, { node, home, env, scope });
 		} catch {
 			// Disabled or unreadable hook settings: this client has no notice, and nothing else changes.
 		}
@@ -358,25 +392,44 @@ interface InstallDependencies {
 	/** A signal Enter aborts until `stop`, the person's way out of a wait; `onListen` fires once Enter counts. */
 	skipOnEnter: (onListen: () => void) => { signal: AbortSignal; stop(): void };
 	ask: (question: string) => Promise<boolean | null>;
+	askPath: (question: string) => Promise<string | null>;
+	resolveRoot: (path: string) => string | null;
+	preflightScope: (targets: readonly ClientTarget[], scope: InstallScope) => ClientOutcome[];
 	/** Pick one of `options` from a menu: its 0-based index, -1 for none, null on ended input. */
 	choose: (title: string, options: readonly string[]) => Promise<number | null>;
 	startAgent: (agent: AgentLaunch) => Promise<boolean>;
 	write: (...lines: string[]) => void;
 	latest: typeof fetchLatestVersion;
 	updateNotice: typeof installUpdateNotice;
+	nativeFeedHooks: typeof syncNativeFeedHooks;
+	bootstrapFeed: typeof bootstrapLegacyFeedSignIn;
 	localAnalyzer: typeof installedLocalAnalyzer;
 	freshRuntimeClients: typeof freshRuntimeClients;
 	verifiedRuntimeClients: typeof verifiedCodingClients;
 	runtimeIntent: typeof automaticRuntimeIntent;
 	enableRuntime: typeof enableInstalledRuntime;
+	attachRuntime: typeof attachInstalledRuntime;
 	disableRuntime: typeof disableRuntime;
 }
 
 /** Install hooks/skills only for coding clients whose enabled registration was verified. */
 export interface InstallOptions {
 	server: string;
+	/** Literal --server option tokens; absent retains the existing programmatic default. */
+	serverArgv?: string[];
 	migrateLegacy?: boolean;
 	skipRuntime?: boolean;
+	/** Selected activation kind; omitted presents the picker in a terminal. */
+	scope?: InstallScope["kind"];
+	/** Local checkout path; omitted resolves the current working directory. */
+	path?: string;
+	/** Working directory override for isolated installer fixtures. */
+	cwd?: string;
+	/** Check hook and plugin overlaps before any setup side effects. */
+	preflightScope?: (
+		scope: InstallScope,
+		targets: readonly ClientTarget[],
+	) => string[] | Promise<string[]>;
 	/** Ask questions and offer to start an agent (default: canStartAgent()). */
 	interactive?: boolean;
 	/** Optional client setup. Lines passed to `note` show in the summary, after the client list. */
@@ -384,6 +437,7 @@ export interface InstallOptions {
 		credentials: Credentials,
 		clients: string[],
 		note: (...lines: string[]) => void,
+		scope: InstallScope,
 	) => Promise<void>;
 	/** Isolated process/filesystem fixtures use the same orchestration without real user writes. */
 	dependencies?: Partial<InstallDependencies>;
@@ -409,16 +463,22 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		restartDesktop: (target, launch, flags) => restartDesktop(target, launch, flags),
 		skipOnEnter: (onListen) => abortOnEnter(DESKTOP_SKIP_AFTER_MS, onListen),
 		ask: (question) => askYesNo(question),
+		askPath: askInstallPath,
+		resolveRoot: gitWorktreeRoot,
+		preflightScope: (targets, scope) => preflightInstallScope(targets, { scope }),
 		choose: (title, labels) => pickOption(title, labels),
 		startAgent,
 		write: printLines,
 		latest: fetchLatestVersion,
 		updateNotice: installUpdateNotice,
+		nativeFeedHooks: syncNativeFeedHooks,
+		bootstrapFeed: bootstrapLegacyFeedSignIn,
 		localAnalyzer: installedLocalAnalyzer,
 		freshRuntimeClients,
 		verifiedRuntimeClients: verifiedCodingClients,
 		runtimeIntent: automaticRuntimeIntent,
 		enableRuntime: enableInstalledRuntime,
+		attachRuntime: attachInstalledRuntime,
 		disableRuntime,
 		...options.dependencies,
 	};
@@ -430,9 +490,45 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 	try {
 		// Nothing here to connect (an agent's cloud sandbox, say): stop before sign-in and before
 		// any download, and say so in words the agent relays (VISION.md § Two screens).
-		const targets = dependencies.discover();
-		if (!targets.length) {
+		const discovered = dependencies.discover();
+		if (!discovered.length) {
 			write(...NO_AGENT_HERE);
+			return 1;
+		}
+		const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stderr.isTTY);
+		const scope = await resolveInstallScope({
+			kind: options.scope,
+			path: options.path,
+			cwd: options.cwd,
+			interactive,
+			choose: dependencies.choose,
+			askPath: dependencies.askPath,
+			resolveRoot: dependencies.resolveRoot,
+			write,
+		});
+		if (!scope) return 0;
+		const targets = scopeInstallTargets(discovered, scope);
+		// Unsupported clients are reported by configure, but cannot overlap an installation
+		// that will not activate them. Do not let their unrelated settings block this scope.
+		const activeTargets = targets.filter(
+			(target) => !target.unavailableReason && !target.ambiguousReason,
+		);
+		const conflicts = dependencies.preflightScope(activeTargets, scope);
+		const extraConflicts = (await options.preflightScope?.(scope, activeTargets)) ?? [];
+		if (conflicts.length || extraConflicts.length) {
+			for (const conflict of conflicts)
+				write(
+					`${CLIENT_LABELS[conflict.client]}: ${conflict.detail}`,
+					...(conflict.recovery ? [conflict.recovery] : []),
+				);
+			write(...extraConflicts);
+			return 1;
+		}
+		if (targets.every((target) => target.unavailableReason || target.ambiguousReason)) {
+			for (const target of targets)
+				write(
+					`${CLIENT_LABELS[target.client]}: ${target.unavailableReason ?? target.ambiguousReason}`,
+				);
 			return 1;
 		}
 		// The runtime and the newest version need no sign-in, so both start now and the
@@ -469,7 +565,6 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				write(describeRuntimeDisable(client, results[index]));
 			if (results.includes("not_saved")) return 1;
 		}
-		const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stderr.isTTY);
 		const migrations = dependencies.migrations(targets);
 		let migrateLegacy = options.migrateLegacy === true;
 		if (migrations.length && !migrateLegacy) {
@@ -493,10 +588,12 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		let runtimeInstallations: RuntimeEnrollmentIntent[] = [];
 		if (!options.skipRuntime && options.server === DEFAULT_SERVER) {
 			try {
-				runtimeInstallations = dependencies.freshRuntimeClients(targets).flatMap((client) => {
-					const intent = dependencies.runtimeIntent(client);
-					return intent ? [intent] : [];
-				});
+				runtimeInstallations = dependencies
+					.freshRuntimeClients(targets, { scope })
+					.flatMap((client) => {
+						const intent = dependencies.runtimeIntent(client, { scope });
+						return intent ? [intent] : [];
+					});
 			} catch {
 				// Unavailable runtime metadata cannot prevent sign-in or setup.
 			}
@@ -522,11 +619,32 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		// Registrations and hooks name the launcher, so a later update changes no client setting.
 		const launcher = await dependencies.launcher(launch);
 		const runLaunch = launcher ? { command: launch.command, args: [launcher] } : launch;
+		const serverArgv =
+			options.serverArgv ?? (options.server === DEFAULT_SERVER ? [] : ["--server", options.server]);
+		const serverLaunch = { ...runLaunch, args: [...runLaunch.args, ...serverArgv] };
 		const configuredLaunch =
-			options.server === DEFAULT_SERVER
-				? runLaunch
-				: { ...runLaunch, args: [...runLaunch.args, "--server", options.server] };
-		const outcomes = dependencies.configure(targets, configuredLaunch, { migrateLegacy });
+			scope.kind === "local"
+				? {
+						...serverLaunch,
+						args: [...serverLaunch.args, "--install-scope", "local", "--install-root", scope.root],
+					}
+				: serverLaunch;
+		const currentConflicts = dependencies.preflightScope(activeTargets, scope);
+		const currentExtraConflicts = (await options.preflightScope?.(scope, activeTargets)) ?? [];
+		if (currentConflicts.length || currentExtraConflicts.length) {
+			for (const conflict of currentConflicts)
+				write(
+					`${CLIENT_LABELS[conflict.client]}: ${conflict.detail}`,
+					...(conflict.recovery ? [conflict.recovery] : []),
+				);
+			write(...currentExtraConflicts);
+			return 1;
+		}
+		const outcomes = dependencies.configure(targets, configuredLaunch, {
+			migrateLegacy,
+			scope,
+			nativeFeed: true,
+		});
 		// An open Desktop saves its earlier settings over the change; restarted, it keeps this one.
 		const opened = outcomes.findIndex((outcome) => outcome.desktopOpen);
 		const desktopTarget = targets.find((target) => target.client === "claude-desktop");
@@ -572,8 +690,11 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		let extrasFailed = false;
 		const notes: string[] = [];
 		try {
-			await options.afterConfigure?.(credentials, codingClients, (...lines) =>
-				notes.push(...lines),
+			await options.afterConfigure?.(
+				credentials,
+				codingClients,
+				(...lines) => notes.push(...lines),
+				scope,
 			);
 		} catch {
 			extrasFailed = true;
@@ -590,10 +711,12 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 						client === "claude-code" || client === "codex",
 				),
 				configuredLaunch.command,
+				{ scope },
 			);
 		if (analyzer) {
 			const hookPath = launcher ?? join(managedProxyRoot, "runtime", "local-worktree-hook.mjs");
 			const verified = dependencies.verifiedRuntimeClients({
+				scope,
 				runningLaunch: configuredLaunch,
 				rejectProjectOverrides: true,
 			});
@@ -603,12 +726,57 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 					syncLocalWorktreeHooks(client, hookPath, {
 						node: configuredLaunch.command,
 						viaLauncher: launcher !== null,
+						scope,
+						...(options.server !== DEFAULT_SERVER ? { server: options.server } : {}),
 					});
 				} catch {
 					write(
 						`${CLIENT_LABELS[client]}: saved-worktree hooks could not be configured. Hosted queries remain available.`,
 					);
 				}
+			}
+		}
+		// The feed is independent of analyzer, memory, and runtime-analytics enrollment.
+		if (process.platform === "win32" && codingClients.length)
+			write("Native context updates are unavailable on Windows. Hosted queries remain available.");
+		const feedClients = dependencies.verifiedRuntimeClients({
+			scope,
+			runningLaunch: configuredLaunch,
+			rejectProjectOverrides: true,
+		});
+		const bootstrapped = new Set<string>();
+		for (const outcome of outcomes) {
+			const feed = outcome.nativeFeed;
+			if (
+				!feed ||
+				outcome.client === "claude-desktop" ||
+				!codingClients.includes(outcome.client) ||
+				!feedClients.includes(outcome.client)
+			)
+				continue;
+			try {
+				const credentialsPath = join(feed.home, ".pharaoh", "credentials.json");
+				if (reused && !bootstrapped.has(credentialsPath)) {
+					await dependencies.bootstrapFeed(credentials, options.server, credentialsPath);
+					bootstrapped.add(credentialsPath);
+				}
+				dependencies.nativeFeedHooks(
+					outcome.client,
+					launcher ?? join(managedProxyRoot, "runtime", "native-feed-hook.mjs"),
+					{
+						node: configuredLaunch.command,
+						viaLauncher: launcher !== null,
+						home: feed.home,
+						settingsPath: feed.settingsPath,
+						registration: feed.registration,
+						serverArgv: feed.serverArgv,
+						scope,
+					},
+				);
+			} catch {
+				write(
+					`${CLIENT_LABELS[outcome.client]}: native context hooks could not be configured. Hosted queries remain available.`,
+				);
 			}
 		}
 		// Existing setup decides Claude tool permissions before runtime hooks can create settings.json.
@@ -622,6 +790,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			const canActivate = () =>
 				dependencies
 					.verifiedRuntimeClients({
+						scope,
 						runningLaunch: configuredLaunch,
 						requiredProxy: { minimumVersion: getPackageVersion(), server: options.server },
 						rejectProjectOverrides: true,
@@ -640,6 +809,7 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 						approval,
 						credentials.runtime_session,
 						canActivate,
+						{ scope },
 					);
 				}
 			} catch {
@@ -649,6 +819,28 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 				write(
 					`${label}: runtime analytics could not be enabled. Check --runtime-status or try --runtime-enable --client ${client}.`,
 				);
+		}
+		if (!options.skipRuntime && options.server === DEFAULT_SERVER) {
+			for (const client of codingClients) {
+				if (client !== "claude-code" && client !== "codex") continue;
+				if (runtimeInstallations.some((intent) => intent.client === client)) continue;
+				const canActivate = () =>
+					dependencies
+						.verifiedRuntimeClients({
+							scope,
+							runningLaunch: configuredLaunch,
+							requiredProxy: { minimumVersion: getPackageVersion(), server: options.server },
+							rejectProjectOverrides: true,
+						})
+						.includes(client);
+				try {
+					await dependencies.attachRuntime(client, canActivate, { scope });
+				} catch {
+					notes.push(
+						`${CLIENT_LABELS[client]}: runtime analytics could not be attached. Check --runtime-status.`,
+					);
+				}
+			}
 		}
 
 		progress.stop();
@@ -697,7 +889,14 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 		}
 		const agents: AgentLaunch[] = targets.flatMap((target) =>
 			target.cli && connected.some((outcome) => outcome.client === target.client)
-				? [{ client: target.client, command: target.cli, args: [SETUP_TOOL_PROMPT] }]
+				? [
+						{
+							client: target.client,
+							command: target.cli,
+							args: [SETUP_TOOL_PROMPT],
+							...(scope.kind === "local" ? { cwd: scope.root } : {}),
+						},
+					]
 				: [],
 		);
 		const desktop = connected.find((outcome) => outcome.client === "claude-desktop");

@@ -18,6 +18,7 @@
  * pharaoh_update, which verifies the release before staging it.
  */
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
 	closeSync,
 	lstatSync,
@@ -235,7 +236,49 @@ function invokedDirectly() {
 	}
 }
 
-if (invokedDirectly() && process.argv[3] === UPDATE_NOTICE_MARKER) {
+function noticeScopeMatches(args) {
+	const index = args.indexOf("--install-scope");
+	if (index < 0) return true;
+	if (args[index + 1] !== "local" || args[index + 2] !== "--install-root") return false;
+	try {
+		const expected = realpathSync(args[index + 3]);
+		const actual = execFileSync(
+			"git",
+			[
+				"--no-optional-locks",
+				"--no-replace-objects",
+				"-c",
+				"core.fsmonitor=false",
+				"-c",
+				"core.untrackedCache=false",
+				"rev-parse",
+				"--show-toplevel",
+			],
+			{
+				encoding: "utf8",
+				timeout: 750,
+				maxBuffer: 16_384,
+				stdio: ["ignore", "pipe", "ignore"],
+				env: {
+					...Object.fromEntries(
+						Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+					),
+					GIT_NO_LAZY_FETCH: "1",
+					GIT_TERMINAL_PROMPT: "0",
+				},
+			},
+		).trim();
+		return expected === args[index + 3] && realpathSync(actual) === expected;
+	} catch {
+		return false;
+	}
+}
+
+if (
+	invokedDirectly() &&
+	process.argv[3] === UPDATE_NOTICE_MARKER &&
+	noticeScopeMatches(process.argv.slice(4))
+) {
 	try {
 		const output = updateNotice(process.argv[2]);
 		if (output) process.stdout.write(`${JSON.stringify(output)}\n`);

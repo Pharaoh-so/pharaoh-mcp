@@ -169,8 +169,9 @@ export async function readStdin(maxBytes) {
 /** The per-repo lists of memory records kept for the edit cue (graph-cues.mjs). */
 export const ANCHORED_MEMORY_FILE = /^anchored-memory-[a-f0-9]{64}\.json$/;
 
-export function atomicWrite(path, contents) {
+export function atomicWrite(path, contents, beforeWrite) {
 	const temporary = join(dirname(path), `.pharaoh-memory-${randomUUID()}.tmp`);
+	beforeWrite?.(temporary);
 	try {
 		writeFileSync(temporary, contents, { flag: "wx", mode: 0o600 });
 		renameSync(temporary, path);

@@ -25,6 +25,8 @@ export interface LocalSignIn {
  */
 export interface LocalHost {
 	readonly signIn: LocalSignIn;
+	/** Bound installation checkout, independent of the repository's GitHub authorization. */
+	readonly scope?: { kind: "global" } | { kind: "local"; root: string };
 	/** The launch entry client registrations name: the launcher that started this process, or dist/index.js. */
 	readonly entry: string;
 	/** The coding clients whose registration runs exactly `entry`. */

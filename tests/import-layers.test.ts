@@ -110,7 +110,7 @@ it("reaches the build by path only where runtime/ means to, and those sources ex
 	// The one deliberate exception to the import graph: the hook's analysis
 	// (src/local-host.ts), loaded by path, and the entry registrations name (src/index.ts).
 	const built = [...read.values()].flatMap((file) => file.built).sort();
-	expect(built).toEqual(["src/index.ts", "src/local-host.ts"]);
+	expect(built).toEqual(["src/index.ts", "src/local-host.ts", "src/native-feed-maintenance.ts"]);
 	expect(built.filter((path) => !existsSync(join(ROOT, path)))).toEqual([]);
 });
 

@@ -3,6 +3,7 @@
  * All user-visible output goes to stderr — stdout is reserved for JSON-RPC.
  */
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/runtime-client.mjs";
 
 /** Response from POST /device. */
@@ -200,12 +201,32 @@ export async function pollForToken(
  */
 export function openBrowser(url: string): void {
 	if (process.env.PHARAOH_MCP_DISABLE_BROWSER === "1") return;
-	if (process.platform === "darwin") {
-		execFile("open", [url], () => {});
-	} else if (process.platform === "win32") {
-		execFile("cmd.exe", ["/c", "start", "", url], () => {});
-	} else {
-		execFile("xdg-open", [url], () => {});
+	const windows: [string, string[]] = ["rundll32.exe", ["url.dll,FileProtocolHandler", url]];
+	const linux: [string, string[]] = ["xdg-open", [url]];
+	let commands: [string, string[]][] = [linux];
+	if (process.platform === "darwin") commands = [["open", [url]]];
+	else if (process.platform === "win32") commands = [windows];
+	else if (isWsl()) commands = [["wslview", [url]], windows, linux];
+	const tryNext = (): void => {
+		const next = commands.shift();
+		if (next) {
+			execFile(next[0], next[1], (error) => {
+				if (error) tryNext();
+			});
+		}
+	};
+	tryNext();
+}
+
+/** WSL uses the Windows browser even when its terminal and agent run in Linux. */
+function isWsl(): boolean {
+	if (process.platform !== "linux") return false;
+	if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+	try {
+		return /microsoft/i.test(readFileSync("/proc/sys/kernel/osrelease", "utf8"));
+	} catch {
+		// ALLOWED-CATCH: a missing kernel marker leaves the ordinary Linux opener in charge.
+		return false;
 	}
 }
 
@@ -234,7 +255,7 @@ export function activationBox(device: ActivationDevice): string[] {
 		`Your code:  ${device.user_code}`,
 		"",
 		"A browser window should open automatically.",
-		"If it didn't open, visit:",
+		"If needed, open this link in your browser:",
 		activationLink(device),
 		"",
 		`Keep this running until sign-in is approved${wait}.`,
@@ -258,8 +279,8 @@ export function activationBox(device: ActivationDevice): string[] {
  * @param device - The server's device-code response.
  */
 export function printActivationPrompt(device: ActivationDevice): void {
-	openBrowser(activationLink(device));
 	process.stderr.write(`${activationBox(device).join("\n")}\n`);
+	openBrowser(activationLink(device));
 }
 
 /**
@@ -274,7 +295,7 @@ export function printAuthSuccess(
 	if (login) parts.push(`as ${login}`);
 	// A personal account is named after its login; say it once.
 	if (tenant && tenant.toLowerCase() !== login?.toLowerCase()) parts.push(`(${tenant})`);
-	parts.push(`· ${repoCount} repo${repoCount === 1 ? "" : "s"}`);
+	parts.push(`· ${repoCount} mapped repo${repoCount === 1 ? "" : "s"}`);
 	process.stderr.write(`${parts.join(" ")}\n`);
 }
 

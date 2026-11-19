@@ -1,14 +1,17 @@
 /** Explicit owner controls for optional, content-free native runtime observations. */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { installRuntimeBundle } from "../runtime/runtime-bundle.mjs";
 import {
+	attachRuntimeTarget,
 	disableRuntime,
 	enableRuntime,
 	type RuntimeClient,
 	type RuntimeDeviceApproval,
 	type RuntimeDisableResult,
 	type RuntimeOAuthCredentials,
+	type RuntimeOptions,
 	refreshRuntimeBuildEvidence,
 	revokeRuntime,
 	runtimeProfileReceipt,
@@ -59,6 +62,8 @@ function parseRuntimeArgs(args: string[]) {
 	let value: string | undefined;
 	let json = false;
 	let server: string | undefined;
+	let scopeKind: "global" | "local" | undefined;
+	let targetPath: string | undefined;
 	for (let index = 0; index < args.length; index++) {
 		const flag = args[index];
 		const found = OPERATIONS.find((candidate) => candidate === flag);
@@ -73,6 +78,13 @@ function parseRuntimeArgs(args: string[]) {
 		} else if (flag === "--server" && !server) {
 			server = args[++index];
 			if (!server || server.startsWith("-")) return null;
+		} else if (flag === "--scope" && !scopeKind) {
+			const value = args[++index];
+			if (value !== "global" && value !== "local") return null;
+			scopeKind = value;
+		} else if (flag === "--path" && !targetPath) {
+			targetPath = args[++index];
+			if (!targetPath || targetPath.startsWith("-")) return null;
 		} else if (flag === "--json" && !json) json = true;
 		else return null;
 	}
@@ -83,11 +95,53 @@ function parseRuntimeArgs(args: string[]) {
 	)
 		return null;
 	if (!["--runtime-status", "--runtime-revoke"].includes(operation) && !client) return null;
+	if (
+		(targetPath && scopeKind !== "local") ||
+		(operation === "--runtime-revoke" && scopeKind === "local")
+	)
+		return null;
+	let scope: RuntimeOptions["scope"];
+	if (scopeKind === "local") {
+		try {
+			const root = execFileSync(
+				"git",
+				[
+					"--no-optional-locks",
+					"--no-replace-objects",
+					"-c",
+					"core.fsmonitor=false",
+					"-c",
+					"core.untrackedCache=false",
+					"-C",
+					targetPath ?? process.cwd(),
+					"rev-parse",
+					"--show-toplevel",
+				],
+				{
+					encoding: "utf8",
+					timeout: 1_000,
+					maxBuffer: 16_384,
+					stdio: ["ignore", "pipe", "ignore"],
+					env: {
+						...Object.fromEntries(
+							Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+						),
+						GIT_NO_LAZY_FETCH: "1",
+						GIT_TERMINAL_PROMPT: "0",
+					},
+				},
+			).trim();
+			scope = { kind: "local", root: realpathSync(root) };
+		} catch {
+			return null;
+		}
+	} else if (scopeKind) scope = { kind: "global" };
 	return {
 		operation,
 		client,
 		value,
 		json,
+		scope,
 		server: parseArgs(server ? ["--server", server] : []).server,
 	};
 }
@@ -108,12 +162,19 @@ function installedBuild(client: RuntimeClient): string {
 }
 
 /** Refresh ordinary proxy build evidence without invoking a model or running inside a native hook. */
-export function refreshManagedRuntimeBuild(clientName: string | undefined): void {
+export function refreshManagedRuntimeBuild(
+	clientName: string | undefined,
+	options: Pick<RuntimeOptions, "scope" | "cwd"> = {},
+): void {
 	try {
-		refreshRuntimeBuildEvidence(clientName, (client) => ({
-			clientBuild: installedBuild(client),
-			proxyBuild: getPackageVersion(),
-		}));
+		refreshRuntimeBuildEvidence(
+			clientName,
+			(client) => ({
+				clientBuild: installedBuild(client),
+				proxyBuild: getPackageVersion(),
+			}),
+			options,
+		);
 	} catch {
 		/* Optional installation discovery cannot prevent an answered tool call. */
 	}
@@ -125,14 +186,31 @@ export async function enableInstalledRuntime(
 	deviceApproval: RuntimeDeviceApproval,
 	expectedRuntimeSession: string,
 	canActivate: () => boolean,
+	options: Pick<RuntimeOptions, "scope"> = {},
 ): Promise<boolean> {
 	if (!canActivate()) return false;
 	return enableRuntime(deviceApproval.client, server, installRuntimeBundle(), {
+		...options,
 		clientBuild: installedBuild(deviceApproval.client),
 		proxyBuild: getPackageVersion(),
 		deviceApproval,
 		expectedRuntimeSession,
 		canActivate,
+	});
+}
+
+/** Reuse approved client enrollment for another verified activation target. */
+export async function attachInstalledRuntime(
+	client: RuntimeClient,
+	canActivate: () => boolean,
+	options: Pick<RuntimeOptions, "scope"> = {},
+): Promise<boolean> {
+	if (!canActivate()) return false;
+	return attachRuntimeTarget(client, installRuntimeBundle(), {
+		...options,
+		canActivate,
+		clientBuild: installedBuild(client),
+		proxyBuild: getPackageVersion(),
 	});
 }
 
@@ -162,15 +240,15 @@ export async function runRuntimeCommand(args: string[]): Promise<number> {
 		);
 		return 2;
 	}
-	const { operation, client, value, json, server } = parsed;
+	const { operation, client, value, json, server, scope } = parsed;
 	const clients = client ? [client] : RUNTIME_CLIENTS;
 	if (operation === "--runtime-status") {
-		const status = clients.map((name) => ({ client: name, ...runtimeStatus(name) }));
+		const status = clients.map((name) => ({ client: name, ...runtimeStatus(name, { scope }) }));
 		if (json) process.stdout.write(`${JSON.stringify(status)}\n`);
 		else
 			for (const entry of status)
 				printLines(
-					`${entry.client}: ${entry.consent}; receipt coverage ${entry.receiptCoverage}; token coverage ${entry.tokenCoverage}.`,
+					`${entry.client}: ${entry.consent};${entry.activation ? ` selected activation ${entry.activation};` : ""} receipt coverage ${entry.receiptCoverage}; token coverage ${entry.tokenCoverage}.`,
 				);
 		return 0;
 	}
@@ -184,8 +262,8 @@ export async function runRuntimeCommand(args: string[]): Promise<number> {
 	if (operation === "--runtime-profile" || operation === "--runtime-profile-receipt") {
 		const selection =
 			operation === "--runtime-profile"
-				? selectRuntimeProfile(client, value ?? "")
-				: runtimeProfileReceipt(client, value ?? "");
+				? selectRuntimeProfile(client, value ?? "", { scope })
+				: runtimeProfileReceipt(client, value ?? "", { scope });
 		if (json) process.stdout.write(`${JSON.stringify(selection)}\n`);
 		else if (selection)
 			printLines(
@@ -203,6 +281,7 @@ export async function runRuntimeCommand(args: string[]): Promise<number> {
 	}
 	if (
 		!verifiedCodingClients({
+			scope,
 			requiredProxy: { minimumVersion: RECEIPT_PROXY_VERSION, server },
 		}).includes(client)
 	) {
@@ -218,6 +297,7 @@ export async function runRuntimeCommand(args: string[]): Promise<number> {
 		return 1;
 	}
 	const enabled = await enableRuntime(client, server, installRuntimeBundle(), {
+		scope,
 		clientBuild: installedBuild(client),
 		proxyBuild: getPackageVersion(),
 		onApproval: (url, reference) => {

@@ -13,6 +13,7 @@
  *                      place — the stdio session never disconnects.
  */
 import { fileURLToPath } from "node:url";
+import { memoryScopeMatches, setMemoryInstallScope } from "../project-memory/install-scope.mjs";
 import { resetHookPreferences, setMemoryCapture } from "../project-memory/preferences.mjs";
 import {
 	applyMemoryHookChoices,
@@ -30,6 +31,7 @@ import {
 	printLines,
 	printUsage,
 } from "./helpers.js";
+import { gitWorktreeRoot, installScopeArguments } from "./install-scope.js";
 import {
 	allowReadTools,
 	describeAgentInstructionOutcome,
@@ -37,8 +39,10 @@ import {
 	offerAgentInstructionLines,
 	runInstallSkills,
 } from "./install-skills.js";
+import type { ClientId, InstallScope } from "./install-types.js";
 import { handleRefreshFailure, tryMidSessionRefresh } from "./lifecycle.js";
 import { updateMemoryHint } from "./memory-hint.js";
+import { NativeFeedRuntime } from "./native-feed.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { type ProxyServer, startInAuthRequiredMode, startInSseMode } from "./proxy-server.js";
 import { loadAndRefresh } from "./refresh.js";
@@ -79,6 +83,7 @@ async function setupMemoryHooks(
 	clients: string[],
 	requested: boolean,
 	note: (...lines: string[]) => void,
+	scope?: InstallScope,
 ) {
 	try {
 		if (requested) setMemoryCapture(true);
@@ -86,11 +91,12 @@ async function setupMemoryHooks(
 			credentials,
 			clients,
 			requested,
+			scope,
 			ask: askYesNoInTerminal,
 		});
 		// Memory runs on its own (DECIDED 2026-11-10: hands-off), so install reports only its
 		// failures, which start "Pharaoh:". The Codex trust step is the summary's own check.
-		const notices = applyMemoryHookChoices(decision, { credentials });
+		const notices = applyMemoryHookChoices(decision, { credentials, scope });
 		note(...notices.filter((notice) => notice.startsWith("Pharaoh:")));
 	} catch {
 		note("Pharaoh: could not finish local project memory setup. MCP remains available.");
@@ -117,10 +123,17 @@ async function cleanupClientRegistrations(reset: boolean): Promise<boolean> {
 		(process.platform === "win32" &&
 			Boolean((await import("./local/worker-host.js")).installedLocalAnalyzer()));
 	if (localCleanupSupported) {
+		const { syncNativeFeedHooks } = await import("../runtime/feed-hooks.mjs");
 		const { syncLocalWorktreeHooks, syncUpdateNoticeHook } = await import(
 			"../runtime/runtime-hooks.mjs"
 		);
 		for (const client of ["claude-code", "codex"] as const) {
+			try {
+				syncNativeFeedHooks(client, null);
+			} catch {
+				printLines("Pharaoh: native context hook cleanup needs attention.");
+				provenanceFailed = true;
+			}
 			try {
 				syncLocalWorktreeHooks(client, null);
 			} catch {
@@ -148,6 +161,93 @@ async function cleanupClientRegistrations(reset: boolean): Promise<boolean> {
 	);
 }
 
+/** Remove one owned activation boundary without clearing sign-in or another checkout. */
+async function cleanupInstallScope(scope: InstallScope, client: ClientId): Promise<boolean> {
+	const { cleanupManagedClients } = await import("./setup.js");
+	if (client === "claude-desktop") {
+		let outcomes: ReturnType<typeof cleanupManagedClients>;
+		try {
+			outcomes = cleanupManagedClients({ scope, client });
+		} catch {
+			printLines(
+				"Pharaoh: the installation record could not be read; managed cleanup could not be verified.",
+			);
+			return false;
+		}
+		const unresolved = outcomes.filter(
+			(outcome) => !["configured", "already-configured"].includes(outcome.status),
+		);
+		for (const outcome of unresolved)
+			printLines(outcome.detail ?? "Pharaoh: Desktop cleanup needs attention.");
+		return unresolved.length === 0;
+	}
+	const { cleanupInstallExtras } = await import("./install-skills.js");
+	const { detachRuntimeTarget } = await import("../runtime/runtime-client.mjs");
+	const { syncNativeFeedHooks } = await import("../runtime/feed-hooks.mjs");
+	const { syncLocalWorktreeHooks, syncUpdateNoticeHook } = await import(
+		"../runtime/runtime-hooks.mjs"
+	);
+	const notices = syncMemoryHooks({ clients: [client], scope });
+	notices.push(...cleanupInstallExtras(scope, [client]));
+	let runtimeCleaned = false;
+	try {
+		runtimeCleaned = await detachRuntimeTarget(client, { scope });
+		syncNativeFeedHooks(client, null, { scope });
+		syncLocalWorktreeHooks(client, null, { scope });
+		syncUpdateNoticeHook(client, null, { scope });
+		if (!runtimeCleaned)
+			notices.push(
+				"Pharaoh: runtime revocation or hook cleanup is pending. Retry this cleanup after signing in to the original server.",
+			);
+	} catch {
+		notices.push("Pharaoh: scoped runtime cleanup needs attention. Retry the cleanup command.");
+	}
+	let outcomes: ReturnType<typeof cleanupManagedClients>;
+	try {
+		outcomes = cleanupManagedClients({ scope, client });
+	} catch {
+		notices.push(
+			"Pharaoh: the installation record could not be read; managed cleanup could not be verified.",
+		);
+		printLines(...notices);
+		return false;
+	}
+	for (const outcome of outcomes)
+		if (!["configured", "already-configured"].includes(outcome.status))
+			notices.push(outcome.recovery ?? "Pharaoh: scoped registration cleanup needs attention.");
+	if (notices.length) printLines(...notices);
+	return runtimeCleaned && !notices.length;
+}
+
+/** Validate the explicit scoped removal command before doing any filesystem work. */
+async function runScopedCleanup(args: string[]): Promise<void> {
+	for (let i = 0; i < args.length; i += 2)
+		if (
+			!["--scope", "--path", "--client"].includes(args[i]) ||
+			!args[i + 1] ||
+			args[i + 1].startsWith("--")
+		)
+			throw new Error(
+				"Use cleanup --client claude-code|codex --scope global|local [--path <repo>].",
+			);
+	const { kind, path } = installScopeArguments(args);
+	const client = args[args.indexOf("--client") + 1];
+	if (
+		!kind ||
+		!args.includes("--client") ||
+		(client !== "claude-code" && client !== "codex" && client !== "claude-desktop") ||
+		(kind === "global" && path)
+	)
+		throw new Error("Use cleanup --client claude-code|codex --scope global|local [--path <repo>].");
+	const root = kind === "local" ? gitWorktreeRoot(path ?? process.cwd()) : null;
+	if (kind === "local" && (client === "claude-desktop" || !root))
+		throw new Error("Local cleanup needs a supported coding client and Git checkout.");
+	const scope: InstallScope = kind === "local" ? { kind, root: root! } : { kind };
+	process.exitCode = (await cleanupInstallScope(scope, client)) ? 0 : 1;
+	if (!process.exitCode)
+		printLines("Pharaoh: selected installation removed. Restart the client to unload it.");
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	const explicitInstall = args[0] === "install";
@@ -155,6 +255,10 @@ async function main(): Promise<void> {
 	if (!explicitInstall && args[0] === "update") {
 		const { runUpdateCommand } = await import("./update.js");
 		process.exitCode = await runUpdateCommand(args.slice(1));
+		return;
+	}
+	if (!explicitInstall && args[0] === "cleanup") {
+		await runScopedCleanup(args.slice(1));
 		return;
 	}
 	if (!explicitInstall && args[0] && !args[0].startsWith("-")) {
@@ -245,9 +349,54 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	if (args.includes("--disable-native-context") || args.includes("--enable-native-context")) {
+		const { setNativeFeedEnabled, syncNativeFeedHooks } = await import("../runtime/feed-hooks.mjs");
+		const enabled = args.includes("--enable-native-context");
+		const clientIndex = args.indexOf("--client");
+		const selected = clientIndex < 0 ? ["codex", "claude-code"] : [args[clientIndex + 1]];
+		if (selected.some((client) => client !== "codex" && client !== "claude-code"))
+			throw new Error("Invalid native context client.");
+		for (const client of selected) {
+			setNativeFeedEnabled(client as "codex" | "claude-code", enabled);
+			if (!enabled) syncNativeFeedHooks(client as "codex" | "claude-code", null);
+		}
+		printLines(
+			enabled
+				? "Pharaoh: native context enabled. Run the install command to restore its hooks."
+				: "Pharaoh: native context disabled.",
+		);
+		return;
+	}
+	if (args.includes("--native-context-status")) {
+		const { nativeFeedStatus } = await import("./native-feed-status.js");
+		process.stdout.write(`${JSON.stringify(nativeFeedStatus(), null, 2)}\n`);
+		return;
+	}
+
 	// Clean mode — remove all pharaoh traces from Claude Code config (MCP entries,
 	// disabled states, project-scoped configs). Useful for resetting broken installs.
 	if (args.includes("--clean")) {
+		const { recordedLocalRoots } = await import("./setup.js");
+		let localRoots: string[] = [];
+		let scopeUnknown = false;
+		try {
+			localRoots = recordedLocalRoots();
+		} catch {
+			scopeUnknown = true;
+		}
+		if (localRoots.length || scopeUnknown) {
+			let cleaned = true;
+			for (const client of ["claude-code", "codex", "claude-desktop"] as const)
+				cleaned = (await cleanupInstallScope({ kind: "global" }, client)) && cleaned;
+			if (scopeUnknown) {
+				const { cleanSlate, cleanCodexSetup } = await import("./setup.js");
+				cleanSlate();
+				cleanCodexSetup();
+			}
+			printLines("Pharaoh: Global cleanup finished; Local installations were preserved.");
+			process.exitCode = cleaned ? 0 : 1;
+			return;
+		}
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
 		const { clearRuntimeForCleanup } = await import("./runtime-command.js");
 		const runtimeCleaned = await clearRuntimeForCleanup();
@@ -259,10 +408,24 @@ async function main(): Promise<void> {
 		process.exit(cleaned && runtimeCleaned ? 0 : 1);
 	}
 
-	const { server, logout } = parseArgs(args);
+	const { server, serverArgv, feedClient, feedRegistration, logout } = parseArgs(args);
 
 	if (logout) {
 		const { uninstallClaudePlugin } = await import("./install-skills.js");
+		const { recordedLocalRoots } = await import("./setup.js");
+		let localCleaned = true;
+		try {
+			for (const root of recordedLocalRoots()) {
+				for (const client of ["claude-code", "codex"] as const)
+					localCleaned =
+						(await cleanupInstallScope({ kind: "local", root }, client)) && localCleaned;
+			}
+		} catch {
+			localCleaned = false;
+			printLines(
+				"Pharaoh: Local installation cleanup needs attention; sign-out will still clear credentials.",
+			);
+		}
 		// Retain the origin-bound bearer in memory long enough to request revocation.
 		// A cleanup step that fails must never leave credentials on disk.
 		const previousCredentials = await takeCredentialsForLogout();
@@ -273,7 +436,7 @@ async function main(): Promise<void> {
 		const cleaned = await cleanupClientRegistrations(false);
 		uninstallClaudePlugin();
 		printLines("Pharaoh: credentials cleared and local setup cleanup finished.");
-		process.exit(cleaned && runtimeCleaned ? 0 : 1);
+		process.exit(cleaned && runtimeCleaned && localCleaned ? 0 : 1);
 	}
 
 	const isInteractive = explicitInstall || Boolean(process.stdin.isTTY);
@@ -290,33 +453,53 @@ async function main(): Promise<void> {
 			process.exitCode = 2;
 			return;
 		}
+		const selectedScope = installScopeArguments(args);
 		process.exitCode = await runInstall({
 			server,
+			serverArgv,
+			scope: selectedScope.kind,
+			path: selectedScope.path,
+			preflightScope: async (scope, targets) => {
+				const { preflightInstallExtras } = await import("./install-skills.js");
+				const { recordedLocalRoots } = await import("./setup.js");
+				const clients = targets.flatMap((target) =>
+					target.client === "claude-code" || target.client === "codex" ? [target.client] : [],
+				);
+				return preflightInstallExtras(scope, clients, undefined, recordedLocalRoots());
+			},
 			migrateLegacy: args.includes("--migrate-legacy"),
 			skipRuntime: args.includes("--skip-runtime"),
 			// Questions print as they're asked; the outcomes wait for the install summary.
-			afterConfigure: async (credentials, clients, note) => {
+			afterConfigure: async (credentials, clients, note, scope) => {
+				setMemoryInstallScope(scope);
 				let extraFailures = false;
 				const codingClients = clients.filter(
 					(client): client is "claude-code" | "codex" =>
 						client === "claude-code" || client === "codex",
 				);
 				if (clients.length) {
-					const { errors } = runInstallSkills(undefined, { silent: true, clients: codingClients });
+					const { errors } = runInstallSkills(undefined, {
+						silent: true,
+						clients: codingClients,
+						scope,
+					});
 					if (errors.length) {
 						note(...errors);
 						extraFailures = true;
 					}
 				}
 				if (clients.includes("claude-code")) {
-					const allowed = describeAllowReadTools(allowReadTools());
+					const allowed = describeAllowReadTools(allowReadTools(undefined, { scope }), { scope });
 					if (allowed) note(allowed);
 				}
-				const instructions = await offerAgentInstructionLines(
-					codingClients,
-					(question) => askYesNo(question),
-					Boolean(process.stdin.isTTY && process.stderr.isTTY),
-				);
+				const instructions =
+					scope?.kind === "local"
+						? []
+						: await offerAgentInstructionLines(
+								codingClients,
+								(question) => askYesNo(question),
+								Boolean(process.stdin.isTTY && process.stderr.isTTY),
+							);
 				for (const instruction of instructions) {
 					const message = describeAgentInstructionOutcome(instruction);
 					if (message) note(message);
@@ -324,7 +507,7 @@ async function main(): Promise<void> {
 				if (instructions.some((instruction) => instruction.outcome === "failed")) {
 					extraFailures = true;
 				}
-				await setupMemoryHooks(credentials, clients, args.includes("--memory-hooks"), note);
+				await setupMemoryHooks(credentials, clients, args.includes("--memory-hooks"), note, scope);
 				if (extraFailures) throw new Error("Optional client setup needs attention.");
 			},
 		});
@@ -338,7 +521,41 @@ async function main(): Promise<void> {
 	// 401). The stdio session stays alive for the whole life of the agent;
 	// only non-recoverable failures (tenant suspended, transient refresh error
 	// on cold start) terminate the process.
+	const scopeFlag = args.indexOf("--install-scope");
+	const rootFlag = args.indexOf("--install-root");
+	let scope: InstallScope | undefined;
+	if (scopeFlag >= 0 || rootFlag >= 0) {
+		if (args[scopeFlag + 1] !== "local" || rootFlag < 0) {
+			throw new Error("Invalid scoped Pharaoh launch. Run the Local installer again.");
+		}
+		scope = { kind: "local", root: args[rootFlag + 1] ?? "" };
+		const { verifiedCodingClients } = await import("./setup.js");
+		if (
+			!memoryScopeMatches(process.cwd(), scope) ||
+			!verifiedCodingClients({
+				scope,
+				runningLaunch: {
+					command: process.execPath,
+					args: [runningEntry(fileURLToPath(import.meta.url)), ...args],
+				},
+			}).length
+		)
+			throw new Error(
+				"Pharaoh Local is not active for this checkout. Run the Local installer here.",
+			);
+	}
+	setMemoryInstallScope(scope);
 	const outcome = await loadAndRefresh(server);
+	const nativeFeed =
+		feedClient && feedRegistration
+			? new NativeFeedRuntime({
+					client: feedClient,
+					registration: feedRegistration,
+					server,
+					serverArgv,
+					credentials: outcome?.ok ? outcome.creds : undefined,
+				})
+			: undefined;
 
 	// Install skills opportunistically — must not block startup. Failures
 	// here include network hiccups (npm registry blips) and transient fs
@@ -347,12 +564,13 @@ async function main(): Promise<void> {
 	try {
 		const { verifiedCodingClients } = await import("./setup.js");
 		const clients = verifiedCodingClients({
+			scope,
 			runningLaunch: {
 				command: process.execPath,
-				args: [runningEntry(fileURLToPath(import.meta.url))],
+				args: [runningEntry(fileURLToPath(import.meta.url)), ...args],
 			},
 		});
-		if (clients.length) runInstallSkills(undefined, { clients });
+		if (clients.length) runInstallSkills(undefined, { clients, scope });
 	} catch (err) {
 		// ALLOWED-CATCH: skill install failure must not block MCP proxy startup
 		const msg = err instanceof Error ? err.message : String(err);
@@ -373,6 +591,8 @@ async function main(): Promise<void> {
 		// completes (after the user's device-flow round trip), long after the
 		// assignment — so TS's strict-binding checks accept the reference.
 		const { proxy } = await startInAuthRequiredMode(server, {
+			nativeFeed,
+			scope,
 			onAuthorized: async (creds) => {
 				printLines("Pharaoh: authenticated — swapping to SSE backend.");
 				await useSse(proxy, creds);
@@ -397,7 +617,7 @@ async function main(): Promise<void> {
 	const creds = outcome.creds;
 	printLines(`Pharaoh: token valid for ${formatTtl(creds.expires_at)} — connecting`);
 	activeCreds = creds;
-	const proxy = await startInSseMode(creds);
+	const proxy = await startInSseMode(creds, scope, nativeFeed);
 	proxy.setMemoryCredentials(creds);
 	// Sign-ins from before project memory have no hint: ask once, in the background.
 	void updateMemoryHint(server, {
@@ -518,8 +738,9 @@ let activeCreds: Credentials | null = null;
 
 /** Point the proxy at a fresh SSE backend for `creds`, remembering which creds it uses. */
 async function useSse(proxy: ProxyServer, creds: Credentials): Promise<void> {
-	activeCreds = creds;
 	await proxy.setBackend(createSseBackend(creds.sse_url, creds.access_token));
+	activeCreds = creds;
+	proxy.setNativeFeedCredentials(creds);
 	proxy.setMemoryCredentials(creds);
 }
 

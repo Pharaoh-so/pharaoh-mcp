@@ -35,13 +35,15 @@ import {
 	type RequestId,
 	type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { memoryScopeMatches } from "../project-memory/install-scope.mjs";
 import { memoryEgressDecision } from "../project-memory/local.mjs";
 import {
 	memoryDiagnosticsForClient,
 	memoryHookStateForClient,
+	nativeMemoryClient,
 } from "../project-memory/preferences.mjs";
 import { ensureMemoryHooks } from "../project-memory/setup.mjs";
-import { runtimeRequestMetadata } from "../runtime/runtime-client.mjs";
+import { recordRuntimeReceipt, runtimeRequestMetadata } from "../runtime/runtime-client.mjs";
 import { RUNTIME_TOOL_NAMES, sanitizeRuntimeResult } from "../runtime/runtime-native.mjs";
 import { ensurePrivateDirectory, privatePath } from "../runtime/runtime-storage.mjs";
 import {
@@ -54,10 +56,12 @@ import { loadBundledCatalog } from "./catalog.js";
 import type { Credentials } from "./credentials.js";
 import { createGateway, type DeviceFlowGateway } from "./gateway.js";
 import { claudePluginState, instructionStates } from "./install-skills.js";
+import type { InstallScope } from "./install-types.js";
 import { type LocalBlastRuntime, type LocalDelivery, localRefusal } from "./local/contracts.js";
 import { selectBlastRoute } from "./local/dispatch.js";
 import { createLocalBlastRuntime } from "./local/runtime.js";
 import { localHost } from "./local-host.js";
+import { NATIVE_SHARE_TOOL, type NativeFeedRuntime } from "./native-feed.js";
 import { TenantSuspendedError, TokenExpiredError } from "./proxy.js";
 import { registerTraceResource } from "./trace-resource.js";
 import { getPackageVersion } from "./version.js";
@@ -204,6 +208,7 @@ export class ProxyServer {
 	private memoryCredentials: Credentials | null = null;
 	/** Lines for the user after hooks were turned on, carried by the next answered tool call. */
 	private memoryNotice: string[] = [];
+	private memoryMigrationNoticed = false;
 	private capabilityUpdate: Promise<void> = Promise.resolve();
 	private localDeliveries = new Map<RequestId, { settle: LocalDelivery; detach: () => void }>();
 	private deliverySettlements = new Set<Promise<void>>();
@@ -215,6 +220,9 @@ export class ProxyServer {
 		initialBackend: Backend,
 		private readonly requestTimeout?: number,
 		private readonly localBlast?: LocalBlastRuntime,
+		private readonly installScope?: InstallScope,
+		private readonly managedHookClients?: () => readonly string[],
+		private readonly nativeFeed?: NativeFeedRuntime,
 	) {
 		this.deferHosted =
 			localBlast?.invocation.kind === "checkout" || localBlast?.canDeferHostedStartup?.() === true;
@@ -243,11 +251,14 @@ export class ProxyServer {
 			const downstream: DownstreamClient = {
 				client: { name: info?.name, version: info?.version },
 				plugin: claudePluginState(),
-				memoryHooks: memoryHookStateForClient(info),
+				memoryHooks: memoryHookStateForClient(info, { scope: this.installScope }),
 				instructions: instructionStates(info?.name),
 			};
 			this.downstream = downstream;
-			if (this.transport instanceof StdioServerTransport) this.localBlast?.connect?.(info?.name);
+			if (this.transport instanceof StdioServerTransport) {
+				this.localBlast?.connect?.(info?.name);
+				this.nativeFeed?.connect(info);
+			}
 			this.clientCapabilities = this.server.getClientCapabilities() ?? {};
 			const next = this.backend.withClientCapabilities?.(this.clientCapabilities) ?? this.backend;
 			// Only the backend that serves this client is told about it: a warm
@@ -287,7 +298,8 @@ export class ProxyServer {
 		this.server.setRequestHandler(ListToolsRequestSchema, async (_req, extra) => {
 			await this.capabilityUpdate;
 			extra.signal.throwIfAborted();
-			const tools = await this.backend.listTools({ signal: extra.signal });
+			const tools = [...(await this.backend.listTools({ signal: extra.signal }))];
+			if (this.nativeFeed?.available()) tools.push(NATIVE_SHARE_TOOL);
 			return {
 				tools: this.localBlast?.canCheckReadiness?.() ? [...tools, LOCAL_READINESS] : tools,
 			};
@@ -296,6 +308,8 @@ export class ProxyServer {
 			extra.signal.throwIfAborted();
 			const { name } = req.params;
 			let args = req.params.arguments ?? {};
+			if (name === NATIVE_SHARE_TOOL.name)
+				return this.nativeFeed?.share(args) ?? localRefusal("local_unavailable");
 			if (name === LOCAL_READINESS.name)
 				return this.localBlast?.checkReadiness?.(args) ?? localRefusal("unverified_worktree");
 			// The hosted tool describes; this proxy verifies and stages the update itself (update.ts).
@@ -339,7 +353,11 @@ export class ProxyServer {
 			if (!allowMemory()) return MEMORY_PROTECTED;
 			const memoryTool = operation && operation !== "feedback";
 			if (memoryTool) {
-				const diagnostics = memoryDiagnosticsForClient(this.downstream?.client ?? {});
+				const diagnostics = memoryDiagnosticsForClient(
+					this.downstream?.client ?? {},
+					undefined,
+					this.installScope,
+				);
 				const claimed =
 					args.diagnostics &&
 					typeof args.diagnostics === "object" &&
@@ -359,12 +377,12 @@ export class ProxyServer {
 			const backend = this.backend;
 			if (RUNTIME_TOOL_NAMES.includes(name)) {
 				const { refreshManagedRuntimeBuild } = await import("./runtime-command.js");
-				refreshManagedRuntimeBuild(this.downstream?.client.name);
+				refreshManagedRuntimeBuild(this.downstream?.client.name, { scope: this.installScope });
 			}
 			// Caller _meta never supplies installation identity; only the private
 			// consent record for this negotiated local client can add it upstream.
 			const runtime = RUNTIME_TOOL_NAMES.includes(name)
-				? runtimeRequestMetadata(this.downstream?.client.name)
+				? runtimeRequestMetadata(this.downstream?.client.name, { scope: this.installScope })
 				: undefined;
 			// The CLI's longer deadline must reach the upstream SDK request too.
 			const beforeSend = operation
@@ -376,15 +394,17 @@ export class ProxyServer {
 			const cleanMemoryResult = (result: CallToolResult) =>
 				memoryTool && !allowMemory() ? withoutMemoryFeedback(result) : result;
 			const result = await hostedCall(backend);
+			if (runtime && backend.name === "sse")
+				recordRuntimeReceipt(this.downstream?.client.name, result, { scope: this.installScope });
 			// The call that completed sign-in swapped in the real backend — answer
 			// it from there instead of asking the agent to call again.
 			if (backend.name === "auth-required" && this.backend !== backend && !result.isError) {
 				extra.signal.throwIfAborted();
+				const replay = await hostedCall(this.backend);
+				if (runtime && this.backend.name === "sse")
+					recordRuntimeReceipt(this.downstream?.client.name, replay, { scope: this.installScope });
 				return this.withMemoryNotice(
-					sanitizeRuntimeResult(
-						cleanMemoryResult(await hostedCall(this.backend)),
-						Boolean(runtime),
-					) as CallToolResult,
+					sanitizeRuntimeResult(cleanMemoryResult(replay), Boolean(runtime)) as CallToolResult,
 				);
 			}
 			return this.withMemoryNotice(
@@ -407,10 +427,29 @@ export class ProxyServer {
 
 	/** Never prompts and never writes to stdout, which carries MCP. */
 	private ensureHooks(info: { name?: string; version?: string } | undefined): void {
-		if (!this.memoryCredentials) return;
+		if (!this.memoryCredentials || !memoryScopeMatches(process.cwd(), this.installScope)) return;
+		const client = nativeMemoryClient(info);
+		if (this.managedHookClients && (!client || !this.managedHookClients().includes(client))) {
+			const state = memoryHookStateForClient(info, { scope: this.installScope });
+			// A legacy connection needs explicit adoption. Existing hook markers alone
+			// cannot override this checkout's disabled or custom MCP registration.
+			if (
+				client &&
+				(state === "absent" || state === "installed") &&
+				this.memoryCredentials.project_memory?.length &&
+				!this.memoryMigrationNoticed
+			) {
+				this.memoryMigrationNoticed = true;
+				const notice =
+					"Pharaoh: automatic memory-hook repair was skipped because this session has no matching managed activation. Run `npx @pharaoh-so/mcp@latest install` for Global setup, or add `--scope local` for this repo.";
+				this.memoryNotice.push(notice);
+				process.stderr.write(`${notice}\n`);
+			}
+			return;
+		}
 		let lines: string[] = [];
 		try {
-			lines = ensureMemoryHooks(info, this.memoryCredentials);
+			lines = ensureMemoryHooks(info, this.memoryCredentials, { scope: this.installScope });
 		} catch {
 			// ALLOWED-CATCH: memory hooks are optional; MCP keeps working without them
 		}
@@ -418,7 +457,8 @@ export class ProxyServer {
 		this.memoryNotice.push(...lines);
 		process.stderr.write(`${lines.join("\n")}\n`);
 		// The next upstream session reports the new state; this one already reported.
-		if (this.downstream) this.downstream.memoryHooks = memoryHookStateForClient(info);
+		if (this.downstream)
+			this.downstream.memoryHooks = memoryHookStateForClient(info, { scope: this.installScope });
 	}
 
 	private withMemoryNotice(result: CallToolResult): CallToolResult {
@@ -484,6 +524,7 @@ export class ProxyServer {
 	private watchTransport(): void {
 		// Use the protocol-level hook so the SDK transport chain remains intact.
 		this.server.onclose = () => {
+			this.nativeFeed?.close();
 			this.localBlast?.disconnect?.();
 			for (const id of this.localDeliveries.keys()) void this.takeLocalDelivery(id)?.(false);
 			this.transportClosedResolve();
@@ -499,6 +540,7 @@ export class ProxyServer {
 		if (this.started) return;
 		if (this.backend.start) await this.backend.start();
 		this.transport = new StdioServerTransport();
+		this.nativeFeed?.start();
 		this.wireLocalDelivery(this.transport, writeLocalStdioReply);
 		await this.server.connect(this.transport);
 		this.watchTransport();
@@ -601,6 +643,7 @@ export class ProxyServer {
 
 	async stop(): Promise<void> {
 		this.stopping = true;
+		this.nativeFeed?.close();
 		this.localBlast?.disconnect?.();
 		if (this.backend.stop) {
 			await this.backend.stop().catch((err) => {
@@ -619,6 +662,11 @@ export class ProxyServer {
 	getBackend(): Backend {
 		return this.backend;
 	}
+
+	/** Publish a new feed sign-in only after its authenticated backend has been adopted. */
+	setNativeFeedCredentials(credentials: Credentials): void {
+		this.nativeFeed?.adoptCredentials(credentials);
+	}
 }
 
 /**
@@ -634,7 +682,11 @@ export class ProxyServer {
  */
 export async function startInAuthRequiredMode(
 	server: string,
-	opts: { onAuthorized: (creds: Credentials) => Promise<void> },
+	opts: {
+		onAuthorized: (creds: Credentials) => Promise<void>;
+		scope?: InstallScope;
+		nativeFeed?: NativeFeedRuntime;
+	},
 ): Promise<{ proxy: ProxyServer; gateway: DeviceFlowGateway }> {
 	const gateway = createGateway({ server });
 	const backend = new AuthRequiredBackend(gateway, async () => {
@@ -651,7 +703,15 @@ export async function startInAuthRequiredMode(
 		}
 		await opts.onAuthorized(creds);
 	});
-	const proxy = new ProxyServer(backend, undefined, createLocalBlastRuntime(server, localHost()));
+	const host = localHost(opts.scope);
+	const proxy = new ProxyServer(
+		backend,
+		undefined,
+		createLocalBlastRuntime(server, host),
+		opts.scope,
+		() => host.managedClients(),
+		opts.nativeFeed,
+	);
 	await proxy.start();
 	return { proxy, gateway };
 }
@@ -660,11 +720,19 @@ export async function startInAuthRequiredMode(
  * Happy-path entry point. Credentials are fresh — start directly with the
  * SSE backend. Returned proxy is running and ready for tool calls.
  */
-export async function startInSseMode(creds: Credentials): Promise<ProxyServer> {
+export async function startInSseMode(
+	creds: Credentials,
+	scope?: InstallScope,
+	nativeFeed?: NativeFeedRuntime,
+): Promise<ProxyServer> {
+	const host = localHost(scope);
 	const proxy = new ProxyServer(
 		createSseBackend(creds.sse_url, creds.access_token),
 		undefined,
-		createLocalBlastRuntime(new URL(creds.sse_url).origin, localHost()),
+		createLocalBlastRuntime(new URL(creds.sse_url).origin, host),
+		scope,
+		() => host.managedClients(),
+		nativeFeed,
 	);
 	await proxy.start();
 	return proxy;
@@ -677,5 +745,11 @@ export async function startInSseMode(creds: Credentials): Promise<ProxyServer> {
  * @returns An unstarted proxy; the caller supplies its transport and lifetime.
  */
 export function createSseProxyServer(creds: Credentials, requestTimeout?: number): ProxyServer {
-	return new ProxyServer(createSseBackend(creds.sse_url, creds.access_token), requestTimeout);
+	return new ProxyServer(
+		createSseBackend(creds.sse_url, creds.access_token),
+		requestTimeout,
+		undefined,
+		undefined,
+		() => [],
+	);
 }

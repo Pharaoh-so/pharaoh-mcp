@@ -8,6 +8,10 @@ export interface RuntimeOAuthCredentials {
 }
 /** Dependencies injected by setup and isolated fixtures. */
 export interface RuntimeOptions {
+	scope?: { kind: "global" } | { kind: "local"; root: string };
+	/** Private committed activation selector used by the native hook and its sender. */
+	targetId?: string;
+	cwd?: string;
 	home?: string;
 	env?: NodeJS.ProcessEnv;
 	now?: number;
@@ -58,6 +62,8 @@ export interface RuntimeStatus extends Partial<RuntimeIdentity> {
 	consent: "active" | "off" | "paused" | "revocation_pending" | "unsupported";
 	receiptCoverage: "observed" | "unobserved" | "unsupported";
 	tokenCoverage: "observed" | "unobserved" | "unsupported";
+	activation?: "active" | "absent";
+	activeTargets?: number;
 }
 export function runtimeStatus(client: string, options?: RuntimeOptions): RuntimeStatus;
 export function automaticRuntimeIntent(
@@ -68,6 +74,11 @@ export function runtimeRequestMetadata(
 	clientName?: string,
 	options?: RuntimeOptions,
 ): RuntimeRequestMetadata | undefined;
+export function recordRuntimeReceipt(
+	clientName: string | undefined,
+	result: unknown,
+	options?: RuntimeOptions,
+): boolean;
 /** Refresh bounded installation discovery outside hooks without changing hook registration. */
 export function refreshRuntimeBuildEvidence(
 	clientName: string | undefined,
@@ -78,6 +89,15 @@ export function enableRuntime(
 	client: RuntimeClient,
 	server: string,
 	hookPath: string,
+	options?: RuntimeOptions,
+): Promise<boolean>;
+export function attachRuntimeTarget(
+	client: RuntimeClient,
+	hookPath: string,
+	options?: RuntimeOptions,
+): Promise<boolean>;
+export function detachRuntimeTarget(
+	client: RuntimeClient,
 	options?: RuntimeOptions,
 ): Promise<boolean>;
 export function revokeRuntime(client: RuntimeClient, options?: RuntimeOptions): Promise<boolean>;

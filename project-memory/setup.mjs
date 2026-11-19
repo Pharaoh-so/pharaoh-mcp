@@ -3,7 +3,12 @@ import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs"
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { bundledHook, installMemoryBundle, packagedMemoryBundle } from "./bundle.mjs";
-import { memoryClientRoot, readActiveMemoryClients, readHookSettings } from "./client-settings.mjs";
+import {
+	hasOtherActiveMemoryClient,
+	memoryClientRoot,
+	readActiveMemoryClients,
+	readHookSettings,
+} from "./client-settings.mjs";
 import {
 	clearDiagnosticQueue,
 	diagnosticsPolicyEligible,
@@ -29,13 +34,15 @@ import {
 	writeHookPreferences,
 } from "./preferences.mjs";
 import { legacySettingsPath, matchingMemoryHint, projectMemoryHint } from "./user-target.mjs";
+import {
+	ensureLocalPrivatePaths,
+	memoryActivePath,
+	memoryInstallScope,
+	memorySettingsPath,
+} from "./install-scope.mjs";
 
-function userSettings(client, home, env) {
-	const codex = client === "codex";
-	const directory =
-		(codex ? env.CODEX_HOME : env.CLAUDE_CONFIG_DIR) ?? join(home, codex ? ".codex" : ".claude");
-	if (!isAbsolute(directory)) throw new Error("Client configuration directory must be absolute.");
-	return join(directory, codex ? "hooks.json" : "settings.json");
+function userSettings(client, home, env, scope) {
+	return memorySettingsPath(client, home, env, scope);
 }
 
 function canonicalSettingsPath(path) {
@@ -54,7 +61,7 @@ function inspectSettings(path) {
 	return { path, resolved, config: readHookSettings(resolved) };
 }
 
-function writeSettings({ path, resolved, config }, next, target, requireIgnored = false) {
+function writeSettings({ path, resolved, config }, next, target, requireIgnored = false, scope) {
 	if (JSON.stringify(config) === JSON.stringify(next)) return;
 	if (requireIgnored && path !== resolved)
 		throw new Error("The checkout hook settings are linked.");
@@ -78,7 +85,9 @@ function writeSettings({ path, resolved, config }, next, target, requireIgnored 
 	const info = lstatSync(directory);
 	if (!info.isDirectory() || info.uid !== process.getuid?.())
 		throw new Error("Client settings directory is not owner-controlled.");
-	atomicWrite(resolved, `${JSON.stringify(next, null, "\t")}\n`);
+	atomicWrite(resolved, `${JSON.stringify(next, null, "\t")}\n`, (temporary) =>
+		ensureLocalPrivatePaths(scope, [temporary]),
+	);
 }
 
 function migrateCheckout(client, target, notices) {
@@ -108,11 +117,12 @@ function syncUserHooks(
 	graphCues,
 	diagnostics,
 	capture,
+	scope,
 ) {
 	let known = Boolean(alreadyActive);
 	try {
-		const settings = inspectSettings(userSettings(client, home, env));
-		known ||= hasUserHooks(settings.config, client);
+		const settings = inspectSettings(userSettings(client, home, env, scope));
+		known ||= hasUserHooks(settings.config, client, scope);
 		if (hookPath || known) {
 			const legacy = target && legacySettingsPath(client, target.root);
 			const checkoutHook =
@@ -121,9 +131,19 @@ function syncUserHooks(
 				hasLegacyHooks(settings.config, client, target.root);
 			writeSettings(
 				settings,
-				updateUserHooks(settings.config, client, hookPath, node, graphCues, diagnostics, capture),
-				target,
+				updateUserHooks(
+					settings.config,
+					client,
+					hookPath,
+					node,
+					graphCues,
+					diagnostics,
+					capture,
+					scope,
+				),
+				target ?? (scope?.kind === "local" ? { root: scope.root } : undefined),
 				checkoutHook,
+				scope,
 			);
 		}
 	} catch (error) {
@@ -156,8 +176,15 @@ export async function chooseMemoryHooks({
 	ask,
 	home = homedir(),
 	env = process.env,
+	scope = memoryInstallScope(),
 }) {
-	const choices = { accepted: [], declined: [], graphClients: [], notices: [] };
+	const choices = {
+		accepted: [],
+		declined: [],
+		graphClients: [],
+		diagnosticClients: [],
+		notices: [],
+	};
 	if (typeof process.getuid !== "function") {
 		if (requested)
 			choices.notices.push("Pharaoh: project memory hooks need a POSIX client with system Git.");
@@ -184,7 +211,7 @@ export async function chooseMemoryHooks({
 		}
 	}
 	const previous = readHookPreferences(home);
-	const active = readActiveMemoryClients(home);
+	const active = readActiveMemoryClients(home, scope);
 	const next = { ...previous };
 	// A policy lookup failure never prevents ordinary memory setup.
 	let diagnosticPolicy;
@@ -202,22 +229,27 @@ export async function chooseMemoryHooks({
 		const label = client === "codex" ? "Codex" : "Claude Code";
 		let config;
 		try {
-			config = inspectSettings(userSettings(client, home, env)).config;
+			config = inspectSettings(userSettings(client, home, env, scope)).config;
 		} catch {
 			// An unreadable settings file cannot establish a previous installation.
 		}
 		if (client === "claude-code" && config?.disableAllHooks === true) continue;
 		const choice = { ...previous[client] };
+		const sharedDiagnostics =
+			scope?.kind === "local" || hasOtherActiveMemoryClient(client, home, scope);
+		let diagnosticEnabled = choice.diagnostics === true;
 		if (requested || choice.memory !== false) choice.memory = true;
 		if (choice.memory === true) {
 			// A reminder reinstall must not restore diagnostic handlers from an old choice.
 			if (
 				choice.diagnostics === true &&
-				(!active[client] || !hasUserHookMode(config, ["Stop"], "--diagnostics"))
-			)
-				delete choice.diagnostics;
+				(!active[client] || !hasUserHookMode(config, ["Stop"], "--diagnostics", scope))
+			) {
+				diagnosticEnabled = false;
+				if (!sharedDiagnostics) delete choice.diagnostics;
+			}
 			// The memory cue comes with memory; this choice covers only the structural cues.
-			let graphEnabled = choice.graph === true && hasStructuralCueHooks(config, client);
+			let graphEnabled = choice.graph === true && hasStructuralCueHooks(config, client, scope);
 			if (requested || choice.graph === undefined || (choice.graph === true && !graphEnabled)) {
 				const answer = await ask(
 					`Also show Pharaoh's structural hints in ${label}? When your agent greps for code, they suggest the Pharaoh query; after a codebase map, they say when an edited file differs from the mapped revision. [y/N] `,
@@ -229,7 +261,7 @@ export async function chooseMemoryHooks({
 				}
 			}
 			if (
-				(requested || choice.diagnostics === undefined) &&
+				((requested && !sharedDiagnostics) || choice.diagnostics === undefined) &&
 				diagnosticsPolicyEligible(diagnosticPolicy)
 			) {
 				const answer = await ask(
@@ -238,6 +270,7 @@ export async function chooseMemoryHooks({
 				);
 				if (answer !== null) {
 					choice.diagnostics = false;
+					diagnosticEnabled = false;
 					if (!answer) {
 						clearDiagnosticQueue(client, home);
 						if (choice.diagnosticsGeneration)
@@ -278,6 +311,7 @@ export async function chooseMemoryHooks({
 									throw new Error("Diagnostic consent was not confirmed.");
 							}
 							choice.diagnostics = true;
+							diagnosticEnabled = true;
 							choice.diagnosticsGeneration = generation;
 							choice.diagnosticsPolicyVersion = diagnosticPolicy.policyVersion;
 						} catch {
@@ -290,6 +324,7 @@ export async function chooseMemoryHooks({
 			}
 			choices.accepted.push(client);
 			if (graphEnabled) choices.graphClients.push(client);
+			if (diagnosticEnabled) choices.diagnosticClients.push(client);
 		} else {
 			choices.declined.push(client);
 		}
@@ -301,7 +336,7 @@ export async function chooseMemoryHooks({
 
 /** Apply the outcome against the saved choices, which can change after the prompt. */
 export function applyMemoryHookChoices(decision, options = {}) {
-	const { accepted, declined, graphClients, removeUnentitled } = decision;
+	const { accepted, declined, graphClients, diagnosticClients, removeUnentitled } = decision;
 	const notices = [...decision.notices];
 	if (removeUnentitled)
 		return [...notices, ...syncMemoryHooks({ ...options, clients: MEMORY_HOOK_CLIENTS })];
@@ -316,7 +351,15 @@ export function applyMemoryHookChoices(decision, options = {}) {
 		const clients = accepted.filter((client) => saved[client]?.memory === true);
 		const cues = graphClients.filter((client) => saved[client]?.graph === true);
 		if (clients.length)
-			notices.push(...syncMemoryHooks({ ...options, clients, graphClients: cues, enable: true }));
+			notices.push(
+				...syncMemoryHooks({
+					...options,
+					clients,
+					graphClients: cues,
+					diagnosticClients,
+					enable: true,
+				}),
+			);
 	}
 	return notices;
 }
@@ -331,7 +374,7 @@ export function applyMemoryHookChoices(decision, options = {}) {
  * the user when it turned hooks on, or added a Codex hook that needs trusting.
  */
 export function ensureMemoryHooks(info, credentials, options = {}) {
-	const { home = homedir(), env = process.env } = options;
+	const { home = homedir(), env = process.env, scope = memoryInstallScope() } = options;
 	const client = nativeMemoryClient(info);
 	if (!client || typeof process.getuid !== "function" || !hasMemoryGit) return [];
 	if (grantLost(credentials)) return [];
@@ -339,50 +382,57 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 	if (choice.memory === false) return [];
 	let config;
 	try {
-		config = inspectSettings(userSettings(client, home, env)).config;
+		config = inspectSettings(userSettings(client, home, env, scope)).config;
 	} catch {
 		return [];
 	}
 	if (client === "claude-code" && config?.disableAllHooks === true) return [];
-	const state = memoryHookStateForClient(info, { home, env });
+	const state = memoryHookStateForClient(info, { home, env, scope });
 	const fresh = state === "absent";
 	if (!fresh) {
 		// "installed" is Pharaoh's exact entry; anything else may be the user's edit.
 		if (state !== "installed") return [];
 		const digest = packagedMemoryBundle(options.packageRoot).sha256;
-		const current = readActiveMemoryClients(home)[client];
+		const current = readActiveMemoryClients(home, scope)[client];
 		if (
-			hasMemoryCueHook(config) &&
-			(choice.capture === false || hasCaptureHook(config)) &&
+			hasMemoryCueHook(config, scope) &&
+			(choice.capture === false || hasCaptureHook(config, scope)) &&
 			current === digest &&
 			existsSync(bundledHook(join(memoryClientRoot(home), digest)))
 		)
 			return [];
 	}
-	const addsCue = !fresh && !hasMemoryCueHook(config);
-	const addsCapture = !fresh && choice.capture !== false && !hasCaptureHook(config);
+	const addsCue = !fresh && !hasMemoryCueHook(config, scope);
+	const addsCapture = !fresh && choice.capture !== false && !hasCaptureHook(config, scope);
 	// As at setup: a saved diagnostics choice never puts back handlers the user removed.
-	if (
+	const missingDiagnostics =
 		choice.diagnostics === true &&
-		(!readActiveMemoryClients(home)[client] || !hasUserHookMode(config, ["Stop"], "--diagnostics"))
+		(!readActiveMemoryClients(home, scope)[client] ||
+			!hasUserHookMode(config, ["Stop"], "--diagnostics", scope));
+	if (
+		missingDiagnostics &&
+		scope?.kind !== "local" &&
+		!hasOtherActiveMemoryClient(client, home, scope)
 	) {
 		const { diagnostics: _removed, ...kept } = choice;
 		writeHookPreferences({ ...readHookPreferences(home), [client]: kept }, home);
 	}
-	const graph = choice.graph === true && hasStructuralCueHooks(config, client);
+	const graph = choice.graph === true && hasStructuralCueHooks(config, client, scope);
 	syncMemoryHooks({
 		...options,
 		credentials,
 		clients: [client],
 		graphClients: graph ? [client] : [],
+		diagnosticClients: missingDiagnostics ? [] : [client],
 		enable: true,
 	});
 	if ((addsCue || addsCapture) && client === "codex") {
 		// Announce only what the settings now show: a failed write is retried next start, silently.
 		let added = false;
 		try {
-			const next = inspectSettings(userSettings(client, home, env)).config;
-			added = (addsCue && hasMemoryCueHook(next)) || (addsCapture && hasCaptureHook(next));
+			const next = inspectSettings(userSettings(client, home, env, scope)).config;
+			added =
+				(addsCue && hasMemoryCueHook(next, scope)) || (addsCapture && hasCaptureHook(next, scope));
 		} catch {
 			// Unreadable settings: nothing to announce.
 		}
@@ -393,7 +443,7 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 				: "Pharaoh added a project memory hook to Codex: when your agent edits a file, it shows what project memory says about that file. Review and trust it in /hooks or Settings > Hooks. To turn memory hooks off, run `npx @pharaoh-so/mcp --disable-memory-hooks`.",
 		];
 	}
-	if (!fresh || memoryHookStateForClient(info, { home, env }) !== "installed") return [];
+	if (!fresh || memoryHookStateForClient(info, { home, env, scope }) !== "installed") return [];
 	const label = client === "codex" ? "Codex" : "Claude Code";
 	return [
 		`Pharaoh turned on project memory reminders in ${label}: from your next conversation, the agent is reminded to check past decisions for this repo. To turn them off, run \`npx @pharaoh-so/mcp --disable-memory-hooks\`.`,
@@ -410,19 +460,21 @@ export function syncMemoryHooks({
 	credentials,
 	clients = MEMORY_HOOK_CLIENTS,
 	graphClients = [],
+	diagnosticClients,
 	enable = false,
 	home = homedir(),
 	env = process.env,
 	cwd = process.cwd(),
 	node = process.execPath,
 	packageRoot,
+	scope = memoryInstallScope(),
 } = {}) {
 	if (typeof process.getuid !== "function")
 		return enable ? ["Pharaoh: project memory reminders need a POSIX client."] : [];
 	const root = memoryClientRoot(home);
-	const activePath = join(root, "active.json");
-	let active = readActiveMemoryClients(home);
-	const target = checkout(cwd);
+	const activePath = memoryActivePath(root, scope);
+	let active = readActiveMemoryClients(home, scope);
+	const target = checkout(scope?.kind === "local" ? scope.root : cwd);
 	const notices = [];
 	const configured = [];
 	const preferences = readHookPreferences(home);
@@ -447,12 +499,14 @@ export function syncMemoryHooks({
 		if (!clients.includes(client)) continue;
 		const next = { ...active, [client]: digest };
 		if (
-			!enable ||
-			preferences[client]?.memory === false ||
-			preferences[client]?.diagnostics !== true
+			(!enable ||
+				preferences[client]?.memory === false ||
+				preferences[client]?.diagnostics !== true) &&
+			!hasOtherActiveMemoryClient(client, home, scope)
 		)
 			clearDiagnosticQueue(client, home);
 		try {
+			ensureLocalPrivatePaths(scope, [userSettings(client, home, env, scope)]);
 			// Enable the replacement before swapping any settings, so failed
 			// activation cannot strand an existing hook or remove a legacy one.
 			const replacing = enable && active[client] !== digest;
@@ -467,8 +521,11 @@ export function syncMemoryHooks({
 					node,
 					active[client],
 					graphClients.includes(client),
-					preferences[client]?.memory !== false && preferences[client]?.diagnostics === true,
+					preferences[client]?.memory !== false &&
+						preferences[client]?.diagnostics === true &&
+						(diagnosticClients === undefined || diagnosticClients.includes(client)),
 					preferences[client]?.capture !== false,
+					scope,
 				);
 			} catch (error) {
 				if (replacing) writeActivation(activePath, active);
@@ -494,7 +551,8 @@ export function syncMemoryHooks({
 			writeActivation(activePath, remaining);
 	}
 	for (const client of enable ? configured : clients) {
-		if (MEMORY_HOOK_CLIENTS.includes(client)) migrateCheckout(client, target, notices);
+		if (scope?.kind !== "local" && MEMORY_HOOK_CLIENTS.includes(client))
+			migrateCheckout(client, target, notices);
 	}
 	return notices;
 }
