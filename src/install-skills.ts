@@ -1307,7 +1307,7 @@ export function mergeOpenClawConfig(home = homedir()): boolean {
 
 /**
  * Rules the interactive setup adds to `permissions.allow` in
- * ~/.claude/settings.json: the seven read-only tools (`readOnlyHint: true`),
+ * ~/.claude/settings.json: the read-only tools (`readOnlyHint: true`),
  * each by full name. Never a prefix rule — `mcp__pharaoh` also auto-approves
  * the tools that change things (`pharaoh_manage_repo`, which queues a re-map,
  * and the superadmin tools), so a prompt injection could run them with
@@ -1319,6 +1319,7 @@ export const PHARAOH_ALLOW_RULES: readonly string[] = [
 	"mcp__pharaoh__search_functions",
 	"mcp__pharaoh__get_blast_radius",
 	"mcp__pharaoh__get_unused_code",
+	"mcp__pharaoh__get_issue",
 	"mcp__pharaoh__pharaoh_recon",
 	"mcp__pharaoh__pharaoh_account",
 	"mcp__pharaoh__pharaoh_setup",
