@@ -76,6 +76,34 @@ const NATIVE_RUNTIME_PACK_PATHS = [
 	"runtime/runtime-native.mjs",
 	"runtime/runtime-storage.mjs",
 ];
+// Native context is optional until source promotion introduces it, then ships as one complete group.
+const NATIVE_CONTEXT_RAW_PATHS = [
+	"runtime/feed-hooks.d.mts",
+	"runtime/feed-hooks.mjs",
+	"runtime/feed-identity.d.mts",
+	"runtime/feed-identity.mjs",
+	"runtime/feed-io.d.mts",
+	"runtime/feed-io.mjs",
+	"runtime/feed-launcher.mjs",
+	"runtime/feed-maintenance.mjs",
+	"runtime/feed-profiles.d.mts",
+	"runtime/feed-profiles.mjs",
+	"runtime/feed-signin.d.mts",
+	"runtime/feed-signin.mjs",
+	"runtime/feed-store.d.mts",
+	"runtime/feed-store.mjs",
+	"runtime/native-feed-hook.d.mts",
+	"runtime/native-feed-hook.mjs",
+];
+const NATIVE_CONTEXT_MODULES = ["native-feed", "native-feed-maintenance", "native-feed-status"];
+const NATIVE_CONTEXT_SOURCE_PATHS = [
+	...NATIVE_CONTEXT_RAW_PATHS,
+	...NATIVE_CONTEXT_MODULES.map((name) => `src/${name}.ts`),
+];
+const NATIVE_CONTEXT_PACK_PATHS = [
+	...NATIVE_CONTEXT_RAW_PATHS,
+	...NATIVE_CONTEXT_MODULES.flatMap((name) => [`dist/${name}.js`, `dist/${name}.d.ts`]),
+];
 // The once-a-day update notice and the consented updater's stable launcher ship separately,
 // so each is its own complete group of raw files, hash-bound to source.
 const UPDATE_NOTICE_PACK_PATHS = ["runtime/update-notice.d.mts", "runtime/update-notice.mjs"];
@@ -167,6 +195,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 			PROJECT_MEMORY_PACK_PATHS.includes(path) ||
 				SETUP_PROMPT_PACK_PATHS.includes(path) ||
 				NATIVE_RUNTIME_PACK_PATHS.includes(path) ||
+				NATIVE_CONTEXT_PACK_PATHS.includes(path) ||
 				UPDATE_RUNTIME_PACK_PATHS.includes(path) ||
 				LOCAL_WORKTREE_PACK_PATHS.includes(path) ||
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
@@ -183,6 +212,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 	for (const [name, packed, sources] of [
 		["Setup prompt", SETUP_PROMPT_PACK_PATHS, ["src/setup-prompt.generated.ts"]],
 		["Native runtime", NATIVE_RUNTIME_PACK_PATHS, NATIVE_RUNTIME_PACK_PATHS],
+		["Native context", NATIVE_CONTEXT_PACK_PATHS, NATIVE_CONTEXT_SOURCE_PATHS],
 		["Update notice", UPDATE_NOTICE_PACK_PATHS, UPDATE_NOTICE_PACK_PATHS],
 		["Update launcher", UPDATE_LAUNCHER_PACK_PATHS, UPDATE_LAUNCHER_PACK_PATHS],
 		["Local worktree", LOCAL_WORKTREE_PACK_PATHS, LOCAL_WORKTREE_SOURCE_PATHS],
@@ -351,6 +381,7 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 	const sourceHashes = new Map(source?.files.map((file) => [file.path, file.sha256]));
 	for (const path of [
 		...NATIVE_RUNTIME_PACK_PATHS,
+		...NATIVE_CONTEXT_RAW_PATHS,
 		...UPDATE_RUNTIME_PACK_PATHS,
 		...LOCAL_WORKTREE_RAW_PATHS,
 		...INSTALL_SCOPE_PACK_PATHS,
