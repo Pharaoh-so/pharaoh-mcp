@@ -47,6 +47,14 @@ const MEMORY_DIAGNOSTIC_PACK_PATHS = [
 	"project-memory/diagnostics-sender.mjs",
 ];
 const MEMORY_CAPTURE_PACK_PATHS = ["project-memory/capture.d.mts", "project-memory/capture.mjs"];
+// Optional until the private source introduces the local change-review verifier.
+// Once present, its hook and proof helpers must be exported and packed together.
+const CHANGE_REVIEW_PACK_PATHS = [
+	"project-memory/change-review.d.mts",
+	"project-memory/change-review.mjs",
+	"project-memory/change-review-proof.d.mts",
+	"project-memory/change-review-proof.mjs",
+];
 // Split out of user-target.mjs (Pharaoh-so/pharaoh#1691): required once the verified source has it.
 const MEMORY_CLIENT_SETTINGS_PACK_PATHS = ["project-memory/client-settings.mjs"];
 // Checkout scoping ships as one complete, source-bound helper group when introduced.
@@ -201,6 +209,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 				WORKTREE_CUE_PACK_PATHS.includes(path) ||
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
 				MEMORY_CAPTURE_PACK_PATHS.includes(path) ||
+				CHANGE_REVIEW_PACK_PATHS.includes(path) ||
 				MEMORY_CLIENT_SETTINGS_PACK_PATHS.includes(path) ||
 				INSTALL_SCOPE_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
@@ -217,6 +226,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		["Update launcher", UPDATE_LAUNCHER_PACK_PATHS, UPDATE_LAUNCHER_PACK_PATHS],
 		["Local worktree", LOCAL_WORKTREE_PACK_PATHS, LOCAL_WORKTREE_SOURCE_PATHS],
 		["Install scope", INSTALL_SCOPE_PACK_PATHS, INSTALL_SCOPE_PACK_PATHS],
+		["Change review", CHANGE_REVIEW_PACK_PATHS, CHANGE_REVIEW_PACK_PATHS],
 	]) {
 		if (
 			!packed.some((path) => paths.includes(path)) &&

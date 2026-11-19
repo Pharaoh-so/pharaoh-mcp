@@ -380,6 +380,34 @@ test("memory client settings ship only once the verified source declares them", 
 	);
 });
 
+test("change review is optional until introduced, then requires its complete source-bound runtime", () => {
+	const review = [
+		"project-memory/change-review.d.mts",
+		"project-memory/change-review.mjs",
+		"project-memory/change-review-proof.d.mts",
+		"project-memory/change-review-proof.mjs",
+	];
+	const complete = [...paths, ...review];
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths(complete, [], complete);
+	for (const missing of review) {
+		assert.throws(
+			() => verifyPackPaths(complete.filter((path) => path !== missing), [], complete),
+			/Missing Change review npm assets/,
+		);
+		assert.throws(
+			() => verifyPackPaths(complete, [], complete.filter((path) => path !== missing)),
+			/Change review is absent or incomplete in the verified source/,
+		);
+	}
+	assert.throws(() => verifyPackPaths(paths, [], complete), /Missing Change review npm assets/);
+	assert.throws(() => verifyPackPaths(complete), /verified source/);
+	assert.throws(
+		() => verifyPackPaths([...complete, "project-memory/change-review-receipts.json"], [], complete),
+		/Unexpected npm file/,
+	);
+});
+
 test("checkout scope helpers require the complete source-bound group only once introduced", () => {
 	const scope = [
 		"project-memory/install-scope.d.mts",
