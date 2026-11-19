@@ -275,6 +275,7 @@
       const MAX_HOST_VALUE = 512;
       // What each tool is doing while it runs, shown with the argument it targets.
       const VERBS = { get_blast_radius:"Tracing callers of", get_unused_code:"Checking reachability in", search_functions:"Searching for", get_codebase_map:"Mapping", get_module_context:"Reading module", pharaoh_recon:"Running recon on", pharaoh_account:"Checking account", pharaoh_manage_repo:"Updating" };
+      const ANALYSIS_TITLES = {"Codebase map":"get_codebase_map","Mapping in progress":"get_codebase_map",Module:"get_module_context",Search:"search_functions",Impact:"get_blast_radius","Unused code":"get_unused_code","Reachability checks":"get_unused_code",Recon:"pharaoh_recon"};
       const root = document.getElementById("trace");
       const head = root.querySelector(".head");
       const page = document.documentElement;
@@ -295,6 +296,7 @@
       const methodId = "pharaoh-value-method-";
       const setupExploreId = "pharaoh-setup-explore";
       let tool = "";
+      let hostTool = "";
       let ready = false;
       let closed = false;
       let cancelled = false;
@@ -871,9 +873,18 @@
         item.append(details);
         return item;
       }
-      function renderView(view) {
+      function renderView(view,previousTool = tool) {
+        tool = toolForView(view);
+        if (currentView && previousTool !== tool) {
+          activityLayout = null;
+          activityTarget = "";
+        }
         clearResult();
         currentView = view;
+        if (!ACTIVITY_TOOLS.includes(tool)) {
+          delete root.dataset.activity;
+          activity.hidden = true;
+        }
         cancelled = false;
         root.dataset.state = "ready";
         root.dataset.reveal = "";
@@ -962,11 +973,12 @@
         if (DISPLAY_MODES.includes(params.displayMode)) setDisplay(params.displayMode);
         const previousTool = tool;
         const name = params.toolInfo?.tool?.name;
-        if (string(name,128)) tool = name;
+        if (string(name,128)) hostTool = name.split("__").at(-1);
+        tool = currentView ? toolForView(currentView) : hostTool;
         if (ACTIVITY_TOOLS.includes(tool)) {
           if (currentView && previousTool !== tool) {
             const open = fields.drawer.hasAttribute("data-open");
-            renderView(currentView);
+            renderView(currentView,previousTool);
             setOpen(open);
           } else if (!resultReceived && !activity.hasAttribute("data-phase")) {
             showActivity(root.dataset.state === "pending" ? "working" : "waiting");
@@ -976,6 +988,13 @@
           activity.hidden = true;
         }
         showActions();
+      }
+      function toolForView(view) {
+        // toolInfo is optional in MCP Apps. Recognized hosts stay authoritative;
+        // otherwise use the titles emitted by the version-1 analysis builders.
+        if (Object.hasOwn(VERBS,hostTool) || hostTool === "pharaoh_setup") return hostTool;
+        const title = view.title.split(": ")[0];
+        return Object.hasOwn(ANALYSIS_TITLES,title) ? ANALYSIS_TITLES[title] : hostTool;
       }
       function size() {
         if (!ready || closed || resizeFrame) return;
