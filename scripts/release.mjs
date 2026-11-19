@@ -49,6 +49,13 @@ const MEMORY_DIAGNOSTIC_PACK_PATHS = [
 const MEMORY_CAPTURE_PACK_PATHS = ["project-memory/capture.d.mts", "project-memory/capture.mjs"];
 // Split out of user-target.mjs (Pharaoh-so/pharaoh#1691): required once the verified source has it.
 const MEMORY_CLIENT_SETTINGS_PACK_PATHS = ["project-memory/client-settings.mjs"];
+// Checkout scoping ships as one complete, source-bound helper group when introduced.
+const INSTALL_SCOPE_PACK_PATHS = [
+	"project-memory/install-scope.d.mts",
+	"project-memory/install-scope.mjs",
+	"runtime/runtime-scope.d.mts",
+	"runtime/runtime-scope.mjs",
+];
 const SETUP_PROMPT_PACK_PATHS = [
 	"dist/setup-prompt.generated.js",
 	"dist/setup-prompt.generated.d.ts",
@@ -166,6 +173,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
 				MEMORY_CAPTURE_PACK_PATHS.includes(path) ||
 				MEMORY_CLIENT_SETTINGS_PACK_PATHS.includes(path) ||
+				INSTALL_SCOPE_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
 					path,
 				),
@@ -178,6 +186,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		["Update notice", UPDATE_NOTICE_PACK_PATHS, UPDATE_NOTICE_PACK_PATHS],
 		["Update launcher", UPDATE_LAUNCHER_PACK_PATHS, UPDATE_LAUNCHER_PACK_PATHS],
 		["Local worktree", LOCAL_WORKTREE_PACK_PATHS, LOCAL_WORKTREE_SOURCE_PATHS],
+		["Install scope", INSTALL_SCOPE_PACK_PATHS, INSTALL_SCOPE_PACK_PATHS],
 	]) {
 		if (
 			!packed.some((path) => paths.includes(path)) &&
@@ -344,6 +353,7 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 		...NATIVE_RUNTIME_PACK_PATHS,
 		...UPDATE_RUNTIME_PACK_PATHS,
 		...LOCAL_WORKTREE_RAW_PATHS,
+		...INSTALL_SCOPE_PACK_PATHS,
 	]) {
 		if (!names.includes(`package/${path}`)) continue;
 		const archived = execFileSync("tar", ["-xOzf", tarball, `package/${path}`], {

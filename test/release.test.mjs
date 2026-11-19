@@ -383,6 +383,69 @@ test("memory client settings ship only once the verified source declares them", 
 	);
 });
 
+test("checkout scope helpers require the complete source-bound group only once introduced", () => {
+	const scope = [
+		"project-memory/install-scope.d.mts",
+		"project-memory/install-scope.mjs",
+		"runtime/runtime-scope.d.mts",
+		"runtime/runtime-scope.mjs",
+	];
+	const complete = [...paths, ...scope];
+	// The current source predates these helpers; it remains releasable without them.
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths(complete, [], complete);
+	verifyPackPaths([...paths, "dist/install-scope.js", "dist/install-scope.d.ts"], [], paths);
+	for (const missing of scope) {
+		assert.throws(
+			() =>
+				verifyPackPaths(
+					complete.filter((path) => path !== missing),
+					[],
+					complete,
+				),
+			/Missing Install scope npm assets/,
+		);
+		assert.throws(
+			() =>
+				verifyPackPaths(
+					complete,
+					[],
+					complete.filter((path) => path !== missing),
+				),
+			/Install scope is absent or incomplete in the verified source/,
+		);
+	}
+	assert.throws(() => verifyPackPaths(complete, [], paths), /verified source/);
+	assert.throws(() => verifyPackPaths(complete), /verified source/);
+	assert.throws(() => verifyPackPaths(paths, [], complete), /Missing Install scope npm assets/);
+	assert.throws(
+		() => verifyPackPaths([...complete, "runtime/runtime-scope-secret.json"], [], complete),
+		/Unexpected npm file/,
+	);
+
+	const item = fixture(complete);
+	const verified = {
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: item.manifest.sourcePayloadSha256,
+		files: scope.map((path) => ({ path, sha256: hash(`public ${path}`) })),
+	};
+	try {
+		assert.equal(validateArtifact(item.directory, commit, item.save(), verified).version, version);
+		for (const changed of scope) {
+			const files = verified.files.map((file) =>
+				file.path === changed ? { ...file, sha256: "0".repeat(64) } : file,
+			);
+			assert.throws(
+				() => validateArtifact(item.directory, commit, item.save(), { ...verified, files }),
+				/source hash mismatch/,
+			);
+		}
+	} finally {
+		item.clean();
+	}
+});
+
 test("setup output and native runtime require complete verified source and reject extra assets", () => {
 	const setup = ["dist/setup-prompt.generated.js", "dist/setup-prompt.generated.d.ts"];
 	const runtime = [
