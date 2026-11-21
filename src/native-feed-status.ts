@@ -7,6 +7,7 @@ import {
 	resolveFeedProfile,
 } from "../runtime/feed-identity.mjs";
 import { feedRoot, privateFeedPath, readFeedJSON } from "../runtime/feed-io.mjs";
+import { classifyFeedProfile } from "../runtime/feed-profiles.mjs";
 import {
 	createFeedStore,
 	type FeedAccessProof,
@@ -27,14 +28,27 @@ export interface NativeFeedStatusEvent {
 	/** Repository-relative referenced files. */ references: string[];
 	/** Local event creation timestamp. */ createdAt: number;
 }
+
+interface FeedCompatibility {
+	/** Local compatibility coverage, not proof of model receipt. */
+	compatibility: "eligible" | "unavailable" | "unknown";
+	/** Reason for the current compatibility result. */
+	compatibilityReason:
+		| "compatible"
+		| "disabled"
+		| "incompatible"
+		| "no-live-connection"
+		| "registration-unavailable"
+		| "registry-suppressed"
+		| "unavailable";
+	/** Allowlisted builds from live connection metadata, not individual worker identities. */
+	observedProfiles: Array<{ client: "codex" | "claude-code"; version: string }>;
+}
+
 /** Current, authorized local delivery counts for one cohort. */
-export interface NativeFeedStatusCohort {
+export interface NativeFeedStatusCohort extends FeedCompatibility {
 	/** Opaque local routing key. */ cohort: string;
 	/** Currently authorized canonical repository. */ repo: string;
-	/** Local compatibility coverage, not proof of model receipt. */ compatibility:
-		| "eligible"
-		| "unavailable"
-		| "unknown";
 	/** Retained events; events may already have been claimed by a recipient. */ queuedEvents: number;
 	/** Recipients active within local retention. */ recipients: number;
 	/** Event claims across recipients, counted once per recipient. */ claimedEvents: number;
@@ -59,6 +73,7 @@ export interface NativeFeedStatus {
 		queued: string;
 		claimed: string;
 		emitted: string;
+		observed: string;
 	};
 }
 
@@ -153,6 +168,8 @@ function viewState(
 		cohort,
 		repo: proof.repo,
 		compatibility: "unknown",
+		compatibilityReason: "unavailable",
+		observedProfiles: [],
 		queuedEvents: events.length,
 		recipients,
 		claimedEvents,
@@ -171,28 +188,54 @@ function compatibility(
 	now: number,
 	options: { home?: string; credentialsPath?: string },
 	cohort: string,
-): NativeFeedStatusCohort["compatibility"] {
+): FeedCompatibility {
+	const result = (
+		compatibility: FeedCompatibility["compatibility"],
+		compatibilityReason: FeedCompatibility["compatibilityReason"],
+	): FeedCompatibility => ({ compatibility, compatibilityReason, observedProfiles: [] });
 	if (
 		!record(value) ||
 		value.version !== 1 ||
 		!Array.isArray(value.connections) ||
 		value.connections.length > 32
 	)
-		return "unknown";
-	if (value.suppressed === true) return "unavailable";
+		return result("unknown", "unavailable");
+	if (value.suppressed === true) return result("unavailable", "registry-suppressed");
 	const live = value.connections.filter(
 		(entry) =>
 			record(entry) && typeof entry.leaseExpiresAt === "number" && entry.leaseExpiresAt > now,
 	);
-	if (!live.length) return "unknown";
+	if (!live.length) return result("unknown", "no-live-connection");
 	const client = record(live[0]) ? live[0].client : null;
-	if (client !== "codex" && client !== "claude-code") return "unavailable";
+	if (client !== "codex" && client !== "claude-code") return result("unavailable", "incompatible");
 	const registration = readFeedRegistration({ ...options, client });
-	if (!registration) return "unavailable";
-	return resolveFeedProfile({ ...options, cohort, client, registration, event: "PostToolUse", now })
-		.admit
-		? "eligible"
-		: "unavailable";
+	if (!registration) return result("unavailable", "registration-unavailable");
+	const profile = resolveFeedProfile({
+		...options,
+		cohort,
+		client,
+		registration,
+		event: "PostToolUse",
+		now,
+	});
+	if (!profile.admit)
+		return result(
+			"unavailable",
+			profile.reason === "disabled" || profile.reason === "incompatible"
+				? profile.reason
+				: "unavailable",
+		);
+	const versions = new Set<string>();
+	// Never display arbitrary build names or versions reported by a client.
+	for (const entry of live) {
+		if (!record(entry) || entry.state !== "initialized") continue;
+		const match = classifyFeedProfile(entry.name, entry.clientVersion, "PostToolUse");
+		if (match?.client === client) versions.add(match.version);
+	}
+	return {
+		...result("eligible", "compatible"),
+		observedProfiles: [...versions].sort().map((version) => ({ client, version })),
+	};
 }
 
 /** Read bounded local delivery counts for the current sign-in; never creates files or uploads data. */
@@ -212,6 +255,7 @@ export function nativeFeedStatus(
 			claimed: "Per-recipient event claims, not receipt by a model.",
 			emitted:
 				"Local output packets handed to the transport, not model consumption or improved outcomes.",
+			observed: "Model observation of an emitted packet requires independent native evidence.",
 		},
 	};
 	const generation = readFeedSignInGeneration(options);
@@ -240,6 +284,12 @@ export function nativeFeedStatus(
 				continue;
 			}
 			const view = viewState(cohort, readFeedJSON(join(path, entry.name), 262_144), proof, now);
+			const profile = compatibility(
+				readFeedJSON(join(root, "cohorts", entry.name)),
+				now,
+				options,
+				cohort,
+			);
 			const after = store.readAccessProof({ cohort });
 			if (
 				!view ||
@@ -250,12 +300,7 @@ export function nativeFeedStatus(
 				result.unavailableCohorts++;
 				continue;
 			}
-			view.compatibility = compatibility(
-				readFeedJSON(join(root, "cohorts", entry.name)),
-				now,
-				options,
-				cohort,
-			);
+			Object.assign(view, profile);
 			if (
 				Buffer.byteLength(JSON.stringify({ ...result, cohorts: [...result.cohorts, view] })) >
 				MAX_RESULT_BYTES

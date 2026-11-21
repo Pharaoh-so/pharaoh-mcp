@@ -28,6 +28,8 @@ const LEASE = 30_000;
 const STATE_LIMIT = 262_144;
 const MAX_CONNECTIONS = 1024;
 const MAX_EVENTS = 128;
+const MAX_PREVIEW_EVENTS = 32;
+const GIT_HEAD = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 /** Hard UTF-8 packet limit shared by native assembly and store admission. */
 export const FEED_PACKET_BYTES = 300;
 /** Largest normal event, leaving room for a seed or loss notice in the native packet. */
@@ -93,6 +95,7 @@ export function feedProofIdentity(value) {
 	);
 }
 const proofKey = feedProofIdentity;
+const scopeKey = (proofIdentity, revision) => feedHash(JSON.stringify([proofIdentity, revision]));
 const attempt = (operation, fallback = false) => {
 	try {
 		return operation();
@@ -108,6 +111,8 @@ const blank = (cohort) => ({
 	updatedAt: Date.now(),
 	eviction: 0,
 	events: [],
+	previewEviction: 0,
+	previewEvents: [],
 	recipients: [],
 	observations: [],
 	receipts: [],
@@ -142,6 +147,24 @@ export function createFeedStore(options = {}) {
 			options.credentialsPath ?? join(options.home ?? homedir(), ".pharaoh", "credentials.json"),
 		);
 	const statePath = (cohort) => join(directory("state"), `${cohort}.json`);
+	function retainedEvent(event) {
+		return (
+			event &&
+			event.createdAt > now() - TTL &&
+			safePaths(event.references) &&
+			(event.summary === undefined || safeText(event.summary)) &&
+			feedPayloadBytes(formatFeedEvent(event)) <= FEED_EVENT_BYTES
+		);
+	}
+	function clearPreview(state) {
+		state.previewEvents = [];
+		state.previewEviction = 0;
+		delete state.previewScope;
+		for (const recipient of state.recipients) {
+			delete recipient.previewClaimed;
+			delete recipient.seenPreviewEviction;
+		}
+	}
 	function load(cohort) {
 		const state = readFeedJSON(statePath(cohort), STATE_LIMIT);
 		if (!state)
@@ -157,16 +180,31 @@ export function createFeedStore(options = {}) {
 		)
 			return null;
 		const count = state.events.length;
+		// A pre-preview launcher reads only v1 events, so this collection must always be base-only.
 		state.events = state.events
-			.filter(
-				(event) =>
-					event.createdAt > now() - TTL &&
-					safePaths(event.references) &&
-					(event.summary === undefined || safeText(event.summary)) &&
-					feedPayloadBytes(formatFeedEvent(event)) <= FEED_EVENT_BYTES,
-			)
+			.filter((event) => retainedEvent(event) && event.previewOnly !== true)
 			.slice(-MAX_EVENTS);
 		if (state.events.length < count) state.eviction = (state.eviction ?? 0) + 1;
+		// A v1 fallback can rotate the base proof while preserving unknown preview fields.
+		if (
+			(state.previewScope !== undefined || state.previewEvents?.length) &&
+			(!COHORT.test(state.proofIdentity ?? "") ||
+				state.previewScope !== scopeKey(state.proofIdentity, state.revision))
+		)
+			clearPreview(state);
+		const previewEvents = Array.isArray(state.previewEvents) ? state.previewEvents : [];
+		if (!Number.isSafeInteger(state.previewEviction) || state.previewEviction < 0)
+			state.previewEviction = 0;
+		state.previewEvents = previewEvents
+			.filter(
+				(event) =>
+					retainedEvent(event) &&
+					event.previewOnly === true &&
+					Number.isSafeInteger(event.sequence),
+			)
+			.slice(-MAX_PREVIEW_EVENTS);
+		if (state.previewEvents.length < previewEvents.length)
+			state.previewEviction = (state.previewEviction ?? 0) + 1;
 		state.recipients = state.recipients.filter((entry) => entry.lastSeen > now() - TTL);
 		state.observations = state.observations
 			.filter((entry) => entry.createdAt > now() - TTL)
@@ -178,7 +216,10 @@ export function createFeedStore(options = {}) {
 		if (touch) state.updatedAt = now();
 		// Count limits alone are insufficient for long paths or many concurrent workers.
 		while (feedPayloadBytes(JSON.stringify(state)) > STATE_LIMIT) {
-			if (state.observations.length) {
+			if (state.previewEvents.length) {
+				state.previewEvents.shift();
+				state.previewEviction = (state.previewEviction ?? 0) + 1;
+			} else if (state.observations.length) {
 				state.observations.shift();
 				state.eviction = (state.eviction ?? 0) + 1;
 			} else if (state.events.length) {
@@ -230,7 +271,7 @@ export function createFeedStore(options = {}) {
 	}
 	function authorizationIdentity(cohort, state) {
 		const access = proof(cohort, state);
-		return access ? feedHash(JSON.stringify([proofKey(access), access.scopeRevision])) : null;
+		return access ? scopeKey(proofKey(access), access.scopeRevision) : null;
 	}
 	function mutate(cohort, operation, guard = {}) {
 		if (!COHORT.test(cohort ?? "")) return false;
@@ -260,6 +301,7 @@ export function createFeedStore(options = {}) {
 						if (result === false || result === null) return result;
 						if (guard.authorize !== false && authorizationIdentity(cohort, state) !== identity)
 							return false;
+						if (result === "irrelevant") return result;
 						if (!writeState(state)) return false;
 						return result;
 					},
@@ -297,8 +339,10 @@ export function createFeedStore(options = {}) {
 		if (input.dedupeKey !== undefined && !COHORT.test(input.dedupeKey)) return null;
 		if (containsCapability(state, { summary: input.summary, references: input.references }))
 			return null;
+		const preview = input.previewOnly === true;
+		const events = preview ? state.previewEvents : state.events;
 		if (input.dedupeKey) {
-			const existing = state.events.find(
+			const existing = events.find(
 				(event) => event.rootId === input.rootId && event.dedupeKey === input.dedupeKey,
 			);
 			if (existing) return existing;
@@ -321,10 +365,11 @@ export function createFeedStore(options = {}) {
 		const event = {
 			id: randomUUID(),
 			...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-			sequence: ++state.sequence,
+			sequence: state.sequence + 1,
 			cohort: input.cohort,
 			rootId: input.rootId,
 			agentId: input.agentId,
+			...(preview ? { previewOnly: true } : {}),
 			kind: input.kind,
 			references: [...new Set(input.references)].slice(0, 8),
 			...(input.summary ? { summary: input.summary } : {}),
@@ -333,8 +378,36 @@ export function createFeedStore(options = {}) {
 			epoch: access.epoch,
 		};
 		if (feedPayloadBytes(formatFeedEvent(event)) > FEED_EVENT_BYTES) return null;
-		state.events.push(event);
-		state.events = state.events.slice(-MAX_EVENTS);
+		if (preview) {
+			const previewScope = scopeKey(state.proofIdentity, state.revision);
+			// Include the next sequence, touch and eviction counter when checking capacity.
+			const kept = [...events, event].slice(-MAX_PREVIEW_EVENTS);
+			let evictions = (state.previewEviction ?? 0) + events.length + 1 - kept.length;
+			while (
+				kept.length &&
+				feedPayloadBytes(
+					JSON.stringify({
+						...state,
+						sequence: event.sequence,
+						updatedAt: now(),
+						previewScope,
+						previewEviction: evictions,
+						previewEvents: kept,
+					}),
+				) > STATE_LIMIT
+			) {
+				kept.shift();
+				evictions++;
+			}
+			if (!kept.length) return null;
+			state.previewScope = previewScope;
+			state.previewEvents = kept;
+			state.previewEviction = evictions;
+		} else {
+			state.events.push(event);
+			state.events = state.events.slice(-MAX_EVENTS);
+		}
+		state.sequence = event.sequence;
 		return event;
 	}
 	function rebuild(cohort) {
@@ -440,7 +513,10 @@ export function createFeedStore(options = {}) {
 							attempt(() => removeFeedFile(join(directory("cohorts"), `${cohort}.json`)));
 							attempt(() => rmdirSync(roots));
 							removed++;
-						} else writeState(state, false);
+						} else {
+							if (!proof(cohort, state)) clearPreview(state);
+							writeState(state, false);
+						}
 					},
 					`${cohort}.lock`,
 					now(),
@@ -624,6 +700,69 @@ export function createFeedStore(options = {}) {
 				}) || null
 			);
 		},
+		publishOverlap(input) {
+			const { head, fingerprint } = input.provenance ?? {};
+			if (
+				!safeId(input.agentId) ||
+				!safeId(input.rootId) ||
+				!UUID.test(input.observationId ?? "") ||
+				!safePaths([input.path]) ||
+				!COHORT.test(input.authorizationIdentity ?? "") ||
+				typeof fingerprint !== "string" ||
+				!COHORT.test(fingerprint) ||
+				typeof head !== "string" ||
+				!GIT_HEAD.test(head)
+			)
+				return "irrelevant";
+			if (!authorized(input)) return "retry";
+			return (
+				mutate(
+					input.cohort,
+					(state) => {
+						const observation = state.observations.find(
+							(entry) => entry.id === input.observationId,
+						);
+						if (
+							observation?.kind !== "read" ||
+							observation.rootId !== input.rootId ||
+							observation.agentId !== input.agentId ||
+							!observation.paths.includes(input.path) ||
+							!state.recipients.some(
+								(entry) =>
+									entry.rootId === input.rootId &&
+									entry.agentId === input.agentId &&
+									entry.proofIdentity === state.proofIdentity &&
+									entry.interests.includes(input.path),
+							) ||
+							!state.recipients.some(
+								(entry) =>
+									entry.rootId === input.rootId &&
+									entry.agentId !== input.agentId &&
+									entry.proofIdentity === state.proofIdentity &&
+									entry.interests.includes(input.path),
+							)
+						)
+							return "irrelevant";
+						return append(state, {
+							cohort: input.cohort,
+							rootId: input.rootId,
+							agentId: input.agentId,
+							previewOnly: true,
+							kind: "fact",
+							summary: "Sibling referenced this saved file.",
+							references: [input.path],
+							provenance: input.provenance,
+							dedupeKey: feedHash(
+								JSON.stringify(["saved-overlap", input.agentId, input.path, head, fingerprint]),
+							),
+						})
+							? "published"
+							: "irrelevant";
+					},
+					{ authorizationIdentity: input.authorizationIdentity },
+				) || "retry"
+			);
+		},
 		drainRecipient(input) {
 			if (!authorized(input)) return null;
 			return (
@@ -633,16 +772,25 @@ export function createFeedStore(options = {}) {
 					if (!entry || !access) return false;
 					const identity = authorizationIdentity(input.cohort, state);
 					const claimed = new Set(entry.claimed);
-					const candidates = state.events.filter(
+					const preview = input.preview === true;
+					const previewClaimed = new Set(
+						preview && Array.isArray(entry.previewClaimed) ? entry.previewClaimed : [],
+					);
+					const events = preview
+						? [...state.events, ...state.previewEvents].sort((a, b) => a.sequence - b.sequence)
+						: state.events;
+					const candidates = events.filter(
 						(event) =>
 							event.rootId === input.rootId &&
 							event.agentId !== input.agentId &&
 							sameEpoch(event.epoch, access.epoch) &&
-							!claimed.has(event.id) &&
+							!(event.previewOnly === true ? previewClaimed : claimed).has(event.id) &&
 							event.references.some((path) => entry.interests.includes(path)),
 					);
 					const gap =
-						entry.pendingClaims.length > 0 || (entry.seenEviction ?? 0) < (state.eviction ?? 0);
+						entry.pendingClaims.length > 0 ||
+						(entry.seenEviction ?? 0) < (state.eviction ?? 0) ||
+						(preview && (entry.seenPreviewEviction ?? 0) < (state.previewEviction ?? 0));
 					const seedNeeded = entry.seeded !== true;
 					const budget = Math.max(
 						0,
@@ -659,9 +807,14 @@ export function createFeedStore(options = {}) {
 						size += length;
 					}
 					const claimId = selected.length || seedNeeded || gap ? randomUUID() : null;
-					entry.claimed = [
-						...new Set([...entry.claimed, ...selected.map((event) => event.id)]),
-					].slice(-MAX_EVENTS);
+					for (const event of selected) {
+						(event.previewOnly === true ? previewClaimed : claimed).add(event.id);
+					}
+					entry.claimed = [...claimed].slice(-MAX_EVENTS);
+					if (preview) {
+						entry.previewClaimed = [...previewClaimed].slice(-MAX_PREVIEW_EVENTS);
+						entry.seenPreviewEviction = state.previewEviction ?? 0;
+					}
 					entry.pendingClaims = claimId ? [claimId] : [];
 					entry.pendingAuthorization = identity;
 					entry.seenEviction = state.eviction ?? 0;
@@ -718,6 +871,7 @@ export function createFeedStore(options = {}) {
 					const identity = proofKey(value);
 					if (state.proofIdentity !== identity) {
 						state.events = [];
+						clearPreview(state);
 						state.observations = [];
 						state.receipts = [];
 						state.producer = {};

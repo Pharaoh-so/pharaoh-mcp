@@ -22,12 +22,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeHookPreferences } from "../project-memory/preferences.mjs";
 import { configureClients, verifiedCodingClients } from "../src/client-install.js";
 import { askYesNo, parseArgs, pickOption } from "../src/helpers.js";
 import {
 	allowReadTools,
 	CODEX_SKILLS,
 	claudePluginState,
+	cleanupInstallExtras,
 	describeAgentInstructionOutcome,
 	describeClaudeMdOutcome,
 	installSkills,
@@ -41,7 +43,6 @@ import {
 	uninstallClaudePlugin,
 } from "../src/install-skills.js";
 import type { ClientInstallOptions, ClientTarget, LaunchConfig } from "../src/install-types.js";
-import { writeHookPreferences } from "../project-memory/preferences.mjs";
 
 // All filesystem operations remain real; fault injection targets the receipt commit only.
 vi.mock("node:fs", async (importOriginal) => {
@@ -1324,6 +1325,214 @@ describe("the shared coding-agent instruction consent", () => {
 		expect(ask).not.toHaveBeenCalled();
 		expect(existsSync(join(home, ".codex"))).toBe(false);
 	});
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"offers pilot delegation separately per client and preserves declines and manual removal",
+		async () => {
+			const clients = ["claude-code", "codex"] as const;
+			mkdirSync(join(home, ".claude"));
+			mkdirSync(join(home, ".codex"));
+			const claude = join(home, ".claude", "CLAUDE.md");
+			const codex = join(home, ".codex", "AGENTS.md");
+			writeFileSync(claude, "Claude policy.");
+			writeFileSync(codex, "Codex policy.");
+			await offerAgentInstructionLines(clients, async () => true, true, home);
+			const originalClaude = readFileSync(claude, "utf-8");
+			const originalCodex = readFileSync(codex, "utf-8");
+			const pilot = (ask: (question: string) => Promise<boolean>, terminal = true) =>
+				offerAgentInstructionLines(clients, ask, terminal, home, "pharaoh-native-delegation-v1");
+			const ask = vi.fn(async (question: string) => question.includes(claude));
+
+			expect((await pilot(ask, false)).map((result) => result.outcome)).toEqual([
+				"no-terminal",
+				"no-terminal",
+			]);
+			expect(ask).not.toHaveBeenCalled();
+			expect((await pilot(ask)).map((result) => result.outcome)).toEqual(["added", "declined"]);
+			expect(ask).toHaveBeenCalledTimes(2);
+			expect(ask.mock.calls[0][0]).toContain("[y/N]");
+			expect(ask.mock.calls[0][0]).not.toContain(codex);
+			expect(ask.mock.calls[1][0]).not.toContain(claude);
+			expect(readFileSync(claude, "utf-8")).toContain("clear independent outcome");
+			expect(readFileSync(codex, "utf-8")).toBe(originalCodex);
+			ask.mockClear();
+			expect((await pilot(ask)).map((result) => result.outcome)).toEqual(["current", "answered"]);
+			writeFileSync(claude, originalClaude);
+			expect((await pilot(ask)).map((result) => result.outcome)).toEqual(["answered", "answered"]);
+			expect(ask).not.toHaveBeenCalled();
+			expect(readFileSync(claude, "utf-8")).toBe(originalClaude);
+		},
+	);
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"cleans untouched pilot and lookup blocks and allows managed guidance to be reapplied",
+		async () => {
+			const clients = ["claude-code", "codex"] as const;
+			mkdirSync(join(home, ".claude"));
+			mkdirSync(join(home, ".codex"));
+			const claude = join(home, ".claude", "CLAUDE.md");
+			const codex = join(home, ".codex", "AGENTS.md");
+			writeFileSync(claude, "Claude policy.");
+			writeFileSync(codex, "Codex policy.");
+			await offerAgentInstructionLines(clients, async () => true, true, home);
+			await offerAgentInstructionLines(
+				clients,
+				async () => true,
+				true,
+				home,
+				"pharaoh-native-delegation-v1",
+			);
+			const edited = readFileSync(codex, "utf-8").replace(
+				"clear independent outcome",
+				"reviewed outcome",
+			);
+			writeFileSync(codex, edited);
+
+			uninstallClaudePlugin(home, NO_CLI.claude);
+			expect(readFileSync(claude, "utf-8")).toBe("Claude policy.");
+			expect(readFileSync(codex, "utf-8")).toContain("reviewed outcome");
+			expect(readFileSync(codex, "utf-8")).not.toContain(line);
+			const ask = vi.fn(async () => true);
+			const [result] = await offerAgentInstructionLines(
+				["claude-code"],
+				ask,
+				true,
+				home,
+				"pharaoh-native-delegation-v1",
+			);
+			expect(result.outcome).toBe("added");
+			expect(ask).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"can retry an affirmative answer after an instruction write fails",
+		async () => {
+			mkdirSync(join(home, ".pharaoh"), { mode: 0o700 });
+			mkdirSync(join(home, ".codex"));
+			const path = join(home, ".codex", "AGENTS.md");
+			const original = "a".repeat(64 * 1024);
+			writeFileSync(path, original);
+			const ask = vi.fn(async () => true);
+			const offer = () =>
+				offerAgentInstructionLines(["codex"], ask, true, home, "pharaoh-native-delegation-v1");
+			expect((await offer())[0].outcome).toBe("failed");
+			expect(readFileSync(path, "utf8")).toBe(original);
+			writeFileSync(path, "Code policy.\n");
+			expect((await offer())[0].outcome).toBe("added");
+			expect(ask).toHaveBeenCalledTimes(2);
+		},
+	);
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"ignores pilot-only guidance in the legacy instruction classifier",
+		async () => {
+			mkdirSync(join(home, ".pharaoh"), { mode: 0o700 });
+			const results = await offerAgentInstructionLines(
+				["claude-code"],
+				async () => true,
+				true,
+				home,
+				"pharaoh-native-delegation-v1",
+			);
+			expect(results[0].outcome).toBe("added");
+			expect(instructionStates("claude-code", home, home, {})).toEqual({
+				user: "none",
+				managed: "absent",
+				project: "unknown",
+			});
+		},
+	);
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"honors a new Codex override during pilot consent",
+		async () => {
+			mkdirSync(join(home, ".pharaoh"), { mode: 0o700 });
+			mkdirSync(join(home, ".codex"));
+			const codex = join(home, ".codex", "AGENTS.md");
+			const override = join(home, ".codex", "AGENTS.override.md");
+			writeFileSync(codex, "Codex policy.");
+			const [result] = await offerAgentInstructionLines(
+				["codex"],
+				async () => {
+					writeFileSync(override, "Keep the task in one agent.");
+					return true;
+				},
+				true,
+				home,
+				"pharaoh-native-delegation-v1",
+			);
+			expect(result.outcome).toBe("kept");
+			expect(readFileSync(codex, "utf-8")).toBe("Codex policy.");
+			expect(readFileSync(override, "utf-8")).toBe("Keep the task in one agent.");
+		},
+	);
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"removes only the selected Global client's pilot guidance on scoped cleanup",
+		async () => {
+			const clients = ["claude-code", "codex"] as const;
+			await offerAgentInstructionLines(clients, async () => true, true, home);
+			await offerAgentInstructionLines(
+				clients,
+				async () => true,
+				true,
+				home,
+				"pharaoh-native-delegation-v1",
+			);
+			const codex = join(home, ".codex", "AGENTS.md");
+			const claude = join(home, ".claude", "CLAUDE.md");
+			const before = readFileSync(claude, "utf-8");
+			expect(cleanupInstallExtras({ kind: "global" }, ["codex"], home)).toEqual([]);
+			expect(readFileSync(codex, "utf-8")).toContain(line);
+			expect(readFileSync(codex, "utf-8")).not.toContain("pharaoh-native-delegation-v1:start");
+			expect(readFileSync(claude, "utf-8")).toBe(before);
+		},
+	);
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"cleans the recorded pilot profile and keeps removing managed skills if guidance is unsafe",
+		async () => {
+			mkdirSync(join(home, ".pharaoh"), { mode: 0o700 });
+			const first = join(home, "first-codex");
+			const second = join(home, "second-codex");
+			mkdirSync(first);
+			mkdirSync(second);
+			const firstPath = join(first, "AGENTS.md");
+			const secondPath = join(second, "AGENTS.md");
+			writeFileSync(firstPath, "First profile.");
+			writeFileSync(secondPath, "Second profile.");
+			const offer = () =>
+				offerAgentInstructionLines(
+					["codex"],
+					async () => true,
+					true,
+					home,
+					"pharaoh-native-delegation-v1",
+				);
+			vi.stubEnv("CODEX_HOME", first);
+			expect((await offer())[0].outcome).toBe("added");
+			vi.stubEnv("CODEX_HOME", second);
+			expect(cleanupInstallExtras({ kind: "global" }, ["codex"], home)).toEqual([]);
+			expect(readFileSync(firstPath, "utf8")).toBe("First profile.");
+			expect(readFileSync(secondPath, "utf8")).toBe("Second profile.");
+
+			expect((await offer())[0].outcome).toBe("added");
+			const edited = readFileSync(secondPath, "utf8").replace(
+				"clear independent outcome",
+				"reviewed outcome",
+			);
+			writeFileSync(secondPath, edited);
+			runInstallSkills(home, { ...NO_CLI, clients: ["codex"], silent: true });
+			const skill = join(home, ".agents", "skills", "pharaoh-plan", "SKILL.md");
+			expect(existsSync(skill)).toBe(true);
+			expect(cleanupInstallExtras({ kind: "global" }, ["codex"], home)).toEqual([
+				expect.stringContaining("could not safely remove codex pilot"),
+			]);
+			expect(readFileSync(secondPath, "utf8")).toBe(edited);
+			expect(existsSync(skill)).toBe(false);
+		},
+	);
 
 	it("preserves symlinks, invalid UTF-8 and broken managed blocks", async () => {
 		mkdirSync(join(home, ".codex"));

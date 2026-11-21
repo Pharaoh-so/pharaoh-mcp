@@ -1,5 +1,13 @@
 import type { Stats } from "node:fs";
 
+/** Raw Git output constrained by an absolute performance.now deadline. */
+export function gitRawBefore(
+	cwd: string,
+	maxBuffer: number,
+	deadline: number,
+	...command: string[]
+): string;
+
 /** Quote one value as a literal POSIX shell argument. */
 export function shellWord(value: string): string;
 
