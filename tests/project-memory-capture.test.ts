@@ -4,15 +4,7 @@
  * events only. VISION.md § Memory saves what a turn proved, without asking.
  */
 import { execFileSync } from "node:child_process";
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	realpathSync,
-	rmSync,
-	utimesSync,
-	writeFileSync,
-} from "node:fs";
+import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -20,6 +12,7 @@ import {
 	beginTurn,
 	captureDirectory,
 	checkCommand,
+	deferCaptureForReview,
 	recordToolEvent,
 	sendCapture,
 	stopDecision,
@@ -37,26 +30,47 @@ const credentials = {
 let home: string;
 let root: string;
 let directory: string;
+const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args]);
+const commit = (...args: string[]) =>
+	git("-c", "user.email=f@x", "-c", "user.name=f", "commit", "-q", ...args, "-m", "fixture");
+
+function context(client: "claude-code" | "codex", session: string, turn: string, ref = "a") {
+	return {
+		input: {
+			session_id: session,
+			cwd: root,
+			[client === "codex" ? "turn_id" : "prompt_id"]: turn,
+		},
+		options: {
+			client,
+			target: { root, repo },
+			directory,
+			memorySession,
+			binding: { client, sessionRef: ref.repeat(64) },
+		},
+	};
+}
 
 beforeEach(() => {
-	home = realpathSync(mkdtempSync(join(tmpdir(), "pharaoh-capture-")));
+	home = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), "pharaoh-capture-")));
 	root = join(home, "repo");
-	mkdirSync(join(root, "src"), { recursive: true });
-	writeFileSync(join(root, "src/math.js"), "export const median = () => 0;\n");
-	const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args]);
+	fs.mkdirSync(join(root, "src"), { recursive: true });
+	fs.writeFileSync(join(root, "src/math.js"), "export const median = () => 0;\n");
 	git("init", "-q");
-	git("-c", "user.email=f@x", "-c", "user.name=f", "commit", "-q", "--allow-empty", "-m", "init");
+	commit("--allow-empty");
 	directory = captureDirectory(join(home, ".pharaoh", "project-memory-client"));
 });
 
-afterEach(() => rmSync(home, { recursive: true, force: true }));
+afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
 
 function run(client: "claude-code" | "codex", events: Record<string, unknown>[], launch = vi.fn()) {
-	const turn = client === "codex" ? { turn_id: "turn-1" } : { prompt_id: "prompt-1" };
-	const binding = { client, sessionRef: "a".repeat(64) };
-	const options = { client, target: { root, repo }, directory, memorySession, binding };
+	const { input: identity, options } = context(
+		client,
+		`session-${client}`,
+		client === "codex" ? "turn-1" : "prompt-1",
+	);
 	const outputs = events.map((event) => {
-		const input = { session_id: `session-${client}`, cwd: root, ...turn, ...event };
+		const input = { ...identity, ...event };
 		if (event.hook_event_name !== "Stop") return recordToolEvent(input, options);
 		return stopDecision(input, { ...options, launch });
 	});
@@ -86,6 +100,12 @@ const note =
 
 it.each([
 	["npm test", "", { command: "npm test", piped: false }],
+	[
+		"node node_modules/vitest/vitest.mjs run tests/check.test.ts",
+		"",
+		{ command: "node node_modules/vitest/vitest.mjs run tests/check.test.ts", piped: false },
+	],
+	["node scripts/arbitrary.mjs", "", undefined],
 	["npm test 2>&1 | tail -30", "", { command: "npm test", piped: true }],
 	[
 		'npm test 2>&1 | grep -E "^# (pass|fail)"',
@@ -154,7 +174,7 @@ it("asks once when a check proves the edit, then saves the note and the observed
 			: { forgotten: true },
 	);
 	await sendCapture(pending, { request, credentials, now: Date.now() + 31_000 });
-	expect(existsSync(pending)).toBe(false);
+	expect(fs.existsSync(pending)).toBe(false);
 	const saved = request.mock.calls.map(([, payload]) => payload);
 	expect(saved[0].operationId).toBe(throttled.mock.calls[0]?.[1].operationId);
 	expect(saved).toMatchObject([
@@ -239,51 +259,34 @@ it("saves nothing without proof: read-only, unproven, stale or declined turns", 
 });
 
 it("undoes only the newest save, and turning capture off drops what was not sent", async () => {
-	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 	const write = (name: string, data: object) =>
-		writeFileSync(join(directory, name), JSON.stringify(data), { mode: 0o600 });
+		fs.writeFileSync(join(directory, name), JSON.stringify(data), { mode: 0o600 });
 	const pending = `pending-${memorySession}.json`;
 	write("last.json", { repo, records: [{ id: memorySession, version: 1 }], at: 1 });
 	write(pending, { repo, createdAt: 2, records: [{ operationId: "a" }], done: [] });
 	const request = vi.fn();
 	expect(await undoLastCapture({ request, home })).toEqual({ undone: 1, repo });
 	expect(request).not.toHaveBeenCalled();
-	expect(existsSync(join(directory, "last.json"))).toBe(true);
+	expect(fs.existsSync(join(directory, "last.json"))).toBe(true);
 	write(pending, { repo, createdAt: 3, records: [], done: [] });
 	setMemoryCapture(false, home);
-	expect([existsSync(join(directory, pending)), existsSync(join(directory, "last.json"))]).toEqual([
-		false,
-		true,
-	]);
+	expect([
+		fs.existsSync(join(directory, pending)),
+		fs.existsSync(join(directory, "last.json")),
+	]).toEqual([false, true]);
 });
 
 it("sees an edit made without an edit tool, and voids the proof when one follows the check", () => {
-	const options = {
-		client: "codex" as const,
-		target: { root, repo },
-		directory,
-		memorySession,
-		binding: { client: "codex", sessionRef: "b".repeat(64) },
-	};
-	const input = { session_id: "session-shell", turn_id: "turn-shell", cwd: root };
+	const { input, options } = context("codex", "session-shell", "turn-shell", "b");
 	const t0 = Date.now() - 60_000;
 	const touch = (at: number) => {
-		writeFileSync(join(root, "src/math.js"), `export const median = () => ${at};\n`);
-		utimesSync(join(root, "src/math.js"), at / 1000, at / 1000);
+		fs.writeFileSync(join(root, "src/math.js"), `export const median = () => ${at};\n`);
+		fs.utimesSync(join(root, "src/math.js"), at / 1000, at / 1000);
 	};
 	// Tracked, so git reports it as " M src/math.js": the leading space must survive.
-	execFileSync("git", ["-C", root, "add", "-A"]);
-	execFileSync("git", [
-		"-C",
-		root,
-		"-c",
-		"user.email=f@x",
-		"-c",
-		"user.name=f",
-		"commit",
-		"-qm",
-		"math",
-	]);
+	git("add", "-A");
+	commit();
 	beginTurn({ ...input, hook_event_name: "UserPromptSubmit" }, { ...options, now: t0 });
 	touch(t0 + 1_000); // python3 fix.py: no edit hook fires
 	const check = {
@@ -297,4 +300,58 @@ it("sees an edit made without an edit tool, and voids the proof when one follows
 	touch(t0 + 3_000);
 	const stop = { ...input, hook_event_name: "Stop", last_assistant_message: note };
 	expect(stopDecision(stop, { ...options, now: t0 + 4_000, launch: vi.fn() })).toBeUndefined();
+});
+
+it("defers memory to the review continuation and consumes fresh verifier evidence without a second block", () => {
+	const { input, options } = context("claude-code", "review-capture", "turn-review");
+	beginTurn({ ...input, hook_event_name: "UserPromptSubmit" }, options);
+	expect(deferCaptureForReview(input, options)).toContain("After review and all tools finish");
+	// Review may end inconclusively: even a client omitting stop_hook_active cannot request a second continuation.
+	expect(
+		stopDecision(
+			{ ...input, hook_event_name: "Stop", last_assistant_message: "No finding." },
+			options,
+		)?.decision,
+	).toBeUndefined();
+	const launch = vi.fn();
+	const saved = stopDecision(
+		{ ...input, hook_event_name: "Stop", stop_hook_active: true, last_assistant_message: note },
+		{
+			...options,
+			launch,
+			verifiedCheck: {
+				paths: ["src/math.js"],
+				check: "vitest run tests/math.test.ts",
+				evidence: "1 behavioral test passed",
+			},
+		},
+	);
+	expect(saved?.systemMessage).toContain("Pharaoh is saving");
+	expect(saved?.decision).toBeUndefined();
+	expect(launch).toHaveBeenCalledTimes(1);
+});
+
+it("never repeats an earlier memory cue and still observes review edits and checks", () => {
+	const { input, options } = context("claude-code", "review-after-cue", "same-turn");
+	beginTurn({ ...input, hook_event_name: "UserPromptSubmit" }, options);
+	recordToolEvent({ ...input, ...edit("src/math.js") }, options);
+	expect(recordToolEvent({ ...input, ...bash("npm test") }, options)).toContain("Pharaoh memory:");
+	expect(deferCaptureForReview(input, options)).toBeUndefined();
+	recordToolEvent({ ...input, ...edit("src/math.js") }, options);
+	const launch = vi.fn();
+	fs.writeFileSync(join(root, "src/worker.js"), "export const worker = () => true;\n");
+	recordToolEvent({ ...input, ...edit("src/worker.js") }, options);
+	recordToolEvent(
+		{ ...input, ...bash("npm run lint"), hook_event_name: "PostToolUseFailure" },
+		options,
+	);
+	// The prior cue controls prompting only; this new check must still be recorded.
+	expect(recordToolEvent({ ...input, ...bash("npm run lint") }, options)).toBeUndefined();
+	expect(
+		stopDecision({ ...input, ...stop(note) }, { ...options, launch })?.systemMessage,
+	).toContain("Pharaoh is saving");
+	expect(launch).toHaveBeenCalledTimes(1);
+	const saved = JSON.parse(fs.readFileSync(launch.mock.calls[0][0], "utf8"));
+	expect(JSON.stringify(saved.records)).toContain("npm run lint");
+	expect(JSON.stringify(saved.records)).toContain("src/worker.js");
 });

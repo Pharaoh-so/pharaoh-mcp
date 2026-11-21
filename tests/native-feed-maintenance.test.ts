@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { setNativeFeedPreviewEnabled } from "../runtime/feed-hooks.mjs";
 import {
 	deriveFeedCohortKey,
 	feedCheckoutIdentity,
@@ -20,7 +21,11 @@ import { feedRoot, writeFeedJSON } from "../runtime/feed-io.mjs";
 import { createFeedStore } from "../runtime/feed-store.mjs";
 import { readCredentials, saveAuthorizedCredentials } from "../src/credentials.js";
 import type { VerifiedCheckout } from "../src/local/dispatch.js";
-import { type FeedMaintenanceJob, runFeedMaintenance } from "../src/native-feed-maintenance.js";
+import {
+	type FeedMaintenanceJob,
+	type FeedMaintenanceOptions,
+	runFeedMaintenance,
+} from "../src/native-feed-maintenance.js";
 
 const server = "https://mcp.pharaoh.so";
 const registration = "00000000-0000-4000-8000-000000000001";
@@ -304,6 +309,75 @@ it("establishes a baseline, relays repeat edits, and labels sampled authors as u
 	time += 5_001;
 	await runFeedMaintenance(job, { ...options(), fingerprint });
 	expect(store.drainRecipient(scope("worker-b"))?.events).toEqual([]);
+});
+
+it("relays one verified saved-file overlap to interested siblings in the same native root", async () => {
+	authorize();
+	const path = "src/shared.ts";
+	const fingerprint = () => new Map([[path, "a".repeat(64)]]);
+	const isolated = scope("isolated");
+	const other = { ...scope("worker-c"), rootId: "other-root" };
+	store.registerFeedRoot({ cohort, rootId: other.rootId, checkout: job.checkout });
+	store.registerRecipient({ ...other, checkout: job.checkout, interests: [path] });
+	store.registerRecipient({ ...isolated, checkout: job.checkout, interests: ["assets/title.ts"] });
+	store.recordObservation({ ...scope("worker-a"), kind: "read", paths: [path] });
+	await runFeedMaintenance(job, { ...options(), fingerprint });
+	const initial = store.drainRecipient(scope("worker-b"));
+	if (!initial?.claimId) throw new Error("Expected an initial seed claim");
+	expect(initial.events).toEqual([]);
+	store.markEmitted({ ...scope("worker-b"), claimId: initial.claimId });
+
+	time += 5_001;
+	setNativeFeedPreviewEnabled("codex", true, { home });
+	store.recordObservation({ ...scope("worker-a"), kind: "read", paths: [path] });
+	store.recordObservation({ ...scope("worker-b"), kind: "read", paths: [path] });
+	await runFeedMaintenance(job, { ...options(), fingerprint });
+	expect(store.drainRecipient(scope("worker-b"))?.events).toEqual([]);
+	const overlap = store.drainRecipient({ ...scope("worker-b"), preview: true });
+	if (!overlap?.claimId) throw new Error("Expected a scoped overlap claim");
+	expect(overlap.events).toHaveLength(1);
+	expect(overlap.events[0]).toMatchObject({
+		kind: "fact",
+		agentId: "worker-a",
+		references: [path],
+		provenance: { head: "d".repeat(40), fingerprint: "a".repeat(64) },
+	});
+	expect(store.drainRecipient({ ...isolated, preview: true })?.events).toEqual([]);
+	expect(store.drainRecipient({ ...other, preview: true })?.events).toEqual([]);
+	expect(store.drainRecipient({ ...scope("worker-a"), preview: true })?.events).toEqual([
+		expect.objectContaining({ kind: "fact", agentId: "worker-b", references: [path] }),
+	]);
+	store.markEmitted({ ...scope("worker-b"), claimId: overlap.claimId });
+
+	time += 5_001;
+	store.recordObservation({ ...scope("worker-a"), kind: "read", paths: [path] });
+	await runFeedMaintenance(job, { ...options(), fingerprint });
+	expect(store.drainRecipient({ ...scope("worker-b"), preview: true })?.events).toEqual([]);
+});
+
+it("keeps bounded reads pending across a four-path rotation and a busy publisher", async () => {
+	authorize();
+	setNativeFeedPreviewEnabled("codex", true, { home });
+	const paths = Array.from({ length: 7 }, (_, index) => `src/file${index}.ts`);
+	for (const agentId of ["worker-a", "worker-b"])
+		store.registerRecipient({ ...scope(agentId), checkout: job.checkout, interests: paths });
+	for (const path of paths)
+		store.recordObservation({ ...scope("worker-a"), kind: "read", paths: [path] });
+	const fingerprint: NonNullable<FeedMaintenanceOptions["fingerprint"]> = (_checkout, sampled) =>
+		new Map(sampled.map((path) => [path, "a".repeat(64)]));
+	const publishOverlap = vi.fn(store.publishOverlap).mockReturnValueOnce("retry");
+	const run = () =>
+		runFeedMaintenance(job, { ...options(), fingerprint, store: { ...store, publishOverlap } });
+	await run();
+	expect(publishOverlap).toHaveBeenCalledTimes(4);
+	expect(store.readObservations({ cohort }).map((entry) => entry.paths[0])).toEqual([
+		paths[0],
+		...paths.slice(4),
+	]);
+	time += 5_001;
+	await run();
+	expect(publishOverlap).toHaveBeenCalledTimes(8);
+	expect(store.readObservations({ cohort })).toEqual([]);
 });
 
 it("retries a persisted invalidation after publication fails without losing its transition", async () => {

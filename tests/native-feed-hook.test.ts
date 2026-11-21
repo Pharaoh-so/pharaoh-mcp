@@ -15,7 +15,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { nativeFeedRegistration, setNativeFeedEnabled } from "../runtime/feed-hooks.mjs";
+import {
+	nativeFeedRegistration,
+	setNativeFeedEnabled,
+	setNativeFeedPreviewEnabled,
+} from "../runtime/feed-hooks.mjs";
 import {
 	deriveFeedCohortKey,
 	feedCheckoutIdentity,
@@ -401,9 +405,46 @@ describe("observed native payload contracts", () => {
 		const structured = {
 			...ctx.checkpoint,
 			tool_name: "mcp__pharaoh__get_blast_radius",
-			tool_input: { entity: PATH },
+			tool_input: { repo: REPO, entity_type: "file", entity: PATH },
 		};
-		expect(text(deliver(structured, ctx.options))).toContain(PRIVATE_DELTA);
+		expect(
+			deliver(
+				{ ...structured, tool_input: { ...structured.tool_input, repo: "another/repo" } },
+				ctx.options,
+			),
+		).toBeNull();
+		expect(
+			deliver(
+				{ ...structured, tool_input: { ...structured.tool_input, entity_type: "function" } },
+				ctx.options,
+			),
+		).toBeNull();
+		expect(
+			text(
+				deliver(
+					{ ...structured, tool_input: { ...structured.tool_input, repo: "native-feed" } },
+					ctx.options,
+				),
+			),
+		).toContain(PRIVATE_DELTA);
+	});
+
+	it("uses a verified repo's exact file search to deliver the base feed without preview", async () => {
+		const ctx = await context("codex", "codex-0.166.0.json");
+		deliver(ctx.start, ctx.options);
+		publish(ctx);
+		const search = {
+			...ctx.checkpoint,
+			tool_name: "mcp__pharaoh__search_functions",
+			tool_input: { repo: REPO, file: PATH, query: "fixture" },
+		};
+		expect(
+			deliver(
+				{ ...search, tool_input: { ...search.tool_input, repo: "another/repo" } },
+				ctx.options,
+			),
+		).toBeNull();
+		expect(text(deliver(search, ctx.options))).toContain(PRIVATE_DELTA);
 	});
 
 	it("uses structured Claude Read interest for late replay without storing returned file contents", async () => {
@@ -421,5 +462,29 @@ describe("observed native payload contracts", () => {
 			.map((name) => readFileSync(join(state, name), "utf8"))
 			.join("");
 		expect(persisted).not.toContain("DO_NOT_PERSIST_FILE_BODY");
+	});
+
+	it("requires the current client preview choice to emit a preview notice", async () => {
+		const ctx = await context("claude-code", "claude-code-2.1.328.json");
+		deliver(ctx.start, ctx.options);
+		interest(ctx, ctx.rootId, SIBLING);
+		const queue = (summary: string) =>
+			ctx.store.publishFinding({
+				cohort: ctx.cohort,
+				rootId: ctx.rootId,
+				agentId: SIBLING,
+				previewOnly: true,
+				kind: "fact",
+				summary,
+				references: [PATH],
+			});
+		expect(queue("First preview")).not.toBeNull();
+		setNativeFeedPreviewEnabled("codex", true, { home: ctx.home });
+		expect(deliver(ctx.checkpoint, ctx.options)).toBeNull();
+		setNativeFeedPreviewEnabled("claude-code", true, { home: ctx.home });
+		expect(text(deliver(ctx.checkpoint, ctx.options))).toContain("First preview");
+		expect(queue("Second preview")).not.toBeNull();
+		setNativeFeedPreviewEnabled("claude-code", false, { home: ctx.home });
+		expect(deliver(ctx.checkpoint, ctx.options)).toBeNull();
 	});
 });

@@ -15,6 +15,13 @@ import { classifyFeedProfile } from "./feed-profiles.mjs";
 import { readFeedSignIn } from "./feed-signin.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+/** Read explicit per-client enrollment for feed features awaiting wider qualification. */
+export function nativeFeedPreviewEnabled(client, options = {}) {
+	if (client !== "codex" && client !== "claude-code") return false;
+	const value = readFeedJSON(join(feedRoot({ home: options.home }), `preview-${client}.json`), 256);
+	return value?.version === 1 && value.enabled === true;
+}
+
 /** Read a committed sign-in generation; pending/withdrawn/inconsistent state is unavailable. */
 export function readFeedSignInGeneration(options = {}) {
 	return (

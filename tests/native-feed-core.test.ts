@@ -14,9 +14,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setNativeFeedPreviewEnabled } from "../runtime/feed-hooks.mjs";
 import {
 	deriveFeedCohortKey,
 	feedCheckoutIdentity,
+	nativeFeedPreviewEnabled,
 	readFeedBranch,
 	readFeedSignInGeneration,
 	resolveFeedCheckout,
@@ -24,7 +26,11 @@ import {
 } from "../runtime/feed-identity.mjs";
 import { feedHash, feedRoot, writeFeedJSON } from "../runtime/feed-io.mjs";
 import { beginFeedSignIn, commitFeedSignIn } from "../runtime/feed-signin.mjs";
-import { createFeedStore, type FeedAccessProof } from "../runtime/feed-store.mjs";
+import {
+	createFeedStore,
+	type FeedAccessProof,
+	feedProofIdentity,
+} from "../runtime/feed-store.mjs";
 
 let home: string;
 let credentialsPath: string;
@@ -264,6 +270,143 @@ describe("native feed authorization and sibling claims", () => {
 		const first = store.drainRecipient({ ...scope("worker-b"), maxChars: 160 })!;
 		expect(first.events).toHaveLength(1);
 		expect(store.drainRecipient(scope("worker-b"))).toMatchObject({ events: [], gap: true });
+	});
+	it("keeps preview notices outside the old v1 fallback's events and routes each proven author once", () => {
+		authorize();
+		recipient("worker-a");
+		recipient("worker-b");
+		setNativeFeedPreviewEnabled("codex", true, options());
+		const path = "src/shared.ts";
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort })!;
+		for (const agentId of ["worker-a", "worker-b", "worker-a"]) {
+			expect(store.recordObservation({ ...scope(agentId), paths: [path], kind: "read" })).toBe(
+				true,
+			);
+		}
+		for (const observation of store.readObservations({ cohort })) {
+			expect(
+				store.publishOverlap({
+					...scope(observation.agentId),
+					observationId: observation.id,
+					path,
+					provenance: { head: "a".repeat(40), fingerprint: "b".repeat(64) },
+					authorizationIdentity,
+				}),
+			).toBe("published");
+		}
+		const base = store.publishFinding({
+			...scope("worker-a"),
+			kind: "invalidation",
+			references: [path],
+			summary: "Saved file changed.",
+		});
+		expect(base).not.toBeNull();
+		setNativeFeedPreviewEnabled("codex", false, options());
+		const wire = () =>
+			JSON.parse(readFileSync(join(feedRoot(options()), "state", `${cohort}.json`), "utf8"));
+		// The previous runtime's v1 reader enumerates state.events only.
+		expect(wire().events).toEqual([base]);
+		expect(wire().previewEvents).toMatchObject([{ agentId: "worker-a" }, { agentId: "worker-b" }]);
+		const preview = () => nativeFeedPreviewEnabled("codex", options());
+		expect(store.drainRecipient({ ...scope("worker-b"), preview: preview() })?.events).toEqual([
+			base,
+		]);
+		setNativeFeedPreviewEnabled("codex", true, options());
+		for (const [reader, peer] of [
+			["worker-a", "worker-b"],
+			["worker-b", "worker-a"],
+		]) {
+			const drain = () => store.drainRecipient({ ...scope(reader), preview: preview() });
+			expect(drain()?.events).toMatchObject([{ agentId: peer, previewOnly: true }]);
+			expect(drain()?.events).toEqual([]);
+		}
+		authorize(2);
+		expect(wire().previewEvents).toEqual([]);
+	});
+
+	it("drops preview notices across a legacy proof rotation in the same epoch", () => {
+		const prior = authorize();
+		recipient("worker-a");
+		recipient("worker-b");
+		const path = "src/shared.ts";
+		expect(store.recordObservation({ ...scope("worker-a"), paths: [path], kind: "read" })).toBe(
+			true,
+		);
+		const [observation] = store.readObservations({ cohort });
+		expect(
+			store.publishOverlap({
+				...scope("worker-a"),
+				observationId: observation.id,
+				path,
+				provenance: { head: "a".repeat(40), fingerprint: "b".repeat(64) },
+				authorizationIdentity: store.currentAuthorizationIdentity({ cohort })!,
+			}),
+		).toBe("published");
+		const root = feedRoot(options());
+		const name = `${cohort}.json`;
+		const readState = () => JSON.parse(readFileSync(join(root, "state", name), "utf8"));
+		const state = readState();
+		expect(state.previewEvents).toHaveLength(1);
+		const next = { ...prior, actor: prior.actor + 1, scopeRevision: randomUUID() };
+		const identity = feedProofIdentity(next);
+		// The fallback rotates its known state fields and preserves the preview lane verbatim.
+		writeFeedJSON(
+			join(root, "state"),
+			name,
+			{
+				...state,
+				proofIdentity: identity,
+				revision: next.scopeRevision,
+				events: [],
+				observations: [],
+				receipts: [],
+				producer: {},
+				recipients: state.recipients.map((entry: Record<string, unknown>) => ({
+					...entry,
+					proofIdentity: identity,
+					seeded: false,
+					claimed: [],
+					pendingClaims: [],
+					capability: null,
+				})),
+			},
+			262_144,
+		);
+		writeFeedJSON(join(root, "proofs"), name, next, 4096);
+		expect(store.readAccessProof({ cohort })).toMatchObject({
+			actor: next.actor,
+			epoch: prior.epoch,
+		});
+		expect(readState().previewEvents).toHaveLength(1);
+		expect(store.drainRecipient({ ...scope("worker-b"), preview: true })?.events).toEqual([]);
+		expect(readState().previewEvents).toEqual([]);
+	});
+
+	it("distinguishes terminal overlap exclusions from temporary store contention", () => {
+		authorize();
+		recipient("worker-a");
+		const path = "src/shared.ts";
+		expect(store.recordObservation({ ...scope("worker-a"), paths: [path], kind: "read" })).toBe(
+			true,
+		);
+		const [observation] = store.readObservations({ cohort });
+		const input = {
+			...scope("worker-a"),
+			observationId: observation.id,
+			path,
+			provenance: { head: "a".repeat(40), fingerprint: "b".repeat(64) },
+			authorizationIdentity: store.currentAuthorizationIdentity({ cohort })!,
+		};
+		expect(store.publishOverlap(input)).toBe("irrelevant");
+		recipient("worker-b");
+		expect(
+			store.publishOverlap({ ...input, provenance: { ...input.provenance, head: "bad" } }),
+		).toBe("irrelevant");
+		const lock = join(feedRoot(options()), "state", `${cohort}.lock`);
+		mkdirSync(lock, { mode: 0o700 });
+		expect(store.publishOverlap(input)).toBe("retry");
+		rmSync(lock, { recursive: true });
+		expect(store.publishOverlap(input)).toBe("published");
 	});
 	it("rejects undeliverable reports and defers a valid report until the seed fits", () => {
 		authorize();

@@ -71,12 +71,19 @@ export function gitBefore(cwd, deadline, ...command) {
 
 /** Git output as printed: `status --porcelain` entries can start with a space. */
 export function gitRaw(cwd, maxBuffer, ...command) {
+	return gitRawBefore(cwd, maxBuffer, Infinity, ...command);
+}
+
+/** Raw Git output constrained by the caller's native-hook deadline. */
+export function gitRawBefore(cwd, maxBuffer, deadline, ...command) {
 	const { args, ...options } = gitProcess(cwd, command);
+	const timeout = Math.min(GIT_TIMEOUT_MS, Math.floor(deadline - performance.now()));
+	if (timeout < 1) throw new Error("Project memory Git deadline expired.");
 	return execFileSync(GIT, args, {
 		...options,
 		encoding: "utf8",
 		maxBuffer,
-		timeout: GIT_TIMEOUT_MS,
+		timeout,
 		killSignal: "SIGKILL",
 	});
 }

@@ -31,7 +31,7 @@ export const NATIVE_SHARE_TOOL: Tool = {
 	name: "pharaoh_share",
 	_meta: { "anthropic/alwaysLoad": true },
 	description:
-		"CALL THIS WHEN: A finding or proposed interface change affects sibling agents in this native session. RETURNS: A local validation receipt. Share one short data-only summary and repository-relative file references; no source, secrets or instructions. The next native hook attributes it to this child. This is ephemeral context, not durable memory or an accepted decision.",
+		"CALL THIS WHEN: A concrete finding, interface change or blocker materially affects sibling agents in this native session. Share one short data-only summary and repository-relative file references. Include no source, secrets or instructions. RETURNS: A local validation receipt. The next eligible native hook can attribute this ephemeral update to the child; the receipt does not establish delivery or an accepted decision.",
 	inputSchema: {
 		type: "object",
 		additionalProperties: false,

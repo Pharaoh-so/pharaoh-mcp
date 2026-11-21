@@ -13,7 +13,8 @@ import { dirname, join, relative } from "node:path";
 
 // Executable files encoded as base64 need more room than any one file.
 // These artifact bounds are independent of memory capture and diagnostic limits.
-const BUNDLE_LIMIT = 320 * 1024;
+// Includes the local review verifier and the credential reader's native sign-in closure.
+const BUNDLE_LIMIT = 352 * 1024;
 const FILE_LIMIT = 256 * 1024;
 export const LEGACY_MEMORY_RUNTIME_FILES = [
 	"execute-turn.mjs",
@@ -32,6 +33,9 @@ export const MEMORY_RUNTIME_FILES = [
 	...LEGACY_MEMORY_RUNTIME_FILES,
 	"bundle.mjs",
 	"capture.mjs",
+	"change-review.mjs",
+	"change-review-proof.mjs",
+	"runtime/feed-signin.mjs",
 	"client-settings.mjs",
 	"diagnostics-collector.mjs",
 	"diagnostics-sender.mjs",
@@ -65,7 +69,7 @@ export function packagedMemoryBundle(packageRoot = new URL("../", import.meta.ur
 			bytes = Buffer.from('{"type":"module"}\n');
 		} else {
 			const location = name.startsWith("runtime/")
-				? new URL(`dist/${name.slice(8)}`, packageRoot)
+				? new URL(name.endsWith(".mjs") ? name : `dist/${name.slice(8)}`, packageRoot)
 				: new URL(`${name === "route-grep.mjs" ? "hooks" : "project-memory"}/${name}`, packageRoot);
 			try {
 				bytes = readFileSync(location);

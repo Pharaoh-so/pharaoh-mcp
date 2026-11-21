@@ -55,6 +55,8 @@ export interface FeedScope {
 	/** Actual native child identity. */ agentId: string;
 }
 export interface FeedFinding extends FeedScope {
+	/** Requires explicit preview enrollment at delivery. */
+	previewOnly?: true;
 	/** Stable hash identifying one producer transition retry. */
 	dedupeKey?: string;
 	/** Whether this is a worker assertion or a verified structural observation. */
@@ -104,7 +106,23 @@ export interface FeedStore {
 	recipientCapability(input: FeedScope): string | null;
 	recordObservation(input: FeedScope & { paths: string[]; kind?: string }): boolean;
 	publishFinding(input: FeedFinding): FeedEvent | null;
-	drainRecipient(input: FeedScope & { maxChars?: number; seedChars?: number; gapChars?: number }): {
+	/** Publish one author's verified reference for matching siblings, or identify a terminal or retryable outcome. */
+	publishOverlap(
+		input: FeedScope & {
+			observationId: string;
+			path: string;
+			provenance: FeedProvenance & { head: string; fingerprint: string };
+			authorizationIdentity: string;
+		},
+	): "published" | "irrelevant" | "retry";
+	drainRecipient(
+		input: FeedScope & {
+			maxChars?: number;
+			seedChars?: number;
+			gapChars?: number;
+			preview?: boolean;
+		},
+	): {
 		events: FeedEvent[];
 		gap: boolean;
 		seedNeeded: boolean;

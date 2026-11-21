@@ -7,6 +7,7 @@ import {
 	deriveFeedCohortKey,
 	feedCheckoutIdentity,
 	feedServerOrigin,
+	nativeFeedPreviewEnabled,
 	readFeedSignInGeneration,
 	resolveFeedCheckout,
 } from "../runtime/feed-identity.mjs";
@@ -22,12 +23,14 @@ import {
 	FEED_EVENT_BYTES,
 	type FeedAccessProof,
 	type FeedFinding,
+	type FeedObservation,
 	feedPayloadBytes,
 	formatFeedEvent,
 } from "../runtime/feed-store.mjs";
 import { readCredentials } from "./credentials.js";
 import type { VerifiedCheckout } from "./local/dispatch.js";
 import { fingerprintLocalSources, resolveLocalCheckout } from "./local/scope.js";
+import { isLocalSourcePath } from "./local/snapshot.js";
 import { installedLocalAnalyzer } from "./local/worker-host.js";
 
 const hasControl = (value: string) => [...value].some((character) => character.charCodeAt(0) < 32);
@@ -356,6 +359,36 @@ function readProvenance(checkout: VerifiedCheckout, deadline: number): FeedProve
 	return { head: head.stdout.trim(), branch: name };
 }
 
+function deriveOverlapNotices(
+	watched: readonly WatchedPath[],
+	paths: readonly string[],
+	hashes: ReadonlyMap<string, string | null>,
+	observations: readonly FeedObservation[],
+	publish: (read: FeedObservation, path: string, hash: string) => boolean,
+) {
+	let attempts = 0;
+	const settled = new Set<string>();
+	const active = new Set(watched.map(({ rootId, path }) => `${rootId}\0${path}`));
+	for (const read of observations) {
+		if (read.kind !== "read") continue;
+		let complete = true;
+		for (const path of read.paths) {
+			// Ineligible or evicted paths cannot be covered by this bounded producer.
+			if (!active.has(`${read.rootId}\0${path}`) || !isLocalSourcePath(path)) continue;
+			if (!paths.includes(path)) {
+				complete = false;
+				continue;
+			}
+			const hash = hashes.get(path);
+			if (typeof hash !== "string") continue;
+			if (attempts >= BATCH_SIZE || !publish(read, path, hash)) complete = false;
+			attempts++;
+		}
+		if (complete) settled.add(read.id);
+	}
+	return settled;
+}
+
 function prepareUpdates(
 	cohort: string,
 	signIn: string,
@@ -367,6 +400,7 @@ function prepareUpdates(
 	now: () => number,
 	current: () => boolean,
 	deadline: number,
+	preview: boolean,
 ) {
 	if (!current()) return;
 	const before = store.readProducerState({ cohort });
@@ -515,18 +549,38 @@ function prepareUpdates(
 		pending = pending.filter((entry) => entry.id !== transition.id);
 		if (!persist()) return;
 	}
+	const settledReads = preview
+		? deriveOverlapNotices(selected, paths, hashes, observations, (read, path, hash) => {
+				if (!current() || performance.now() >= deadline) return false;
+				return (
+					store.publishOverlap({
+						cohort,
+						rootId: read.rootId,
+						agentId: read.agentId,
+						observationId: read.id,
+						path,
+						provenance: {
+							head: revision.head,
+							branch: revision.branch ?? undefined,
+							fingerprint: hash,
+						},
+						authorizationIdentity,
+					}) !== "retry"
+				);
+			})
+		: null;
 	if (!current()) return;
-	const completed = observations.filter(
-		(observation) =>
-			observation.kind === "read" ||
-			observation.paths.every((path) =>
-				selected.some(
-					(entry) =>
-						entry.rootId === observation.rootId &&
-						entry.path === path &&
-						entry.sampledAt >= observation.createdAt,
+	const completed = observations.filter((observation) =>
+		observation.kind === "read"
+			? settledReads === null || settledReads.has(observation.id)
+			: observation.paths.every((path) =>
+					selected.some(
+						(entry) =>
+							entry.rootId === observation.rootId &&
+							entry.path === path &&
+							entry.sampledAt >= observation.createdAt,
+					),
 				),
-			),
 	);
 	store.acknowledgeObservations({
 		cohort,
@@ -690,6 +744,7 @@ export async function runFeedMaintenance(
 			now,
 			() => current() && store.currentAuthorizationIdentity({ cohort }) === authorizationIdentity,
 			deadline,
+			nativeFeedPreviewEnabled(job.client, scopeOptions),
 		);
 		return true;
 	} catch {

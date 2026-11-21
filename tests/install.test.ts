@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setNativeFeedEnabled, syncNativeFeedHooks } from "../runtime/feed-hooks.mjs";
 import type { RuntimeDeviceApproval, RuntimeEnrollmentIntent } from "../runtime/runtime-client.mjs";
 import { syncUpdateNoticeHook, updateRuntimeHooks } from "../runtime/runtime-hooks.mjs";
 import {
@@ -25,7 +26,6 @@ import {
 } from "../runtime/update-notice.mjs";
 import { activationBox, pollOnce, requestDeviceCode } from "../src/auth.js";
 import { restartDesktop } from "../src/client-install.js";
-import { gitWorktreeRoot, resolveInstallScope } from "../src/install-scope.js";
 import type { Credentials } from "../src/credentials.js";
 import { abortOnEnter, askYesNo, printLines, showProgress } from "../src/helpers.js";
 import {
@@ -36,7 +36,9 @@ import {
 	installUpdateNotice,
 	runInstall,
 	startAgent,
+	validateInstallArguments,
 } from "../src/install.js";
+import { gitWorktreeRoot, resolveInstallScope } from "../src/install-scope.js";
 import { allowReadTools } from "../src/install-skills.js";
 import type { ClientTarget, InstallScope, LaunchConfig } from "../src/install-types.js";
 import { RuntimeSetupError } from "../src/runtime.js";
@@ -82,6 +84,14 @@ const APPROVAL: RuntimeDeviceApproval = {
 	expiresAt: "2999-01-01T00:00:00Z",
 };
 const RUNTIME_SESSION = "011e2c33-3e78-4d7a-8363-d1b99c095c38";
+
+function readJson(path: string) {
+	return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function writeJson(path: string, value: unknown) {
+	writeFileSync(path, JSON.stringify(value));
+}
 
 describe("NPX developer install", () => {
 	let home: string;
@@ -148,6 +158,27 @@ describe("NPX developer install", () => {
 		};
 	}
 
+	function runFixture(overrides: Partial<InstallOptions> = {}, clis: string[] = []) {
+		return runInstall(options(overrides, clis));
+	}
+
+	function installWith(dependencies: InstallOptions["dependencies"]) {
+		return runFixture({ dependencies });
+	}
+
+	function expectedClaudeRegistration() {
+		return {
+			command: launch.command,
+			args: [
+				...launch.args,
+				"--feed-client",
+				"claude-code",
+				"--feed-registration",
+				expect.any(String),
+			],
+		};
+	}
+
 	function runCli(...args: string[]) {
 		const tsx = createRequire(import.meta.url).resolve("tsx/cli");
 		return spawnSync(process.execPath, [tsx, join(__dirname, "../src/index.ts"), ...args], {
@@ -157,33 +188,78 @@ describe("NPX developer install", () => {
 		});
 	}
 
+	it("requires an explicit Global install for the delegation pilot", () => {
+		expect(validateInstallArguments(["--native-delegation"])).toContain("--scope global");
+		expect(validateInstallArguments(["--scope", "local", "--native-delegation"])).toContain(
+			"--scope global",
+		);
+		expect(validateInstallArguments(["--scope", "global", "--native-delegation"])).toBeNull();
+	});
+
+	it.skipIf(typeof process.getuid !== "function")(
+		"offers delegation only for enabled managed hooks on an exact detected CLI build",
+		async () => {
+			const offer = vi.fn<NonNullable<InstallOptions["offerNativeDelegation"]>>(async () => null);
+			const hooks = vi.fn(syncNativeFeedHooks);
+			const codexConfig = join(home, ".codex", "config.toml");
+			const targets: ClientTarget[] = [
+				{
+					client: "codex",
+					path: codexConfig,
+					cli: "codex",
+					version: "0.166.0",
+				},
+				{
+					client: "claude-code",
+					path: join(home, ".claude.json"),
+					cli: "claude",
+					version: "2.1.329",
+				},
+			];
+			const install = options({
+				offerNativeDelegation: offer,
+				dependencies: {
+					discover: () => targets,
+					verifiedRuntimeClients: () => ["codex", "claude-code"],
+					nativeFeedHooks: hooks,
+				},
+			});
+			expect(await runInstall(install)).toBe(0);
+			expect(hooks).toHaveBeenCalled();
+			expect(offer.mock.calls).toEqual([["codex", "0.166.0", expect.any(Function)]]);
+			const eligible = offer.mock.calls[0][2];
+			expect(eligible()).toBe(true);
+			writeFileSync(codexConfig, "\n[features]\nhooks = false\n", { flag: "a" });
+			expect(eligible()).toBe(false);
+			offer.mockClear();
+			expect(await runInstall(install)).toBe(0);
+			expect(offer).not.toHaveBeenCalled();
+
+			writeFileSync(
+				codexConfig,
+				readFileSync(codexConfig, "utf8").replace("hooks = false", "hooks = true"),
+			);
+			setNativeFeedEnabled("codex", false, { home });
+			offer.mockClear();
+			expect(await runInstall(install)).toBe(0);
+			expect(offer).not.toHaveBeenCalled();
+		},
+	);
+
 	it("configures both desktop-only coding clients for a non-pilot account", async () => {
 		writeFileSync(join(home, ".claude.json"), '{"theme":"dark"}');
 		writeFileSync(join(home, ".codex", "config.toml"), 'model = "fixture-model"\n');
 		let active: string[] = [];
-		const status = await runInstall(
-			options({
-				afterConfigure: async (_credentials, clients) => {
-					active = clients;
-				},
-			}),
-		);
+		const status = await runFixture({
+			afterConfigure: async (_credentials, clients) => {
+				active = clients;
+			},
+		});
 
 		expect(status).toBe(0);
-		expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"))).toEqual({
+		expect(readJson(join(home, ".claude.json"))).toEqual({
 			theme: "dark",
-			mcpServers: {
-				pharaoh: {
-					command: launch.command,
-					args: [
-						...launch.args,
-						"--feed-client",
-						"claude-code",
-						"--feed-registration",
-						expect.any(String),
-					],
-				},
-			},
+			mcpServers: { pharaoh: expectedClaudeRegistration() },
 		});
 		const codex = readFileSync(join(home, ".codex", "config.toml"), "utf8");
 		expect(codex).toContain('model = "fixture-model"');
@@ -199,13 +275,11 @@ describe("NPX developer install", () => {
 		const runtime = vi.fn(async () => launch);
 		const configured = vi.fn(() => []);
 		expect(
-			await runInstall(
-				options({
-					scope: undefined,
-					interactive: true,
-					dependencies: { choose: async () => null, authenticate, runtime, configure: configured },
-				}),
-			),
+			await runFixture({
+				scope: undefined,
+				interactive: true,
+				dependencies: { choose: async () => null, authenticate, runtime, configure: configured },
+			}),
 		).toBe(0);
 		expect(authenticate).not.toHaveBeenCalled();
 		expect(runtime).not.toHaveBeenCalled();
@@ -219,31 +293,29 @@ describe("NPX developer install", () => {
 		let extraScope: unknown;
 		const intent = vi.fn(() => CLAUDE_INTENT);
 		const enabled = vi.fn(async () => true);
-		const status = await runInstall(
-			options({
-				scope: "local",
-				cwd: join(root, "src"),
-				afterConfigure: async (_credentials, _clients, _note, scope) => {
-					extraScope = scope;
-				},
-				dependencies: {
-					discover: () => [
-						{ client: "claude-code", path: join(home, ".claude.json"), cli: "claude" },
-					],
-					resolveRoot: () => root,
-					configure: (targets, config, flags) =>
-						configureClients(targets, config, { home, ...flags }),
-					runtimeIntent: intent,
-					enableRuntime: enabled,
-					authenticate: async () => ({
-						credentials: { ...CREDENTIALS, runtime_session: RUNTIME_SESSION },
-						runtimeApprovals: [APPROVAL],
-					}),
-					verifiedRuntimeClients: () => ["claude-code"],
-					updateNotice: async () => {},
-				},
-			}),
-		);
+		const status = await runFixture({
+			scope: "local",
+			cwd: join(root, "src"),
+			afterConfigure: async (_credentials, _clients, _note, scope) => {
+				extraScope = scope;
+			},
+			dependencies: {
+				discover: () => [
+					{ client: "claude-code", path: join(home, ".claude.json"), cli: "claude" },
+				],
+				resolveRoot: () => root,
+				configure: (targets, config, flags) =>
+					configureClients(targets, config, { home, ...flags }),
+				runtimeIntent: intent,
+				enableRuntime: enabled,
+				authenticate: async () => ({
+					credentials: { ...CREDENTIALS, runtime_session: RUNTIME_SESSION },
+					runtimeApprovals: [APPROVAL],
+				}),
+				verifiedRuntimeClients: () => ["claude-code"],
+				updateNotice: async () => {},
+			},
+		});
 		expect(status).toBe(0);
 		const scope = { kind: "local", root };
 		expect(extraScope).toEqual(scope);
@@ -255,7 +327,7 @@ describe("NPX developer install", () => {
 			expect.any(Function),
 			{ scope },
 		);
-		const data = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"));
+		const data = readJson(join(home, ".claude.json"));
 		expect(data.mcpServers).toBeUndefined();
 		expect(data.projects[root].mcpServers.pharaoh.args).toEqual([
 			"/fixture/pharaoh.js",
@@ -286,25 +358,23 @@ describe("NPX developer install", () => {
 			expect(targets.map((target) => target.client)).toEqual(["claude-code"]);
 			return [];
 		});
-		const status = await runInstall(
-			options({
-				scope: "local",
-				cwd: root,
-				preflightScope: extras,
-				dependencies: {
-					discover: () => [
-						{ client: "claude-code", path: join(home, ".claude.json"), cli: "claude" },
-						{ client: "claude-desktop", path: desktopPath },
-						{ client: "codex", path: codexPath },
-					],
-					resolveRoot: () => root,
-					preflightScope: preflight,
-					configure: (targets, config, flags) =>
-						configureClients(targets, config, { home, ...flags }),
-					updateNotice: async () => {},
-				},
-			}),
-		);
+		const status = await runFixture({
+			scope: "local",
+			cwd: root,
+			preflightScope: extras,
+			dependencies: {
+				discover: () => [
+					{ client: "claude-code", path: join(home, ".claude.json"), cli: "claude" },
+					{ client: "claude-desktop", path: desktopPath },
+					{ client: "codex", path: codexPath },
+				],
+				resolveRoot: () => root,
+				preflightScope: preflight,
+				configure: (targets, config, flags) =>
+					configureClients(targets, config, { home, ...flags }),
+				updateNotice: async () => {},
+			},
+		});
 		expect(status).toBe(0);
 		expect(preflight).toHaveBeenCalledTimes(2);
 		for (const [targets] of preflight.mock.calls)
@@ -312,10 +382,7 @@ describe("NPX developer install", () => {
 		expect(extras).toHaveBeenCalledTimes(2);
 		expect(readFileSync(desktopPath, "utf8")).toBe(desktop);
 		expect(readFileSync(codexPath, "utf8")).toBe(codex);
-		expect(
-			JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).projects[root].mcpServers.pharaoh
-				.args,
-		).toEqual([
+		expect(readJson(join(home, ".claude.json")).projects[root].mcpServers.pharaoh.args).toEqual([
 			...launch.args,
 			"--install-scope",
 			"local",
@@ -404,7 +471,7 @@ describe("NPX developer install", () => {
 		const choose = vi.fn(async () => 1);
 		const startAgent = vi.fn(async () => true);
 		const dependencies = { ask, choose, startAgent };
-		expect(await runInstall(options({ dependencies }, ["claude", "codex"]))).toBe(0);
+		expect(await runFixture({ dependencies }, ["claude", "codex"])).toBe(0);
 		// The whole summary: who's connected, the hook Codex has to trust, then one command per agent.
 		expect(output).toHaveLength(4);
 		expect(output.slice(2)).toEqual([
@@ -415,15 +482,16 @@ describe("NPX developer install", () => {
 		output.length = 0;
 		const reused = async () => ({ credentials: CREDENTIALS, reused: true as const });
 		expect(
-			await runInstall(
-				options({ dependencies: { ...dependencies, authenticate: reused } }, ["claude", "codex"]),
-			),
+			await runFixture({ dependencies: { ...dependencies, authenticate: reused } }, [
+				"claude",
+				"codex",
+			]),
 		).toBe(0);
 		expect(output.at(-1)).toBe(
 			`Restart Claude Code and Codex to use Pharaoh ${getPackageVersion()}.`,
 		);
 		expect(output.filter((line) => line.startsWith("Start:"))).toEqual([]);
-		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
+		expect(await runFixture({ interactive: true, dependencies })).toBe(0);
 		expect([ask, choose, startAgent].map((fn) => fn.mock.calls.length)).toEqual([0, 0, 0]);
 		const tty = { isTTY: true };
 		expect(canStartAgent({}, tty, tty)).toBe(true);
@@ -441,11 +509,11 @@ describe("NPX developer install", () => {
 		const dependencies = { choose, startAgent: vi.fn(async () => true) };
 		const desktopLines = () =>
 			output.filter((line) => line.includes("Claude Desktop") && line.includes(SETUP_TOOL_PROMPT));
-		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
+		expect(await runFixture({ interactive: true, dependencies })).toBe(0);
 		expect(choose).not.toHaveBeenCalled();
 		expect(desktopLines()).toHaveLength(1);
 		output.length = 0;
-		expect(await runInstall(options({ interactive: true, dependencies }, ["claude"]))).toBe(0);
+		expect(await runFixture({ interactive: true, dependencies }, ["claude"])).toBe(0);
 		expect(choose).toHaveBeenCalledTimes(1);
 		expect(desktopLines()).toHaveLength(1);
 	});
@@ -495,9 +563,9 @@ describe("NPX developer install", () => {
 			restartDesktop: (target: ClientTarget, config: LaunchConfig, flags: object) =>
 				restartDesktop(target, config, { ...desktop, ...flags }),
 		};
-		expect(await runInstall(options({ interactive: true, dependencies }))).toBe(0);
+		expect(await runFixture({ interactive: true, dependencies })).toBe(0);
 		expect(ask).toHaveBeenLastCalledWith(expect.stringContaining("Restart it now?"));
-		expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.pharaoh).toEqual(launch);
+		expect(readJson(config).mcpServers.pharaoh).toEqual(launch);
 		expect(output.join("\n")).toContain("Claude Desktop: open it and ask");
 		// Inside Desktop's own terminal it can't restart: no question, and the summary says what to do.
 		open = true;
@@ -505,7 +573,7 @@ describe("NPX developer install", () => {
 		output.length = 0;
 		ask.mockClear();
 		const inside = { ...dependencies, canRestartDesktop: () => false };
-		expect(await runInstall(options({ interactive: true, dependencies: inside }))).toBe(0);
+		expect(await runFixture({ interactive: true, dependencies: inside })).toBe(0);
 		expect(ask.mock.calls.map(([question]) => question)).not.toContainEqual(
 			expect.stringContaining("Restart"),
 		);
@@ -537,7 +605,7 @@ describe("NPX developer install", () => {
 					...flags,
 				}),
 		};
-		expect(await runInstall(options({ interactive: true, dependencies: declined }))).toBe(0);
+		expect(await runFixture({ interactive: true, dependencies: declined })).toBe(0);
 		// Done with the terminal: no key listener left, back out of raw mode.
 		expect(tty.listenerCount("data")).toBe(0);
 		expect(tty.setRawMode).toHaveBeenLastCalledWith(false);
@@ -591,9 +659,9 @@ describe("NPX developer install", () => {
 		const pharaoh = {
 			hooks: [{ type: "command", command: "'hook.mjs' --pharaoh-local-worktree-v1" }],
 		};
-		writeFileSync(hooks, JSON.stringify({ hooks: { PreToolUse: [own, pharaoh] } }));
+		writeJson(hooks, { hooks: { PreToolUse: [own, pharaoh] } });
 		expect(codexHookUntrusted(codex)).toBe(true);
-		expect(await runInstall(options())).toBe(0);
+		expect(await runFixture()).toBe(0);
 		expect(output.filter((line) => line.includes("/hooks"))).toHaveLength(1);
 		// Trusting Pharaoh's position is enough: the user's own untrusted hook isn't ours to raise.
 		const trusted = `[hooks.state."${hooks}:pre_tool_use:1:0"]\ntrusted_hash = "sha256:fixture"\n`;
@@ -602,7 +670,7 @@ describe("NPX developer install", () => {
 		expect(codexHookUntrusted(codex)).toBe(true);
 		const notice = `[hooks.state."${hooks}:session_start:0:0"]\ntrusted_hash = "sha256:fixture"\n`;
 		writeFileSync(join(codex, "config.toml"), trusted + notice);
-		const allHooks = JSON.parse(readFileSync(hooks, "utf8")).hooks as Record<
+		const allHooks = readJson(hooks).hooks as Record<
 			string,
 			Array<{ hooks: Array<{ command: string }> }>
 		>;
@@ -634,7 +702,7 @@ describe("NPX developer install", () => {
 		expect(
 			await startAgent({ client: "codex", command: process.execPath, args: ["-e", script] }),
 		).toBe(true);
-		const env = JSON.parse(readFileSync(seen, "utf8"));
+		const env = readJson(seen);
 		expect(env.NPM_TOKEN).toBe("kept");
 		expect(env.npm_config_registry).toBe("https://registry.example/");
 		expect(env).not.toHaveProperty("npm_config_yes");
@@ -671,7 +739,7 @@ describe("NPX developer install", () => {
 						"2.1.318",
 						approval.generation,
 					);
-					writeFileSync(settings, JSON.stringify(hookOnly));
+					writeJson(settings, hookOnly);
 					throw new Error("Private enrollment ticket must stay out of the install transcript");
 				}
 				return true;
@@ -692,7 +760,7 @@ describe("NPX developer install", () => {
 				},
 				verifiedRuntimeClients: ({ runningLaunch } = {}) => {
 					if (runningLaunch?.args[0] !== launch.args[0]) return [];
-					const claude = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"));
+					const claude = readJson(join(home, ".claude.json"));
 					const codex = readFileSync(join(home, ".codex", "config.toml"), "utf8");
 					return claude.mcpServers.pharaoh.args[0] === launch.args[0] &&
 						codex.includes(launch.args[0])
@@ -734,14 +802,14 @@ describe("NPX developer install", () => {
 		expect(enableRuntime).toHaveBeenCalledTimes(2);
 		expect(permissionChecks).toEqual(["no-settings", "runtime-hooks-only"]);
 		// The update notice the second install added doesn't opt the person in either.
-		expect(JSON.stringify(JSON.parse(readFileSync(settings, "utf8")).hooks.SessionStart)).toContain(
+		expect(JSON.stringify(readJson(settings).hooks.SessionStart)).toContain(
 			"--pharaoh-update-notice-v1",
 		);
 		expect(allowReadTools(home)).toBe("runtime-hooks-only");
-		expect(JSON.parse(readFileSync(settings, "utf8"))).not.toHaveProperty("permissions");
+		expect(readJson(settings)).not.toHaveProperty("permissions");
 		// Nor do saved-worktree hooks alone.
 		const worktree = { type: "command", command: "'node' 'hook.mjs' --pharaoh-local-worktree-v1" };
-		writeFileSync(settings, JSON.stringify({ hooks: { Stop: [{ hooks: [worktree] }] } }));
+		writeJson(settings, { hooks: { Stop: [{ hooks: [worktree] }] } });
 		expect(allowReadTools(home)).toBe("runtime-hooks-only");
 	});
 
@@ -761,7 +829,7 @@ describe("NPX developer install", () => {
 		const entry = join(root, "dist", "index.js");
 		writeFileSync(entry, "");
 		writeFileSync(join(root, "runtime", "runtime-client.mjs"), "");
-		writeFileSync(join(root, "package.json"), JSON.stringify({ name: PACKAGE_NAME, version }));
+		writeJson(join(root, "package.json"), { name: PACKAGE_NAME, version });
 		const projects = { "/repo": { disabledMcpServers: ["pharaoh"] } };
 		const enableRuntime = vi.fn(async () => true);
 		const install = options({
@@ -770,7 +838,7 @@ describe("NPX developer install", () => {
 				runtimeIntent: (client) => (client === "claude-code" ? CLAUDE_INTENT : null),
 				authenticate: async (_server, intents) => {
 					expect(intents).toEqual([CLAUDE_INTENT]);
-					writeFileSync(join(home, ".claude.json"), JSON.stringify({ projects }));
+					writeJson(join(home, ".claude.json"), { projects });
 					return {
 						credentials: { ...CREDENTIALS, runtime_session: RUNTIME_SESSION },
 						runtimeApprovals: [APPROVAL],
@@ -792,7 +860,7 @@ describe("NPX developer install", () => {
 		expect(output.join("\n")).toContain(
 			"runtime analytics skipped. Review the client and project settings",
 		);
-		expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"))).toMatchObject({
+		expect(readJson(join(home, ".claude.json"))).toMatchObject({
 			projects,
 			mcpServers: { pharaoh: { args: [entry] } },
 		});
@@ -801,15 +869,11 @@ describe("NPX developer install", () => {
 	it("reports the recovery command when ordinary sign-in returns no runtime ticket", async () => {
 		const enableRuntime = vi.fn(async () => true);
 		expect(
-			await runInstall(
-				options({
-					dependencies: {
-						runtimeIntent: (client) => (client === "claude-code" ? CLAUDE_INTENT : null),
-						verifiedRuntimeClients: () => ["claude-code"],
-						enableRuntime,
-					},
-				}),
-			),
+			await installWith({
+				runtimeIntent: (client) => (client === "claude-code" ? CLAUDE_INTENT : null),
+				verifiedRuntimeClients: () => ["claude-code"],
+				enableRuntime,
+			}),
 		).toBe(0);
 		expect(enableRuntime).not.toHaveBeenCalled();
 		expect(output.join("\n")).toContain("runtime analytics could not be enabled");
@@ -820,23 +884,21 @@ describe("NPX developer install", () => {
 		const disabled: string[] = [];
 		const runtimeIntent = vi.fn(() => CLAUDE_INTENT);
 		expect(
-			await runInstall(
-				options({
-					skipRuntime: true,
-					dependencies: {
-						runtimeIntent,
-						disableRuntime: async (client) => {
-							disabled.push(client);
-							return client === "codex" ? "disabled" : "cleanup_pending";
-						},
-						authenticate: async (_server, intents) => {
-							expect(disabled).toEqual(["claude-code", "codex"]);
-							expect(intents).toEqual([]);
-							return { credentials: CREDENTIALS };
-						},
+			await runFixture({
+				skipRuntime: true,
+				dependencies: {
+					runtimeIntent,
+					disableRuntime: async (client) => {
+						disabled.push(client);
+						return client === "codex" ? "disabled" : "cleanup_pending";
 					},
-				}),
-			),
+					authenticate: async (_server, intents) => {
+						expect(disabled).toEqual(["claude-code", "codex"]);
+						expect(intents).toEqual([]);
+						return { credentials: CREDENTIALS };
+					},
+				},
+			}),
 		).toBe(0);
 		expect(runtimeIntent).not.toHaveBeenCalled();
 		expect(output.join("\n")).toContain("runtime analytics is off locally");
@@ -845,15 +907,13 @@ describe("NPX developer install", () => {
 	it("fails an explicit install opt-out when the local choice could not be saved", async () => {
 		const authenticate = vi.fn(async () => ({ credentials: CREDENTIALS }));
 		expect(
-			await runInstall(
-				options({
-					skipRuntime: true,
-					dependencies: {
-						disableRuntime: async () => "not_saved",
-						authenticate,
-					},
-				}),
-			),
+			await runFixture({
+				skipRuntime: true,
+				dependencies: {
+					disableRuntime: async () => "not_saved",
+					authenticate,
+				},
+			}),
 		).toBe(1);
 		expect(authenticate).not.toHaveBeenCalled();
 		expect(output.join("\n")).toContain("could not save the runtime analytics off choice");
@@ -902,26 +962,22 @@ describe("NPX developer install", () => {
 		);
 		writeFileSync(join(root, "current.json"), '{"version":"0.3.81"}');
 		writeFileSync(join(root, "pending.json"), '{"version":"0.3.82"}');
-		const status = await runInstall(
-			options({
-				dependencies: {
-					runtime: async () => ({
-						command: process.execPath,
-						args: [join(pkg, "dist", "index.js")],
-					}),
-				},
+		const status = await installWith({
+			runtime: async () => ({
+				command: process.execPath,
+				args: [join(pkg, "dist", "index.js")],
 			}),
-		);
+		});
 		expect(status).toBe(0);
 		const launcher = join(root, "launcher-v1.mjs");
 		expect(readFileSync(launcher)).toEqual(launcherSource);
-		expect(JSON.parse(readFileSync(join(root, "current.json"), "utf8"))).toMatchObject({
+		expect(readJson(join(root, "current.json"))).toMatchObject({
 			version: "0.3.83",
 			previous: "0.3.81",
 		});
 		// A staged update no newer than what was just installed is dropped.
 		expect(existsSync(join(root, "pending.json"))).toBe(false);
-		const claude = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh;
+		const claude = readJson(join(home, ".claude.json")).mcpServers.pharaoh;
 		expect(claude.args).toEqual([launcher]);
 		expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain(launcher);
 	});
@@ -929,15 +985,11 @@ describe("NPX developer install", () => {
 	it("prepares the runtime before any client configuration changes", async () => {
 		const original = '{"theme":"light"}';
 		writeFileSync(join(home, ".claude.json"), original);
-		const status = await runInstall(
-			options({
-				dependencies: {
-					runtime: async () => {
-						throw new Error("fixture registry password must not be printed");
-					},
-				},
-			}),
-		);
+		const status = await installWith({
+			runtime: async () => {
+				throw new Error("fixture registry password must not be printed");
+			},
+		});
 		expect(status).toBe(1);
 		expect(readFileSync(join(home, ".claude.json"), "utf8")).toBe(original);
 		expect(output.join("\n")).not.toContain("fixture registry password");
@@ -972,9 +1024,7 @@ describe("NPX developer install", () => {
 				finishRuntime = () => resolve(launch);
 			});
 		};
-		const install = runInstall(
-			options({ dependencies: { ...dependencies, runtime: downloading } }),
-		);
+		const install = installWith({ ...dependencies, runtime: downloading });
 		await vi.waitFor(() => expect(runtimeStarted).toBe(true));
 		// Nothing draws or prints over the sign-in prompt.
 		expect(events).toEqual([]);
@@ -996,16 +1046,12 @@ describe("NPX developer install", () => {
 		const failing = async () => {
 			throw new RuntimeSetupError("Pharaoh could not install its exact-version runtime.");
 		};
-		const status = await runInstall(
-			options({
-				dependencies: {
-					...dependencies,
-					authenticate: async () => ({ credentials: CREDENTIALS }),
-					runtime: failing,
-					configure,
-				},
-			}),
-		);
+		const status = await installWith({
+			...dependencies,
+			authenticate: async () => ({ credentials: CREDENTIALS }),
+			runtime: failing,
+			configure,
+		});
 		expect(status).toBe(1);
 		expect(configure).not.toHaveBeenCalled();
 		expect(events).toContain("stop");
@@ -1024,11 +1070,7 @@ describe("NPX developer install", () => {
 			throw new Error("sign-in refused");
 		};
 		expect(
-			await runInstall(
-				options({
-					dependencies: { ...dependencies, authenticate: refused, runtime: pending, configure },
-				}),
-			),
+			await installWith({ ...dependencies, authenticate: refused, runtime: pending, configure }),
 		).toBe(1);
 		expect(preparation?.aborted).toBe(true);
 		expect(configure).not.toHaveBeenCalled();
@@ -1091,7 +1133,7 @@ describe("NPX developer install", () => {
 		const claude = join(home, ".claude", "settings.json");
 		const codex = join(home, ".codex", "hooks.json");
 		const own = { hooks: [{ type: "command", command: "own-hook" }] };
-		writeFileSync(claude, JSON.stringify({ hooks: { SessionStart: [own] } }));
+		writeJson(claude, { hooks: { SessionStart: [own] } });
 		// On Windows the analyzer lookup sets up the private-path check hook settings need.
 		const order: string[] = [];
 		const dependencies = {
@@ -1104,10 +1146,9 @@ describe("NPX developer install", () => {
 				await installUpdateNotice(clients, node, { home, env: {} });
 			},
 		};
-		expect(await runInstall(options({ dependencies }, ["claude", "codex"]))).toBe(0);
+		expect(await runFixture({ dependencies }, ["claude", "codex"])).toBe(0);
 		expect(order).toEqual(["analyzer", "notice"]);
-		const sessionStart = (path: string) =>
-			JSON.parse(readFileSync(path, "utf8")).hooks?.SessionStart;
+		const sessionStart = (path: string) => readJson(path).hooks?.SessionStart;
 		const hook = join(home, ".pharaoh", "update-notice-hook.mjs");
 		const groupsWith = (path: string, marker: string) =>
 			sessionStart(path)?.filter((group: { hooks: Array<{ command?: string }> }) =>
@@ -1136,11 +1177,11 @@ describe("NPX developer install", () => {
 		expect(readUpdateState(join(home, ".pharaoh"))).toEqual({ version: getPackageVersion() });
 		// A hook the person added after ours doesn't move ours: Codex records trust by position.
 		const later = { hooks: [{ type: "command", command: "later-hook" }] };
-		const settings = JSON.parse(readFileSync(claude, "utf8"));
+		const settings = readJson(claude);
 		settings.hooks.SessionStart.push(later);
-		writeFileSync(claude, JSON.stringify(settings));
+		writeJson(claude, settings);
 		const before = [readFileSync(claude, "utf8"), readFileSync(codex, "utf8")];
-		expect(await runInstall(options({}, ["claude", "codex"]))).toBe(0);
+		expect(await runFixture({}, ["claude", "codex"])).toBe(0);
 		expect([readFileSync(claude, "utf8"), readFileSync(codex, "utf8")]).toEqual(before);
 		for (const client of ["claude-code", "codex"] as const)
 			syncUpdateNoticeHook(client, null, { home, env: {} });
@@ -1219,29 +1260,17 @@ describe("NPX developer install", () => {
 	});
 
 	it("keeps a legacy pin without consent, then migrates on the explicit opt-in", async () => {
-		writeFileSync(
-			join(home, ".claude.json"),
-			JSON.stringify({
-				mcpServers: {
-					pharaoh: { command: "npx", args: ["@pharaoh-so/mcp@0.3.50"] },
-				},
-			}),
-		);
-		expect(await runInstall(options())).toBe(0);
+		writeJson(join(home, ".claude.json"), {
+			mcpServers: {
+				pharaoh: { command: "npx", args: ["@pharaoh-so/mcp@0.3.50"] },
+			},
+		});
+		expect(await runFixture()).toBe(0);
 		expect(readFileSync(join(home, ".claude.json"), "utf8")).toContain("@pharaoh-so/mcp@0.3.50");
 		expect(output.join("\n")).toContain("install --migrate-legacy");
-		expect(await runInstall(options({ migrateLegacy: true }))).toBe(0);
-		expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh).toEqual(
-			{
-				command: launch.command,
-				args: [
-					...launch.args,
-					"--feed-client",
-					"claude-code",
-					"--feed-registration",
-					expect.any(String),
-				],
-			},
+		expect(await runFixture({ migrateLegacy: true })).toBe(0);
+		expect(readJson(join(home, ".claude.json")).mcpServers.pharaoh).toEqual(
+			expectedClaudeRegistration(),
 		);
 	});
 
@@ -1252,20 +1281,11 @@ describe("NPX developer install", () => {
 		const path =
 			broken === "codex" ? join(home, ".codex", "config.toml") : join(home, ".claude.json");
 		writeFileSync(path, "malformed configuration");
-		expect(await runInstall(options())).toBe(1);
+		expect(await runFixture()).toBe(1);
 		if (broken === "codex")
-			expect(
-				JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).mcpServers.pharaoh,
-			).toEqual({
-				command: launch.command,
-				args: [
-					...launch.args,
-					"--feed-client",
-					"claude-code",
-					"--feed-registration",
-					expect.any(String),
-				],
-			});
+			expect(readJson(join(home, ".claude.json")).mcpServers.pharaoh).toEqual(
+				expectedClaudeRegistration(),
+			);
 		else
 			expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain(
 				"[mcp_servers.pharaoh]",
@@ -1275,28 +1295,23 @@ describe("NPX developer install", () => {
 	});
 
 	it("keeps disabled/custom clients out of optional memory and skill activation", async () => {
-		writeFileSync(
-			join(home, ".claude.json"),
-			JSON.stringify({
-				mcpServers: {
-					pharaoh: { command: "npx", args: ["@pharaoh-so/mcp@0.3.50"], disabled: true },
-				},
-			}),
-		);
+		writeJson(join(home, ".claude.json"), {
+			mcpServers: {
+				pharaoh: { command: "npx", args: ["@pharaoh-so/mcp@0.3.50"], disabled: true },
+			},
+		});
 		writeFileSync(
 			join(home, ".codex", "config.toml"),
 			'[mcp_servers.pharaoh]\nurl = "https://custom.example/mcp"\n',
 		);
 		let active: string[] = ["unexpected"];
 		expect(
-			await runInstall(
-				options({
-					migrateLegacy: true,
-					afterConfigure: async (_credentials, clients) => {
-						active = clients;
-					},
-				}),
-			),
+			await runFixture({
+				migrateLegacy: true,
+				afterConfigure: async (_credentials, clients) => {
+					active = clients;
+				},
+			}),
 		).toBe(0);
 		expect(active).toEqual([]);
 	});
@@ -1305,21 +1320,17 @@ describe("NPX developer install", () => {
 	// code and a runtime download, or stops being told to run the install on the person's own computer.
 	it("stops before sign-in and runtime work on a computer with no coding agent", async () => {
 		const started: string[] = [];
-		const code = await runInstall(
-			options({
-				dependencies: {
-					discover: () => [],
-					authenticate: async () => {
-						started.push("sign-in");
-						return { credentials: CREDENTIALS };
-					},
-					runtime: async () => {
-						started.push("runtime");
-						return launch;
-					},
-				},
-			}),
-		);
+		const code = await installWith({
+			discover: () => [],
+			authenticate: async () => {
+				started.push("sign-in");
+				return { credentials: CREDENTIALS };
+			},
+			runtime: async () => {
+				started.push("runtime");
+				return launch;
+			},
+		});
 		expect([code, started]).toEqual([1, []]);
 		expect(output.join("\n")).toContain("Run it on their computer instead");
 	});
