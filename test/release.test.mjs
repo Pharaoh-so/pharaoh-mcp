@@ -380,6 +380,23 @@ test("memory client settings ship only once the verified source declares them", 
 	);
 });
 
+test("the change review completion mod and installer must ship together from verified source", () => {
+	const assets = ["hooks/change-review-completion.js", "project-memory/change-review-plugin.mjs"];
+	const complete = [...paths, ...assets];
+	verifyPackPaths(paths, [], paths);
+	verifyPackPaths(complete, [], complete);
+	for (const missing of assets) {
+		const partial = complete.filter((path) => path !== missing);
+		assert.throws(() => verifyPackPaths(partial, [], complete), /Missing Change review completion/);
+		assert.throws(() => verifyPackPaths(complete, [], partial), /incomplete in the verified source/);
+	}
+	assert.throws(() => verifyPackPaths(complete), /verified source/);
+	assert.throws(
+		() => verifyPackPaths([...complete, "hooks/unlisted.js"], [], complete),
+		/Unexpected npm file/,
+	);
+});
+
 test("change review is optional until introduced, then requires its complete source-bound runtime", () => {
 	const review = [
 		"project-memory/change-review.d.mts",
