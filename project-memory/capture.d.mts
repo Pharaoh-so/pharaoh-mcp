@@ -25,7 +25,11 @@ export function beginTurn(input: HookInput, options: CaptureOptions): void;
 export function recordToolEvent(input: HookInput, options: CaptureOptions): string | undefined;
 export function stopDecision(
 	input: HookInput,
-	options: CaptureOptions & { launch?: (path: string) => void },
+	options: CaptureOptions & {
+		launch?: (path: string) => void;
+		/** Only after the local review verifier confirms the same current tree/test digests. */
+		verifiedCheck?: { paths: string[]; check: string; evidence: string };
+	},
 ): { decision?: "block"; reason?: string; systemMessage?: string } | undefined;
 export function sendCapture(
 	path: string,
@@ -37,3 +41,9 @@ export function undoLastCapture(options?: {
 	/** The sign-in refresh module (dist/refresh.js) when run outside an installed bundle. */
 	helper?: unknown;
 }): Promise<{ undone: number; repo: string | undefined }>;
+
+/** Mark the optional memory summary deferred until the one review continuation completes. */
+export function deferCaptureForReview(
+	input: HookInput,
+	options: CaptureOptions,
+): string | undefined;

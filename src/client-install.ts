@@ -185,7 +185,11 @@ function availableCli(options: ClientInstallOptions, command: string): boolean {
 
 function cliVersion(options: ClientInstallOptions, command: string): string | null {
 	try {
-		return execute(options, command, ["--version"]).match(/\b\d+\.\d+\.\d+\b/)?.[0] ?? null;
+		return (
+			execute(options, command, ["--version"]).match(
+				/\b\d+\.\d+\.\d+(?:-[a-z\d.-]+)?(?:\+[a-z\d.-]+)?(?=\s|\)|$)/i,
+			)?.[0] ?? null
+		);
 	} catch {
 		return null;
 	}
@@ -1541,6 +1545,8 @@ export function verifiedCodingClients(
 	options: ClientInstallOptions & {
 		runningLaunch?: LaunchConfig;
 		requiredProxy?: { minimumVersion: string; server: string };
+		/** Require the managed launch to carry this native feed registration. */
+		requiredFeedRegistration?: string;
 		rejectProjectOverrides?: boolean;
 		/** Checkout whose project override can suppress automatic repair. */
 		projectRoot?: string;
@@ -1583,6 +1589,8 @@ export function verifiedCodingClients(
 					projectOverrides(document, options.projectRoot)) ||
 				!persistentLaunch(value) ||
 				!owned(target, value, data) ||
+				(options.requiredFeedRegistration &&
+					proxyLaunchOptions(value.args)?.registration !== options.requiredFeedRegistration) ||
 				(options.runningLaunch && !sameRunningRuntime(value, options.runningLaunch)) ||
 				(target.scope?.kind === "local" &&
 					options.runningLaunch &&

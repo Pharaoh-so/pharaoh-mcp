@@ -18,6 +18,7 @@ import { resetHookPreferences, setMemoryCapture } from "../project-memory/prefer
 import {
 	applyMemoryHookChoices,
 	chooseMemoryHooks,
+	configureChangeReview,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
 import { AuthRequiredBackend, createSseBackend } from "./backend.js";
@@ -37,6 +38,7 @@ import {
 	describeAgentInstructionOutcome,
 	describeAllowReadTools,
 	offerAgentInstructionLines,
+	offerNativeDelegationGuidance,
 	runInstallSkills,
 } from "./install-skills.js";
 import type { ClientId, InstallScope } from "./install-types.js";
@@ -311,6 +313,43 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	if (args.includes("--enable-change-review") || args.includes("--disable-change-review")) {
+		if (args.includes("--enable-change-review") && args.includes("--disable-change-review")) {
+			printLines("Pharaoh: choose enable or disable change review, not both.");
+			process.exitCode = 2;
+			return;
+		}
+		const clientIndex = args.indexOf("--client");
+		if (clientIndex >= 0 && args[clientIndex + 1] !== "claude-code") {
+			printLines("Pharaoh: change review currently supports Claude Code only.");
+			process.exitCode = 2;
+			return;
+		}
+		const selected = installScopeArguments(args);
+		let scope: InstallScope = { kind: "global" };
+		if (selected.kind === "local") {
+			const root = gitWorktreeRoot(selected.path ?? process.cwd());
+			if (!root) throw new Error("Local review needs a Git checkout.");
+			scope = { kind: "local", root };
+		}
+		setMemoryInstallScope(scope);
+		const enabled = args.includes("--enable-change-review");
+		try {
+			configureChangeReview(enabled, { credentials: readCredentials() ?? undefined, scope });
+			printLines(
+				enabled
+					? "Pharaoh: automatic change review is on for this Claude Code installation. Restart Claude Code to load its hooks."
+					: "Pharaoh: automatic change review is off for this installation.",
+			);
+		} catch (error) {
+			printLines(
+				`Pharaoh: ${error instanceof Error ? error.message : "Could not update change review."}`,
+			);
+			process.exitCode = 1;
+		}
+		return;
+	}
+
 	if (args.includes("--disable-memory-capture")) {
 		try {
 			setMemoryCapture(false);
@@ -349,21 +388,34 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	if (args.includes("--disable-native-context") || args.includes("--enable-native-context")) {
-		const { setNativeFeedEnabled, syncNativeFeedHooks } = await import("../runtime/feed-hooks.mjs");
-		const enabled = args.includes("--enable-native-context");
+	const contextChoice = args.filter((arg) =>
+		/^--(?:enable|disable)-native-context(?:-preview)?$/.test(arg),
+	);
+	if (contextChoice.length) {
+		if (contextChoice.length !== 1) throw new Error("Choose one native context switch.");
+		const { setNativeFeedEnabled, setNativeFeedPreviewEnabled, syncNativeFeedHooks } = await import(
+			"../runtime/feed-hooks.mjs"
+		);
+		const enabled = contextChoice[0].startsWith("--enable-");
+		const preview = contextChoice[0].endsWith("-preview");
 		const clientIndex = args.indexOf("--client");
 		const selected = clientIndex < 0 ? ["codex", "claude-code"] : [args[clientIndex + 1]];
 		if (selected.some((client) => client !== "codex" && client !== "claude-code"))
 			throw new Error("Invalid native context client.");
 		for (const client of selected) {
-			setNativeFeedEnabled(client as "codex" | "claude-code", enabled);
-			if (!enabled) syncNativeFeedHooks(client as "codex" | "claude-code", null);
+			const adapter = client as "codex" | "claude-code";
+			if (preview) setNativeFeedPreviewEnabled(adapter, enabled);
+			else {
+				setNativeFeedEnabled(adapter, enabled);
+				if (!enabled) syncNativeFeedHooks(adapter, null);
+			}
 		}
 		printLines(
-			enabled
-				? "Pharaoh: native context enabled. Run the install command to restore its hooks."
-				: "Pharaoh: native context disabled.",
+			preview
+				? `Pharaoh: native context preview ${enabled ? "enabled" : "disabled"}.`
+				: enabled
+					? "Pharaoh: native context enabled. Run the install command to restore its hooks."
+					: "Pharaoh: native context disabled.",
 		);
 		return;
 	}
@@ -469,6 +521,19 @@ async function main(): Promise<void> {
 			},
 			migrateLegacy: args.includes("--migrate-legacy"),
 			skipRuntime: args.includes("--skip-runtime"),
+			...(explicitInstall &&
+				args.includes("--native-delegation") && {
+					offerNativeDelegation: async (client, version, eligible) => {
+						const result = await offerNativeDelegationGuidance(
+							client,
+							(question) => askYesNo(question, undefined, undefined, false),
+							Boolean(process.stdin.isTTY && process.stderr.isTTY),
+							eligible,
+						);
+						const note = result && describeAgentInstructionOutcome(result);
+						return note ? `${note} Detected CLI build ${version}.` : null;
+					},
+				}),
 			// Questions print as they're asked; the outcomes wait for the install summary.
 			afterConfigure: async (credentials, clients, note, scope) => {
 				setMemoryInstallScope(scope);

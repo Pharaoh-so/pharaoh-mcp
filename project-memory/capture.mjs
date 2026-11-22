@@ -42,7 +42,7 @@ const CODE_FILE =
 	/\.(?:[cm]?[jt]s|[jt]sx|py|go|rs|java|kt|kts|scala|rb|php|cs|swift|c|cc|cpp|cxx|h|hh|hpp|m|mm|ex|exs|vue|svelte|dart|lua|sh)$/i;
 /** Commands that check code: test runners, type checkers, linters and builds. */
 const CHECK =
-	/^(?:(?:npm|pnpm|yarn|bun)(?: run)? (?:test|lint|check|typecheck|type-check|tsc|build|verify)(?::[\w:-]+)?|(?:npx|pnpm exec|pnpm dlx|yarn dlx|bunx) (?:vitest|jest|tsc|biome|eslint|mocha|playwright test)|vitest|jest|mocha|tsc|eslint|biome (?:check|lint|ci)|node --test|deno (?:test|check|lint)|bun test|pytest|python3? -m (?:pytest|unittest|mypy)|mypy|ruff check|go (?:test|vet|build)|cargo (?:test|check|clippy|build)|make (?:test|check|lint)|mvn (?:test|verify)|(?:\.\/)?gradlew? (?:test|check)|dotnet test|(?:bundle exec )?rspec|phpunit|mix test)(?:\s|$)/;
+	/^(?:(?:npm|pnpm|yarn|bun)(?: run)? (?:test|lint|check|typecheck|type-check|tsc|build|verify)(?::[\w:-]+)?|(?:npx|pnpm exec|pnpm dlx|yarn dlx|bunx) (?:vitest|jest|tsc|biome|eslint|mocha|playwright test)|vitest|jest|mocha|tsc|eslint|biome (?:check|lint|ci)|node node_modules\/vitest\/vitest\.mjs|node --test|deno (?:test|check|lint)|bun test|pytest|python3? -m (?:pytest|unittest|mypy)|mypy|ruff check|go (?:test|vet|build)|cargo (?:test|check|clippy|build)|make (?:test|check|lint)|mvn (?:test|verify)|(?:\.\/)?gradlew? (?:test|check)|dotnet test|(?:bundle exec )?rspec|phpunit|mix test)(?:\s|$)/;
 /** Credential-shaped text: known token prefixes, or a secret-named option or variable with a value. */
 const SECRET_SHAPED =
 	/\b(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|AKIA|ASIA|glpat-|npm_)|(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential)\w*\s*[=:]/i;
@@ -294,11 +294,11 @@ export function recordToolEvent(
 		(previous) => {
 			const fresh = !previous || previous.turn !== turn || previous.expires <= now;
 			const state = fresh ? freshState(input, target, turn, now) : previous;
-			if (state.asked || state.repo !== target.repo) return;
+			if (state.repo !== target.repo) return;
 			// A check also looks at the worktree, for edits made without an edit tool.
 			const scanned = entry.check ? withWorktreeEdits(state, entry, now) : null;
 			const events = (scanned?.events ?? [...state.events, entry]).slice(-MAX_EVENTS);
-			const proof = canAsk && !state.cued && turnProof(events);
+			const proof = canAsk && !state.cued && !state.asked && turnProof(events);
 			return {
 				state: {
 					...state,
@@ -324,12 +324,45 @@ export function turnProof(events) {
 	return { paths, check: final.check, evidence: final.evidence };
 }
 
+/** Defer the optional memory summary until review finishes; it must never add a second Stop block. */
+export function deferCaptureForReview(
+	input,
+	{ client, target, directory, memorySession, binding, now = Date.now() },
+) {
+	if (!memorySession || memoryEgressDecision(binding, "capture") !== "normal") return;
+	const name = stateName(client, input);
+	const turn = turnId(input);
+	if (!name || !turn) return;
+	const needsPrompt = updateLocalState(
+		directory,
+		name,
+		(state) => {
+			if (!state || state.turn !== turn || state.repo !== target.repo || state.expires <= now)
+				return;
+			return {
+				state: { ...state, asked: true },
+				context: !state.cued && !state.asked,
+			};
+		},
+		now,
+	);
+	if (!needsPrompt) return;
+	return `After review and all tools finish, include the optional memory summary for ${target.repo}. ${memoryNoteInstruction()}`;
+}
+
+function memoryNoteInstruction() {
+	return [
+		"Pharaoh memory: <what you changed and where, naming the function or file, in one sentence>",
+		"Why: <the root cause or constraint behind it, specific enough to act on later; not just that a test failed>",
+		'If nothing here is worth remembering, write "Pharaoh memory: none". No code, secrets or personal details.',
+	].join("\n");
+}
+
 function askAgent(proof, repo, atStop) {
 	return [
 		`Pharaoh project memory: this turn changed ${proof.paths.join(", ")} and \`${proof.check}\` then passed. ${atStop ? "End your reply" : "When you finish, end your final reply"} with these two lines so later work in ${repo} remembers it:`,
-		"Pharaoh memory: <what you changed and where, naming the function or file, in one sentence>",
-		"Why: <the root cause or constraint behind it, specific enough to act on later; not just that a test failed>",
-		'If nothing here is worth remembering, write "Pharaoh memory: none". No code, secrets or personal details. Run no tools for this.',
+		memoryNoteInstruction(),
+		"Run no tools for this.",
 	].join("\n");
 }
 
@@ -407,7 +440,16 @@ export const OFF_COMMAND = "npx @pharaoh-so/mcp --disable-memory-capture";
  */
 export function stopDecision(
 	input,
-	{ client, target, directory, memorySession, binding, now = Date.now(), launch = launchSender },
+	{
+		client,
+		target,
+		directory,
+		memorySession,
+		binding,
+		now = Date.now(),
+		launch = launchSender,
+		verifiedCheck,
+	},
 ) {
 	const name = stateName(client, input);
 	const turn = turnId(input);
@@ -421,7 +463,28 @@ export function stopDecision(
 			if (!state || state.turn !== turn || state.expires <= now || state.repo !== target.repo)
 				return;
 			// An edit after the last check, by any means, leaves the turn unproven.
-			const proof = turnProof(withWorktreeEdits(state, null, now).events);
+			let events = withWorktreeEdits(state, null, now).events;
+			// Only the local review verifier can supply this after revalidating the final tree.
+			if (
+				verifiedCheck &&
+				Array.isArray(verifiedCheck.paths) &&
+				verifiedCheck.paths.length &&
+				verifiedCheck.paths.length <= MAX_PATHS &&
+				verifiedCheck.paths.every((path) => typeof path === "string") &&
+				typeof verifiedCheck.check === "string" &&
+				typeof verifiedCheck.evidence === "string"
+			) {
+				events = [
+					...events,
+					{ edit: verifiedCheck.paths },
+					{
+						check: verifiedCheck.check,
+						status: "pass",
+						evidence: verifiedCheck.evidence,
+					},
+				];
+			}
+			const proof = turnProof(events);
 			if (!proof) return { state: { ...state, events: [] } };
 			const message = input.last_assistant_message;
 			const note = parseNote(message);

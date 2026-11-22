@@ -2,6 +2,8 @@ import type { MemoryInstallScope } from "./install-scope.mjs";
 
 type MemoryCredentials = {
 	sse_url: string;
+	access_token?: string;
+	expires_at?: string;
 	project_memory?: Array<{ repo: string; revision: string | null }>;
 	project_memory_status?: "unavailable";
 	/** Set by a completed hint check; without it, no hint means "not checked yet". */
@@ -49,6 +51,8 @@ export function syncMemoryHooks(
 		graphClients?: string[];
 		diagnosticClients?: string[];
 		enable?: boolean;
+		/** Preserve handler removals while toggling only the change-review feature. */
+		preserveHandlers?: boolean;
 	},
 ): string[];
 
@@ -57,3 +61,6 @@ export function ensureMemoryHooks(
 	credentials: MemoryCredentials | null | undefined,
 	options?: MemoryHookSetup,
 ): string[];
+
+/** Enable or disable the selected existing Claude installation's automatic change review. */
+export function configureChangeReview(enabled: boolean, options?: MemoryHookSetup): string[];

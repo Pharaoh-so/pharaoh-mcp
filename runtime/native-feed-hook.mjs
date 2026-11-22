@@ -7,13 +7,23 @@ import {
 	deriveFeedCohortKey,
 	feedCheckoutIdentity,
 	feedServerOrigin,
+	nativeFeedPreviewEnabled,
 	readFeedBranch,
 	readFeedSignInGeneration,
 	resolveFeedCheckout,
 	resolveFeedProfile,
 } from "./feed-identity.mjs";
 import { launchFeedMaintenance } from "./feed-launcher.mjs";
-import { createFeedStore, FEED_PACKET_BYTES, formatFeedEvent } from "./feed-store.mjs";
+import {
+	boundHostedModuleWatch,
+	createFeedStore,
+	FEED_PACKET_BYTES,
+	formatFeedEvent,
+	HOSTED_MODULE_WATCH_KEY,
+	HOSTED_MODULE_WATCH_PREFIX,
+	hostedModuleWatchText,
+	isHostedFeedModule,
+} from "./feed-store.mjs";
 
 const EVENTS = new Set(["SessionStart", "UserPromptSubmit", "SubagentStart", "PostToolUse"]);
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -43,15 +53,22 @@ function failed(response) {
 		(response.isError === true || response.is_error === true || response.success === false)
 	);
 }
-function responseTexts(response) {
+function responseTexts(response, allowArray = false) {
 	if (typeof response === "string") return [response];
-	return record(response) && Array.isArray(response.content)
-		? response.content.flatMap((item) =>
+	const blocks = allowArray && Array.isArray(response) ? response : response?.content;
+	return Array.isArray(blocks)
+		? blocks.flatMap((item) =>
 				item?.type === "text" && typeof item.text === "string" ? [item.text] : [],
 			)
 		: [];
 }
-function observation(payload, client, checkout) {
+function matchesVerifiedRepo(value, repo, allowShort) {
+	if (typeof value !== "string" || !repo) return false;
+	const slug = repo.toLowerCase();
+	const selector = value.toLowerCase();
+	return selector === slug || (allowShort && selector === slug.split("/")[1]);
+}
+function observation(payload, client, checkout, repo) {
 	if (failed(payload.tool_response)) return null;
 	const input = record(payload.tool_input) ? payload.tool_input : {};
 	const tool = payload.tool_name;
@@ -76,23 +93,63 @@ function observation(payload, client, checkout) {
 		].map((match) => match[1]);
 		kind = "edit";
 	} else if (
-		typeof tool === "string" &&
-		/^mcp__pharaoh__(?:get_blast_radius|get_module_context|pharaoh_recon|search_functions)$/.test(
-			tool,
-		)
+		tool === "mcp__pharaoh__get_blast_radius" &&
+		input.entity_type === "file" &&
+		matchesVerifiedRepo(input.repo, repo, input.scope !== "hosted")
 	) {
-		// Only structured path selectors are retained; arbitrary query strings and tool text are not.
-		paths = [input.file, input.path, input.entity].filter(
-			(value) => typeof value === "string" && value.includes("/"),
-		);
+		// A file selector establishes interest, without asserting anything from the tool response.
+		paths = [input.entity];
+	} else if (
+		tool === "mcp__pharaoh__search_functions" &&
+		matchesVerifiedRepo(input.repo, repo, false) &&
+		typeof input.file === "string" &&
+		input.file.includes("/")
+	) {
+		// The hosted search also accepts substrings. Observe only path-shaped selectors.
+		paths = [input.file];
 	}
 	paths = [...new Set(paths.map((value) => pathReference(value, checkout)).filter(Boolean))];
 	return paths.length && paths.length <= 20 ? { paths, kind } : null;
 }
-function shareReceipt(payload) {
+function hostedModuleWatch(payload, client, repo) {
+	const input = payload.tool_input;
+	const response = payload.tool_response;
+	if (
+		payload.tool_name !== "mcp__pharaoh__get_module_context" ||
+		!record(input) ||
+		failed(response) ||
+		!matchesVerifiedRepo(input.repo, repo, false) ||
+		!isHostedFeedModule(input.module)
+	)
+		return null;
+	if (client === "claude-code" && Array.isArray(response)) {
+		if (response.length < 2) return null;
+		const expected = hostedModuleWatchText(repo, input.module);
+		let found = false;
+		for (const block of response) {
+			if (failed(block)) return null;
+			if (typeof block?.text !== "string" || !block.text.startsWith(HOSTED_MODULE_WATCH_PREFIX))
+				continue;
+			if (
+				found ||
+				!record(block) ||
+				block.type !== "text" ||
+				Object.keys(block).length !== 2 ||
+				block.text !== expected
+			)
+				return null;
+			found = true;
+		}
+		return found ? input.module : null;
+	}
+	if (!record(response?._meta)) return null;
+	const watch = boundHostedModuleWatch(response._meta[HOSTED_MODULE_WATCH_KEY], input);
+	return watch?.repo === repo ? watch.module : null;
+}
+function shareReceipt(payload, client) {
 	if (payload.tool_name !== "mcp__pharaoh__pharaoh_share" || failed(payload.tool_response))
 		return null;
-	for (const text of responseTexts(payload.tool_response)) {
+	for (const text of responseTexts(payload.tool_response, client === "claude-code")) {
 		if (text.length > 1024) continue;
 		try {
 			const value = JSON.parse(text);
@@ -162,14 +219,25 @@ export function runNativeFeedHook(payload, options) {
 		}
 		const scope = { cohort, rootId, agentId: child };
 		store.registerRecipient({ ...scope, checkout });
+		const proof = store.readAccessProof({ cohort });
 		if (event === "PostToolUse") {
-			const observed = observation(payload, options.client, checkout);
+			const observed = observation(payload, options.client, checkout, proof?.repo);
 			if (observed) store.recordObservation({ ...scope, ...observed });
-			const receiptId = shareReceipt(payload);
+			const receiptId = shareReceipt(payload, options.client);
 			if (receiptId) store.consumeShareReceipt({ ...scope, receiptId });
+			if (
+				proof &&
+				payload.tool_name === "mcp__pharaoh__get_module_context" &&
+				nativeFeedPreviewEnabled(options.client, options)
+			) {
+				const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
+				const watchProof = authorizationIdentity && store.readAccessProof({ cohort });
+				const module = watchProof && hostedModuleWatch(payload, options.client, watchProof.repo);
+				if (module && authorizationIdentity)
+					store.recordHostedModuleWatch({ ...scope, module, authorizationIdentity });
+			}
 		}
 		if (performance.now() - started < QUIET_MS) launch(job, now());
-		const proof = store.readAccessProof({ cohort });
 		if (
 			!proof ||
 			proof.checkout !== checkout ||
@@ -200,21 +268,53 @@ export function runNativeFeedHook(payload, options) {
 			...scope,
 			maxChars: MAX_OUTPUT - Buffer.byteLength(gap),
 			seedChars: Buffer.byteLength(seed),
+			preview: nativeFeedPreviewEnabled(options.client, options),
 		});
-		let context = batch?.events.map(formatFeedEvent).join("\n") ?? "";
-		if (batch?.gap) context = gap + context;
-		if (batch?.seedNeeded) context = seed + context;
 		if (
-			!context ||
-			Buffer.byteLength(context) > MAX_OUTPUT ||
-			performance.now() - started >= QUIET_MS ||
+			!batch ||
 			readFeedSignInGeneration(options) !== signIn ||
 			!store.readAccessProof({ cohort }) ||
-			!batch ||
 			batch.authorizationIdentity !== store.currentAuthorizationIdentity({ cohort }) ||
 			proof.checkoutIdentity !== feedCheckoutIdentity(checkout) ||
 			!sameBranch() ||
 			!resolveFeedProfile({ ...options, cohort, event, now: now() }).admit
+		)
+			return null;
+		const hostedIds = batch.events.filter((entry) => entry.hosted).map((entry) => entry.id);
+		const hostedCurrent = hostedIds.length
+			? new Set(
+					store.currentHostedModuleNoticeIds({
+						cohort,
+						authorizationIdentity: batch.authorizationIdentity,
+						ids: hostedIds,
+					}),
+				)
+			: undefined;
+		const previewStillEnabled =
+			(batch.hostedGap || batch.events.some((entry) => entry.previewOnly === true)) &&
+			nativeFeedPreviewEnabled(options.client, options);
+		const hostedGap = batch.hostedGap && previewStillEnabled;
+		const visible = batch.events.filter(
+			(entry) =>
+				entry.previewOnly !== true ||
+				(previewStillEnabled && (!entry.hosted || hostedCurrent?.has(entry.id))),
+		);
+		// Claims are independent. Only hide a fallback when its fact reached this packet.
+		const enriched = new Set(
+			visible
+				.filter((entry) => entry.previewOnly === true && entry.kind === "fact" && entry.dedupeKey)
+				.map((entry) => entry.dedupeKey),
+		);
+		const rendered = visible.filter(
+			(entry) => entry.kind !== "invalidation" || !enriched.has(entry.dedupeKey),
+		);
+		let context = rendered.map(formatFeedEvent).join("\n");
+		if (batch.gap || hostedGap) context = gap + context;
+		if (batch.seedNeeded) context = seed + context;
+		if (
+			!context ||
+			Buffer.byteLength(context) > MAX_OUTPUT ||
+			performance.now() - started >= QUIET_MS
 		)
 			return null;
 		const output = { hookSpecificOutput: { hookEventName: event, additionalContext: context } };
@@ -227,6 +327,10 @@ export function runNativeFeedHook(payload, options) {
 					...scope,
 					claimId: batch.claimId,
 					authorizationIdentity: batch.authorizationIdentity,
+					hostedGap,
+					hostedNoticeIds: hostedIds.length
+						? rendered.filter((entry) => entry.hosted).map((entry) => entry.id)
+						: undefined,
 				});
 			});
 		return output;

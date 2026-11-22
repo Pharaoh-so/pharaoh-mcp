@@ -1,9 +1,10 @@
+import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { memoryClientRoot } from "./client-settings.mjs";
 import { handleEvent, memoryReminder, skipMemoryPrompt } from "./hook-events.mjs";
-import { conversationMemoryBinding, protectLocalShellAttempt, readStdin } from "./local.mjs";
 import { memoryScopeMatches, setMemoryInstallScope } from "./install-scope.mjs";
+import { conversationMemoryBinding, protectLocalShellAttempt, readStdin } from "./local.mjs";
 import {
 	activeMemoryRuntime,
 	projectMemorySession,
@@ -15,6 +16,19 @@ import {
 // clock includes startup and imports, and no late network request can start.
 const deadline = 2_400;
 const exitQuietly = setTimeout(() => process.exit(0), Math.max(0, deadline - performance.now()));
+// One shared optional-review budget per native event, leaving time for existing memory behavior.
+let reviewDeadline;
+function reviewCall(runtime, method, input, options) {
+	if (!runtime) return;
+	reviewDeadline ??= Math.min(performance.now() + 350, deadline - 700);
+	if (performance.now() >= reviewDeadline) return;
+	try {
+		return runtime[method](input, { ...options, deadline: reviewDeadline });
+	} catch {
+		return undefined;
+	}
+}
+
 try {
 	const [client, root, repo] = process.argv.slice(2);
 	const input = await readStdin(1024 * 1024);
@@ -23,19 +37,22 @@ try {
 	setMemoryInstallScope(scope);
 	if (!memoryScopeMatches(input?.cwd, scope)) process.exit(0);
 	let result;
-	if (["--user", "--graph", "--diagnostics", "--capture"].includes(root)) {
+	if (["--user", "--graph", "--diagnostics", "--capture", "--review"].includes(root)) {
 		const reminder = root === "--user";
 		const diagnosticOnly = root === "--diagnostics";
 		const capture = root === "--capture";
+		const reviewOnly = root === "--review";
 		const event = input?.hook_event_name;
 		if (
-			reminder
-				? event !== "UserPromptSubmit"
-				: diagnosticOnly
-					? !["PostToolUse", "Stop", "StopFailure", "Interrupt", "SessionEnd"].includes(event)
-					: capture
-						? !["PostToolUse", "PostToolUseFailure", "Stop"].includes(event)
-						: event !== "PreToolUse" && event !== "PostToolUse"
+			reviewOnly
+				? event !== "PostToolUse"
+				: reminder
+					? event !== "UserPromptSubmit"
+					: diagnosticOnly
+						? !["PostToolUse", "Stop", "StopFailure", "Interrupt", "SessionEnd"].includes(event)
+						: capture
+							? !["PostToolUse", "PostToolUseFailure", "Stop"].includes(event)
+							: event !== "PreToolUse" && event !== "PostToolUse"
 		)
 			process.exit(0);
 		let structuralSearch;
@@ -47,12 +64,16 @@ try {
 		}
 		const runtime = dirname(fileURLToPath(import.meta.url));
 		if (!activeMemoryRuntime(client, runtime, undefined, scope)) process.exit(0);
-		const { readHookPreferences } = await import("./preferences.mjs");
+		const { readHookPreferences, changeReviewEnabled } = await import("./preferences.mjs");
 		const choice = readHookPreferences()[client];
+		const review =
+			client === "claude-code" && choice?.graph !== false && changeReviewEnabled(undefined, scope);
+		const captureEnabled = choice?.capture !== false;
+		if (reviewOnly && !review) process.exit(0);
 		if (
 			choice?.memory === false ||
 			(diagnosticOnly && choice?.diagnostics !== true) ||
-			(capture && choice?.capture === false)
+			(capture && !captureEnabled && !(review && event === "Stop"))
 		)
 			process.exit(0);
 		// The memory cue is part of project memory; the structural cues are their own choice.
@@ -77,9 +98,31 @@ try {
 			deadline,
 		);
 		if (!eligible || performance.now() >= deadline) process.exit(0);
+		let reviewRuntime;
+		let reviewOptions;
+		if (review && (reminder || capture || reviewOnly) && performance.now() < deadline - 700) {
+			try {
+				reviewRuntime = await import("./change-review.mjs");
+			} catch {
+				/* Review failure must not suppress memory. */
+			}
+			if (reviewRuntime)
+				reviewOptions = {
+					client,
+					target: eligible,
+					directory: reviewRuntime.changeReviewDirectory(memoryClientRoot()),
+					home: homedir(),
+					scope,
+					expectedServer: "pharaoh",
+				};
+		}
+		if (reviewOnly) {
+			reviewCall(reviewRuntime, "observeReviewTool", input, reviewOptions);
+			process.exit(0);
+		}
 		if (capture) {
-			// Learning never depends on the plan: capture runs wherever memory hooks run.
-			const { captureDirectory, recordToolEvent, stopDecision } = await import("./capture.mjs");
+			const { captureDirectory, deferCaptureForReview, recordToolEvent, stopDecision } =
+				await import("./capture.mjs");
 			const options = {
 				client,
 				target: eligible,
@@ -87,9 +130,39 @@ try {
 				memorySession: projectMemorySession(credentials),
 				binding: conversationMemoryBinding(client, input.session_id),
 			};
-			if (event === "Stop") result = stopDecision(input, options);
-			else {
-				const ask = recordToolEvent(input, options);
+			const captureInput =
+				reviewCall(reviewRuntime, "reviewTurnInput", input, reviewOptions) ?? input;
+			if (event === "Stop") {
+				const continuation = reviewCall(reviewRuntime, "reviewStop", input, reviewOptions);
+				if (continuation?.decision === "block") {
+					let memoryCue;
+					try {
+						memoryCue =
+							captureEnabled && options.memorySession
+								? deferCaptureForReview(captureInput, options)
+								: undefined;
+					} catch {
+						/* An optional memory write cannot suppress review's continuation. */
+					}
+					result = {
+						...continuation,
+						reason: [continuation.reason, memoryCue].filter(Boolean).join("\n\n"),
+					};
+				} else {
+					const receipt = reviewCall(reviewRuntime, "consumeReviewReceipt", input, reviewOptions);
+					let saved;
+					try {
+						saved = captureEnabled
+							? stopDecision(captureInput, { ...options, verifiedCheck: receipt?.finalCheck })
+							: undefined;
+					} catch {
+						/* Keep a verified local receipt visible even if optional capture cannot write. */
+					}
+					const message = [receipt?.message, saved?.systemMessage].filter(Boolean).join("\n");
+					result = message ? { ...(saved ?? {}), systemMessage: message } : saved;
+				}
+			} else if (captureEnabled) {
+				const ask = recordToolEvent(captureInput, options);
 				if (ask) result = { hookSpecificOutput: { hookEventName: event, additionalContext: ask } };
 			}
 		} else if ((reminder || diagnosticOnly) && choice?.diagnostics === true) {
@@ -123,6 +196,16 @@ try {
 			// A plan that keeps memories without giving them back gets no reminder; capture ran above.
 			if (!retrievalLocked(eligible.repo, cue))
 				result = memoryReminder(eligible.repo, conversationMemoryBinding(client, input.session_id));
+			// Establish the ordinary cue first; a bounded review failure leaves it intact.
+			reviewCall(reviewRuntime, "beginReviewTurn", input, reviewOptions);
+			if (captureEnabled && !input.prompt_id && !input.turn_id && reviewRuntime) {
+				const { beginTurn, captureDirectory } = await import("./capture.mjs");
+				beginTurn(reviewCall(reviewRuntime, "reviewTurnInput", input, reviewOptions) ?? input, {
+					client,
+					target: eligible,
+					directory: captureDirectory(memoryClientRoot()),
+				});
+			}
 		} else if (!capture) {
 			const { memoryCue, worktreeCue } = await import("./graph-cues.mjs");
 			const outputs = [
@@ -145,7 +228,7 @@ try {
 	}
 	if (result && performance.now() < deadline) process.stdout.write(JSON.stringify(result));
 } catch {
-	// Project memory never blocks ordinary work or opens a continuation.
+	// An unavailable optional hook never blocks ordinary work.
 } finally {
 	clearTimeout(exitQuietly);
 }

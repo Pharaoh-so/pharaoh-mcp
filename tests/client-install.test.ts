@@ -32,10 +32,32 @@ import type { ClientInstallOptions, ClientTarget, LaunchConfig } from "../src/in
 let home: string;
 let launch: LaunchConfig;
 let options: ClientInstallOptions;
+const codingClients = ["claude-code", "codex"];
+const bothConfigured = ["configured", "configured"];
 
 function write(path: string, text: string): void {
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, text);
+}
+
+/** Default fixtures keep each case focused on the launch or settings it changes. */
+function configure(targets: ClientTarget[], settings = options, runtime = launch) {
+	return configureClients(targets, runtime, settings);
+}
+const writeJson = (path: string, value: unknown) => write(path, JSON.stringify(value));
+const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
+const readToml = (path: string) => parseToml(readFileSync(path, "utf8"));
+function packageConfig() {
+	return join(
+		home,
+		"local",
+		"Packages",
+		WINDOWS_CLAUDE_PACKAGE.PackageFamilyName,
+		"LocalCache",
+		"Roaming",
+		"Claude",
+		"claude_desktop_config.json",
+	);
 }
 
 function unavailable(): never {
@@ -63,8 +85,8 @@ function chat(): ClientTarget {
 }
 
 /** Install's runtimes folder: the stable launcher, or one exact version's entry. */
-function managed(version?: string): string {
-	const root = join(home, ".pharaoh", "runtimes", "mcp");
+function managed(version?: string, base = home): string {
+	const root = join(base, ".pharaoh", "runtimes", "mcp");
 	return version
 		? join(root, version, "node_modules", "@pharaoh-so", "mcp", "dist", "index.js")
 		: join(root, "launcher-v1.mjs");
@@ -100,7 +122,7 @@ const WINDOWS_CLAUDE_PACKAGE = {
 };
 
 beforeEach(() => {
-	home = mkdtempSync(join(tmpdir(), "pharaoh-client-install-"));
+	home = realpathSync(mkdtempSync(join(tmpdir(), "pharaoh-client-install-")));
 	launch = { command: join(home, "node"), args: [join(home, "runtime", "dist", "index.js")] };
 	options = { home, platform: "darwin", env: { PATH: "" }, execute: unavailable };
 });
@@ -113,7 +135,16 @@ describe("independent client discovery", () => {
 	it("finds both CLIs without memory credentials or a feature grant", () => {
 		const execute = (command: string) => (command === "claude" ? "2.1.304" : "codex-cli 0.166.0");
 		const targets = discoverClients({ ...options, execute });
-		expect(targets.map(({ client }) => client)).toEqual(["claude-code", "codex"]);
+		expect(targets.map(({ client }) => client)).toEqual(codingClients);
+	});
+
+	it("preserves version suffixes when identifying an exact CLI build", () => {
+		const targets = discoverClients({
+			...options,
+			execute: (command) =>
+				command === "claude" ? "2.1.328 (Claude Code)" : "codex-cli 0.166.0-rc.1+preview",
+		});
+		expect(targets.map(({ version }) => version)).toEqual(["2.1.328", "0.166.0-rc.1+preview"]);
 	});
 
 	it("finds desktop-only installations without requiring a CLI", () => {
@@ -122,9 +153,7 @@ describe("independent client discovery", () => {
 		const targets = discoverClients(options);
 		expect(targets.map(({ client }) => client)).toEqual(["claude-desktop", "claude-code", "codex"]);
 		expect(targets.every(({ cli }) => cli === undefined)).toBe(true);
-		expect(
-			configureClients(targets, launch, options).every(({ status }) => status === "configured"),
-		).toBe(true);
+		expect(configure(targets).every(({ status }) => status === "configured")).toBe(true);
 	});
 
 	it("configures a fresh Codex installation bundled with ChatGPT Desktop", () => {
@@ -138,8 +167,8 @@ describe("independent client discovery", () => {
 
 		const targets = discoverClients(options);
 		expect(targets).toEqual([codex()]);
-		expect(configureClients(targets, launch, options)[0].status).toBe("configured");
-		expect(parseToml(readFileSync(codex().path, "utf8"))).toMatchObject({
+		expect(configure(targets)[0].status).toBe("configured");
+		expect(readToml(codex().path)).toMatchObject({
 			mcp_servers: { pharaoh: launch },
 		});
 	});
@@ -157,7 +186,7 @@ describe("independent client discovery", () => {
 		write(target.path, '{"projects":{"/repo":{"mcpServers":{"pharaoh":{"url":"custom"}}}}}');
 		expect(freshRuntimeClients([target], options)).toEqual([]);
 		write(target.path, "{}");
-		expect(configureClients([target], launch, options)[0]).toMatchObject({
+		expect(configure([target])[0]).toMatchObject({
 			status: "configured",
 			created: true,
 		});
@@ -172,11 +201,8 @@ describe("independent client discovery", () => {
 		const targets = discoverClients({ ...options, platform: "linux" });
 		expect(targets.map(({ client }) => client)).toEqual(["claude-desktop", "claude-code"]);
 		expect(targets[0].path).toBe(path);
-		expect(configureClients(targets, launch, options).map(({ status }) => status)).toEqual([
-			"configured",
-			"configured",
-		]);
-		expect(JSON.parse(readFileSync(path, "utf8")).theme).toBe("dark");
+		expect(configure(targets).map(({ status }) => status)).toEqual(bothConfigured);
+		expect(readJson(path).theme).toBe("dark");
 	});
 
 	it("honors Linux XDG_CONFIG_HOME without reading a relative override", () => {
@@ -219,13 +245,13 @@ describe("independent client discovery", () => {
 		expect(
 			targets.find(({ client }) => client === "claude-desktop")?.ambiguousReason,
 		).toBeDefined();
-		expect(configureClients(targets, launch, options)[0].status).toBe("ambiguous");
+		expect(configure(targets)[0].status).toBe("ambiguous");
 	});
 
 	it("a relative override does not prevent discovery of another client", () => {
 		mkdirSync(join(home, ".codex"));
 		const targets = discoverClients({ ...options, env: { CLAUDE_CONFIG_DIR: "relative" } });
-		expect(targets.map(({ client }) => client)).toEqual(["claude-code", "codex"]);
+		expect(targets.map(({ client }) => client)).toEqual(codingClients);
 		expect(targets[0].ambiguousReason).toBeDefined();
 	});
 });
@@ -251,12 +277,12 @@ describe("Windows Desktop package configuration", () => {
 				]);
 			},
 		};
-		expect(configureClients(discoverClients(config), launch, config)[0].status).toBe("ambiguous");
+		expect(configure(discoverClients(config), config)[0].status).toBe("ambiguous");
 		signature = "Store";
 		const targets = discoverClients(config);
 		expect(targets).toEqual([codex()]);
-		expect(configureClients(targets, launch, config)[0].status).toBe("configured");
-		expect(parseToml(readFileSync(codex().path, "utf8"))).toMatchObject({
+		expect(configure(targets, config)[0].status).toBe("configured");
+		expect(readToml(codex().path)).toMatchObject({
 			mcp_servers: { pharaoh: launch },
 		});
 	});
@@ -273,16 +299,7 @@ describe("Windows Desktop package configuration", () => {
 			expect(args[4]).toContain("unvirtualizedResources");
 			expect(args[4]).not.toContain(home);
 		});
-		const privatePath = join(
-			home,
-			"local",
-			"Packages",
-			WINDOWS_CLAUDE_PACKAGE.PackageFamilyName,
-			"LocalCache",
-			"Roaming",
-			"Claude",
-			"claude_desktop_config.json",
-		);
+		const privatePath = packageConfig();
 		const fallback = join(home, "roaming", "Claude", "claude_desktop_config.json");
 		write(privatePath, '{"theme":"private"}');
 		write(fallback, '{"theme":"real-appdata"}');
@@ -291,20 +308,9 @@ describe("Windows Desktop package configuration", () => {
 		expect(targets[0]).toMatchObject({ path: privatePath });
 		expect(targets[0].ambiguousReason).toBeUndefined();
 		expect(targets[1].shadowPath).toBe(privatePath);
-		expect(configureClients(targets, launch, config).map(({ status }) => status)).toEqual([
-			"configured",
-			"configured",
-		]);
-		expect(JSON.parse(readFileSync(privatePath, "utf8")).theme).toBe("private");
+		expect(configure(targets, config).map(({ status }) => status)).toEqual(bothConfigured);
+		expect(readJson(privatePath).theme).toBe("private");
 		expect(readFileSync(fallback, "utf8")).toBe('{"theme":"real-appdata"}');
-	});
-
-	it("uses documented APPDATA fallback when the registered package has no private file", () => {
-		const config = windowsOptions([WINDOWS_CLAUDE_PACKAGE]);
-		const targets = discoverClients(config);
-		expect(targets[0].path).toBe(join(home, "roaming", "Claude", "claude_desktop_config.json"));
-		expect(targets[0].ambiguousReason).toBeUndefined();
-		expect(configureClients(targets, launch, config)[0].status).toBe("configured");
 	});
 
 	it("ignores stale package folders when the current-user package query finds no install", () => {
@@ -315,23 +321,19 @@ describe("Windows Desktop package configuration", () => {
 		expect(discoverClients(config)).toEqual([]);
 	});
 
-	it("uses real APPDATA when the manifest fully disables virtualization", () => {
-		const config = windowsOptions([{ ...WINDOWS_CLAUDE_PACKAGE, Virtualization: "disabled" }]);
-		const privatePath = join(
-			home,
-			"local",
-			"Packages",
-			WINDOWS_CLAUDE_PACKAGE.PackageFamilyName,
-			"LocalCache",
-			"Roaming",
-			"Claude",
-			"claude_desktop_config.json",
-		);
-		write(privatePath, '{"theme":"obsolete-private"}');
+	it.each([
+		"default",
+		"disabled",
+	])("uses APPDATA with %s virtualization and no usable private file", (virtualization) => {
+		const config = windowsOptions([{ ...WINDOWS_CLAUDE_PACKAGE, Virtualization: virtualization }]);
+		const privatePath = packageConfig();
+		if (virtualization === "disabled") write(privatePath, '{"theme":"obsolete-private"}');
 		const targets = discoverClients(config);
 		expect(targets[0].path).toBe(join(home, "roaming", "Claude", "claude_desktop_config.json"));
-		expect(configureClients(targets, launch, config)[0].status).toBe("configured");
-		expect(readFileSync(privatePath, "utf8")).toBe('{"theme":"obsolete-private"}');
+		expect(targets[0].ambiguousReason).toBeUndefined();
+		expect(configure(targets, config)[0].status).toBe("configured");
+		if (virtualization === "disabled")
+			expect(readFileSync(privatePath, "utf8")).toBe('{"theme":"obsolete-private"}');
 	});
 
 	it.each([
@@ -342,7 +344,7 @@ describe("Windows Desktop package configuration", () => {
 		const config = windowsOptions(packages);
 		const targets = discoverClients(config);
 		expect(targets[0].ambiguousReason).toBeDefined();
-		expect(configureClients(targets, launch, config)[0].status).toBe("ambiguous");
+		expect(configure(targets, config)[0].status).toBe("ambiguous");
 	});
 
 	it("does not echo query secrets or guess from a stale package folder on failure", () => {
@@ -354,7 +356,7 @@ describe("Windows Desktop package configuration", () => {
 		});
 		const targets = discoverClients(config);
 		expect(targets[0].ambiguousReason).toBeDefined();
-		const outcomes = configureClients(targets, launch, config);
+		const outcomes = configure(targets, config);
 		expect(outcomes[0].status).toBe("ambiguous");
 		expect(JSON.stringify({ targets, outcomes })).not.toContain("private-query-canary");
 	});
@@ -365,12 +367,12 @@ describe("registration ownership", () => {
 		const first =
 			'{"mcpServers":{"pharaoh":{"url":"https://custom.example/mcp"}},"theme":"dark"}\n';
 		write(code().path, first);
-		expect(configureClients([code()], launch, options)[0].status).toBe("preserved-custom");
+		expect(configure([code()])[0].status).toBe("preserved-custom");
 		expect(readFileSync(code().path, "utf8")).toBe(first);
 		const second =
 			'{"mcpServers":{"pharaoh":{"command":"npx","args":["@pharaoh-so/mcp@0.3.50"],"enabled":false}}}\n';
 		write(code().path, second);
-		expect(configureClients([code()], launch, { ...options, migrateLegacy: true })[0].status).toBe(
+		expect(configure([code()], { ...options, migrateLegacy: true })[0].status).toBe(
 			"preserved-disabled",
 		);
 		expect(readFileSync(code().path, "utf8")).toBe(second);
@@ -378,19 +380,17 @@ describe("registration ownership", () => {
 
 	it("requires explicit migration of ambiguous exact-version NPX pins", () => {
 		const old = { command: "npx", args: ["@pharaoh-so/mcp@0.3.50"] };
-		write(code().path, JSON.stringify({ mcpServers: { pharaoh: old } }));
+		writeJson(code().path, { mcpServers: { pharaoh: old } });
 		expect(legacyMigrations([code()], options)).toEqual([{ ...code(), launch: old }]);
-		expect(configureClients([code()], launch, options)[0]).toMatchObject({
+		expect(configure([code()])[0]).toMatchObject({
 			status: "preserved-custom",
 			recovery: expect.stringContaining("--migrate-legacy"),
 		});
-		expect(configureClients([code()], launch, { ...options, migrateLegacy: true })[0].status).toBe(
-			"configured",
-		);
-		expect(configureClients([code()], launch, options)[0].status).toBe("already-configured");
+		expect(configure([code()], { ...options, migrateLegacy: true })[0].status).toBe("configured");
+		expect(configure([code()])[0].status).toBe("already-configured");
 		const upgraded = { ...launch, args: [join(home, "runtime-next", "dist", "index.js")] };
-		expect(configureClients([code()], upgraded, options)[0].status).toBe("configured");
-		expect(JSON.parse(readFileSync(code().path, "utf8")).mcpServers.pharaoh).toEqual(upgraded);
+		expect(configure([code()], options, upgraded)[0].status).toBe("configured");
+		expect(readJson(code().path).mcpServers.pharaoh).toEqual(upgraded);
 	});
 
 	it("keeps project registrations and disabled choices while adding user scope", () => {
@@ -400,69 +400,60 @@ describe("registration ownership", () => {
 				mcpServers: { pharaoh: { url: "https://project.example/mcp" } },
 			},
 		};
-		write(
-			code().path,
-			JSON.stringify({ projects, mcpServers: { other: { command: "other" } }, theme: "dark" }),
-		);
-		expect(configureClients([code()], launch, options)[0].status).toBe("configured");
-		expect(JSON.parse(readFileSync(code().path, "utf8"))).toEqual({
+		writeJson(code().path, {
+			projects,
+			mcpServers: { other: { command: "other" } },
+			theme: "dark",
+		});
+		expect(configure([code()])[0].status).toBe("configured");
+		expect(readJson(code().path)).toEqual({
 			projects,
 			theme: "dark",
 			mcpServers: { other: { command: "other" }, pharaoh: launch },
 		});
 	});
 
-	it("configures user scope without a CLI while keeping a custom Desktop registration", () => {
-		const desktop = JSON.stringify({
-			mcpServers: { pharaoh: { url: "https://custom.example/mcp" } },
-		});
+	it.each([
+		["custom", { url: "https://custom.example/mcp" }, "uses its retained custom"],
+		["disabled", { disabled: true }, "keeps its disabled"],
+	])("configures user scope while preserving %s Desktop registration", (_, fields, detail) => {
+		const pharaoh = "url" in fields ? fields : { ...launch, ...fields };
+		const desktop = JSON.stringify({ mcpServers: { pharaoh } });
 		write(chat().path, desktop);
 		const target = { ...code(), shadowPath: chat().path };
-		expect(configureClients([target], launch, options)[0]).toMatchObject({
+		expect(configure([target])[0]).toMatchObject({
 			status: "configured",
-			detail: expect.stringContaining("Desktop Code uses its retained custom Desktop registration"),
+			detail: expect.stringContaining(`Desktop Code ${detail} Desktop registration`),
 		});
-		expect(JSON.parse(readFileSync(code().path, "utf8")).mcpServers.pharaoh).toEqual(launch);
-		expect(readFileSync(chat().path, "utf8")).toBe(desktop);
-	});
-
-	it("configures user scope while keeping a disabled Desktop registration", () => {
-		const desktop = JSON.stringify({ mcpServers: { pharaoh: { ...launch, disabled: true } } });
-		write(chat().path, desktop);
-		expect(
-			configureClients([{ ...code(), shadowPath: chat().path }], launch, options)[0],
-		).toMatchObject({
-			status: "configured",
-			detail: expect.stringContaining("Desktop Code keeps its disabled Desktop registration"),
-		});
+		expect(readJson(code().path).mcpServers.pharaoh).toEqual(launch);
 		expect(readFileSync(chat().path, "utf8")).toBe(desktop);
 	});
 
 	it("records the exact server arguments, including a custom server", () => {
 		const custom = { ...launch, args: [...launch.args, "--server", "https://self-hosted.example"] };
-		expect(configureClients([chat()], custom, options)[0].status).toBe("configured");
-		expect(configureClients([chat()], custom, options)[0].status).toBe("already-configured");
+		expect(configure([chat()], options, custom)[0].status).toBe("configured");
+		expect(configure([chat()], options, custom)[0].status).toBe("already-configured");
 	});
 
 	it("does not treat an unrecorded persistent launcher as installer-owned", () => {
-		write(code().path, JSON.stringify({ mcpServers: { pharaoh: launch } }));
-		expect(configureClients([code()], launch, options)[0].status).toBe("preserved-custom");
+		writeJson(code().path, { mcpServers: { pharaoh: launch } });
+		expect(configure([code()])[0].status).toBe("preserved-custom");
 	});
 
 	it("moves an unrecorded exact-version runtime pin to the launcher, keeping other entries", () => {
 		const launcher = { command: launch.command, args: [managed()] };
 		const pinned = { command: launch.command, args: [managed("0.3.69")] };
 		const other = { command: "other", args: ["--flag"] };
-		write(chat().path, JSON.stringify({ mcpServers: { other, pharaoh: pinned }, preferences: {} }));
-		expect(configureClients([chat()], launcher, options)[0].status).toBe("configured");
-		expect(JSON.parse(readFileSync(chat().path, "utf8"))).toEqual({
+		writeJson(chat().path, { mcpServers: { other, pharaoh: pinned }, preferences: {} });
+		expect(configure([chat()], options, launcher)[0].status).toBe("configured");
+		expect(readJson(chat().path)).toEqual({
 			mcpServers: { other, pharaoh: launcher },
 			preferences: {},
 		});
 		// Node that moved still migrates, here to an exact-version launch (Windows has no launcher).
 		const exact = { command: join(home, "nvm", "node"), args: [managed("0.3.85")] };
-		write(code().path, JSON.stringify({ mcpServers: { pharaoh: pinned } }));
-		expect(configureClients([code()], exact, options)[0].status).toBe("configured");
+		writeJson(code().path, { mcpServers: { pharaoh: pinned } });
+		expect(configure([code()], options, exact)[0].status).toBe("configured");
 		// A wrapper, an added setting, another server or another runtimes folder stays the user's.
 		for (const pharaoh of [
 			{ ...pinned, command: join(home, "corp-wrapper") },
@@ -472,13 +463,13 @@ describe("registration ownership", () => {
 		]) {
 			const text = JSON.stringify({ mcpServers: { pharaoh } });
 			write(code().path, text);
-			expect(configureClients([code()], launcher, options)[0].status).toBe("preserved-custom");
+			expect(configure([code()], options, launcher)[0].status).toBe("preserved-custom");
 			expect(readFileSync(code().path, "utf8")).toBe(text);
 		}
 	});
 
 	it("tells the person to quit an open Claude Desktop, which saves its loaded settings back", () => {
-		expect(configureClients([chat()], launch, options)[0]).toEqual({
+		expect(configure([chat()])[0]).toEqual({
 			client: "claude-desktop",
 			path: chat().path,
 			status: "configured",
@@ -489,14 +480,14 @@ describe("registration ownership", () => {
 			return "813\n";
 		};
 		const upgraded = { ...launch, args: [join(home, "runtime-next", "dist", "index.js")] };
-		expect(configureClients([chat()], upgraded, { ...options, execute })[0]).toMatchObject({
+		expect(configure([chat()], { ...options, execute }, upgraded)[0]).toMatchObject({
 			status: "configured",
 			detail: expect.stringContaining("Stays on an older Pharaoh until you quit it"),
 			desktopOpen: true,
 		});
 		// A first registration: Desktop has no Pharaoh at all until it restarts on it.
 		rmSync(chat().path);
-		expect(configureClients([chat()], launch, { ...options, execute })[0].detail).toMatch(
+		expect(configure([chat()], { ...options, execute })[0].detail).toMatch(
 			/^No Pharaoh until you quit it/,
 		);
 	});
@@ -549,7 +540,7 @@ describe("registration ownership", () => {
 		expect(await restartDesktop(chat(), launch, desktop(""))).toMatchObject({
 			status: "configured",
 		});
-		expect(JSON.parse(readFileSync(chat().path, "utf8")).mcpServers.pharaoh).toEqual(launch);
+		expect(readJson(chat().path).mcpServers.pharaoh).toEqual(launch);
 		expect(calls.filter((call) => !call.startsWith("/usr/bin/pgrep"))).toEqual([
 			'/usr/bin/osascript -e tell application id "com.anthropic.claudefordesktop" to quit',
 			"/usr/bin/open -b com.anthropic.claudefordesktop",
@@ -563,7 +554,7 @@ describe("registration ownership", () => {
 
 	it("moves only registrations pinned to one version onto the launcher, adding none", () => {
 		const exact = { command: launch.command, args: [managed("0.3.82")] };
-		expect(configureClients([code()], exact, options)[0].status).toBe("configured");
+		expect(configure([code()], options, exact)[0].status).toBe("configured");
 		const custom = JSON.stringify({ mcpServers: { pharaoh: { ...exact, env: { DEBUG: "1" } } } });
 		write(chat().path, custom);
 		expect(
@@ -572,7 +563,7 @@ describe("registration ownership", () => {
 			["claude-desktop", "preserved-custom"],
 			["claude-code", "configured"],
 		]);
-		expect(JSON.parse(readFileSync(code().path, "utf8")).mcpServers.pharaoh).toEqual({
+		expect(readJson(code().path).mcpServers.pharaoh).toEqual({
 			command: launch.command,
 			args: [managed()],
 		});
@@ -596,29 +587,29 @@ describe("desktop-only Codex TOML", () => {
 		const original =
 			'# My profile\nmodel = "example-model"\n\n[profiles.work]\napproval_policy = "never"\n';
 		write(codex().path, original);
-		expect(configureClients([codex()], launch, options)[0].status).toBe("configured");
+		expect(configure([codex()])[0].status).toBe("configured");
 		const first = readFileSync(codex().path, "utf8");
 		expect(first.startsWith(original)).toBe(true);
 		const upgraded = { ...launch, args: [join(home, "next", "index.js")] };
-		expect(configureClients([codex()], upgraded, options)[0].status).toBe("configured");
+		expect(configure([codex()], options, upgraded)[0].status).toBe("configured");
 		const next = readFileSync(codex().path, "utf8");
 		expect(next.startsWith(original)).toBe(true);
 		expect((parseToml(next).mcp_servers as Record<string, unknown>).pharaoh).toEqual(upgraded);
 	});
 
 	it("preserves edited generated blocks and existing custom tables", () => {
-		expect(configureClients([codex()], launch, options)[0].status).toBe("configured");
+		expect(configure([codex()])[0].status).toBe("configured");
 		const text = readFileSync(codex().path, "utf8").replace("command =", "command  =");
 		write(codex().path, text);
 		const upgraded = { ...launch, args: [join(home, "next", "index.js")] };
-		expect(configureClients([codex()], upgraded, options)[0].status).toBe("preserved-custom");
+		expect(configure([codex()], options, upgraded)[0].status).toBe("preserved-custom");
 		expect(readFileSync(codex().path, "utf8")).toBe(text);
 	});
 
 	it("leaves inline parent tables untouched when appending would be invalid", () => {
 		const text = 'mcp_servers = { other = { command = "other" } }\n';
 		write(codex().path, text);
-		expect(configureClients([codex()], launch, options)[0].status).toBe("failed");
+		expect(configure([codex()])[0].status).toBe("failed");
 		expect(readFileSync(codex().path, "utf8")).toBe(text);
 	});
 });
@@ -654,9 +645,9 @@ function codexCli(start: LaunchConfig | null, rest = "") {
 describe("CLI-backed Codex", () => {
 	it("uses the verified CLI and reads back the enabled launch", () => {
 		const { calls, execute } = codexCli(null);
-		expect(
-			configureClients([{ ...codex(), cli: "codex" }], launch, { ...options, execute })[0].status,
-		).toBe("configured");
+		expect(configure([{ ...codex(), cli: "codex" }], { ...options, execute })[0].status).toBe(
+			"configured",
+		);
 		expect(calls).toEqual([
 			["mcp", "get", "pharaoh", "--json"],
 			["mcp", "add", "pharaoh", "--", launch.command, ...launch.args],
@@ -671,9 +662,9 @@ describe("CLI-backed Codex", () => {
 			'[mcp_servers.other]\ncommand = "other"\n\n',
 		);
 		expect(
-			configureClients([{ ...codex(), cli: "codex" }], launcher, { ...options, execute })[0].status,
+			configure([{ ...codex(), cli: "codex" }], { ...options, execute }, launcher)[0].status,
 		).toBe("configured");
-		expect(parseToml(readFileSync(codex().path, "utf8")).mcp_servers).toEqual({
+		expect(readToml(codex().path).mcp_servers).toEqual({
 			other: { command: "other" },
 			pharaoh: launcher,
 		});
@@ -689,46 +680,33 @@ describe("CLI-backed Codex", () => {
 				write(codex().path, `model = "changed"\n${readFileSync(codex().path, "utf8")}`);
 			return out;
 		};
-		expect(configureClients([target], launch, { ...options, execute: changing })[0].status).toBe(
-			"failed",
-		);
-		expect(configureClients([target], launch, { ...options, execute })[0].status).toBe(
-			"already-configured",
-		);
+		expect(configure([target], { ...options, execute: changing })[0].status).toBe("failed");
+		expect(configure([target], { ...options, execute })[0].status).toBe("already-configured");
 	});
 
-	it("preserves an effective project registration before invoking add", () => {
-		const execute: NonNullable<ClientInstallOptions["execute"]> = (_command, args) => {
-			expect(args[1]).toBe("get");
-			return JSON.stringify({
-				enabled: true,
-				transport: { type: "stdio", command: "custom", args: [] },
-			});
-		};
-		expect(
-			configureClients([{ ...codex(), cli: "codex" }], launch, { ...options, execute })[0].status,
-		).toBe("preserved-custom");
-	});
-
-	it("keeps a concurrent configuration change instead of invoking add", () => {
+	it.each(["project override", "concurrent edit"])("does not invoke add after %s", (reason) => {
 		const concurrent = '# Another process saved this profile\nmodel = "new-model"\n';
 		const execute: NonNullable<ClientInstallOptions["execute"]> = (_command, args) => {
 			expect(args[1]).toBe("get");
+			if (reason === "project override")
+				return JSON.stringify({
+					enabled: true,
+					transport: { type: "stdio", command: "custom", args: [] },
+				});
 			write(codex().path, concurrent);
-			throw Object.assign(new Error("missing"), {
-				stderr: "No MCP server named 'pharaoh' found.",
-			});
+			throw Object.assign(new Error("missing"), { stderr: "No MCP server named 'pharaoh' found." });
 		};
-		expect(
-			configureClients([{ ...codex(), cli: "codex" }], launch, { ...options, execute })[0].status,
-		).toBe("failed");
-		expect(readFileSync(codex().path, "utf8")).toBe(concurrent);
+		const status = reason === "project override" ? "preserved-custom" : "failed";
+		expect(configure([{ ...codex(), cli: "codex" }], { ...options, execute })[0].status).toBe(
+			status,
+		);
+		if (reason === "concurrent edit") expect(readFileSync(codex().path, "utf8")).toBe(concurrent);
 	});
 });
 
 describe("verified coding clients for automatic startup assets", () => {
 	it("requires current enabled provenance and never probes CLIs or changes files", () => {
-		expect(configureClients([code(), codex(), chat()], launch, options)).toHaveLength(3);
+		expect(configure([code(), codex(), chat()])).toHaveLength(3);
 		const paths = [
 			code().path,
 			codex().path,
@@ -745,14 +723,14 @@ describe("verified coding clients for automatic startup assets", () => {
 					return unavailable();
 				},
 			}),
-		).toEqual(["claude-code", "codex"]);
+		).toEqual(codingClients);
 		expect(probes).toBe(0);
 		expect(paths.map((path) => readFileSync(path, "utf8"))).toEqual(before);
 	});
 
 	it("does not infer coding eligibility from Desktop Chat or a copied unverified launch", () => {
-		configureClients([chat()], launch, options);
-		write(code().path, JSON.stringify({ mcpServers: { pharaoh: launch } }));
+		configure([chat()]);
+		writeJson(code().path, { mcpServers: { pharaoh: launch } });
 		write(
 			codex().path,
 			`[mcp_servers.pharaoh]\ncommand = ${JSON.stringify(launch.command)}\nargs = ${JSON.stringify(launch.args)}\n`,
@@ -761,8 +739,8 @@ describe("verified coding clients for automatic startup assets", () => {
 	});
 
 	it("preserves disabled and modified registrations even when historical receipts exist", () => {
-		configureClients([code(), codex()], launch, options);
-		write(code().path, JSON.stringify({ mcpServers: { pharaoh: { ...launch, enabled: false } } }));
+		configure([code(), codex()]);
+		writeJson(code().path, { mcpServers: { pharaoh: { ...launch, enabled: false } } });
 		write(codex().path, '[mcp_servers.pharaoh]\nurl = "https://custom.example/mcp"\n');
 		const before = [code().path, codex().path].map((path) => readFileSync(path, "utf8"));
 		expect(verifiedCodingClients(options)).toEqual([]);
@@ -770,7 +748,7 @@ describe("verified coding clients for automatic startup assets", () => {
 	});
 
 	it("uses only the active configured homes rather than historical default registrations", () => {
-		configureClients([code(), codex()], launch, options);
+		configure([code(), codex()]);
 		const claudeRoot = join(home, "code-profile");
 		const codexRoot = join(home, "codex-profile");
 		const targets: ClientTarget[] = [
@@ -779,16 +757,16 @@ describe("verified coding clients for automatic startup assets", () => {
 		];
 		const active = { ...options, env: { CLAUDE_CONFIG_DIR: claudeRoot, CODEX_HOME: codexRoot } };
 		expect(verifiedCodingClients(active)).toEqual([]);
-		configureClients(targets, launch, active);
-		expect(verifiedCodingClients(active)).toEqual(["claude-code", "codex"]);
+		configure(targets, active);
+		expect(verifiedCodingClients(active)).toEqual(codingClients);
 		write(targets[0].path, '{"disabledMcpServers":["pharaoh"]}');
 		write(targets[1].path, "[mcp_servers.pharaoh]\nenabled = false\n");
 		expect(verifiedCodingClients(active)).toEqual([]);
-		expect(verifiedCodingClients(options)).toEqual(["claude-code", "codex"]);
+		expect(verifiedCodingClients(options)).toEqual(codingClients);
 	});
 
 	it("excludes malformed configurations independently and fails closed on malformed provenance", () => {
-		configureClients([code(), codex()], launch, options);
+		configure([code(), codex()]);
 		write(code().path, '{"secret":"private-startup-canary", broken');
 		expect(verifiedCodingClients(options)).toEqual(["codex"]);
 		const receipt = join(home, ".pharaoh", "client-installations.json");
@@ -803,21 +781,15 @@ describe("verified coding clients for automatic startup assets", () => {
 			...launch,
 			args: [...launch.args, "--server", "https://self-hosted.example"],
 		};
-		configureClients([code(), codex()], configured, options);
-		expect(verifiedCodingClients({ ...options, runningLaunch: launch })).toEqual([
-			"claude-code",
-			"codex",
-		]);
+		configure([code(), codex()], options, configured);
+		expect(verifiedCodingClients({ ...options, runningLaunch: launch })).toEqual(codingClients);
 		const next = {
 			...configured,
 			args: [join(home, "next-version", "index.js"), ...configured.args.slice(1)],
 		};
-		configureClients([code(), codex()], next, options);
+		configure([code(), codex()], options, next);
 		expect(verifiedCodingClients({ ...options, runningLaunch: launch })).toEqual([]);
-		expect(verifiedCodingClients({ ...options, runningLaunch: next })).toEqual([
-			"claude-code",
-			"codex",
-		]);
+		expect(verifiedCodingClients({ ...options, runningLaunch: next })).toEqual(codingClients);
 		const otherNode = join(home, "other-node");
 		write(otherNode, "another-fixture-node");
 		expect(
@@ -827,14 +799,14 @@ describe("verified coding clients for automatic startup assets", () => {
 
 	it("only suppresses Global repair for an override covering the current checkout", () => {
 		write(launch.command, "fixture-node");
-		configureClients([code()], launch, options);
+		configure([code()]);
 		const current = join(home, "current");
 		const sibling = join(home, "sibling");
 		mkdirSync(current);
 		mkdirSync(sibling);
-		const document = JSON.parse(readFileSync(code().path, "utf8"));
+		const document = readJson(code().path);
 		document.projects = { [sibling]: { disabledMcpServers: ["pharaoh"] } };
-		write(code().path, JSON.stringify(document));
+		writeJson(code().path, document);
 		const repair = { ...options, runningLaunch: launch, rejectProjectOverrides: true };
 		expect(verifiedCodingClients({ ...repair, projectRoot: current })).toEqual(["claude-code"]);
 		expect(verifiedCodingClients({ ...repair, projectRoot: sibling })).toEqual([]);
@@ -846,26 +818,17 @@ describe("verified coding clients for automatic startup assets", () => {
 	it("requires the managed proxy release and server to support runtime receipts", () => {
 		const server = "https://self-hosted.example";
 		const managedLaunch = (version: string) => {
-			const pkg = join(
-				realpathSync(home),
-				".pharaoh",
-				"runtimes",
-				"mcp",
-				version,
-				"node_modules",
-				"@pharaoh-so",
-				"mcp",
-			);
+			const pkg = dirname(dirname(managed(version, realpathSync(home))));
 			const entry = join(pkg, "dist", "index.js");
 			write(entry, "fixture entry");
-			write(join(pkg, "package.json"), JSON.stringify({ name: "@pharaoh-so/mcp", version }));
+			writeJson(join(pkg, "package.json"), { name: "@pharaoh-so/mcp", version });
 			return { pkg, config: { command: launch.command, args: [entry, "--server", server] } };
 		};
-		configureClients([code()], managedLaunch("0.3.69").config, options);
+		configure([code()], options, managedLaunch("0.3.69").config);
 		const requiredProxy = { minimumVersion: "0.3.70", server };
 		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual([]);
 		const next = managedLaunch("0.3.70");
-		configureClients([code()], next.config, options);
+		configure([code()], options, next.config);
 		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual([]);
 		write(join(next.pkg, "runtime", "runtime-client.mjs"), "fixture capability");
 		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual(["claude-code"]);
@@ -885,7 +848,7 @@ describe("verified coding clients for automatic startup assets", () => {
 			command: launch.command,
 			args: [join(runtimes, "launcher-v1.mjs"), "--server", server],
 		};
-		configureClients([code()], launcher, options);
+		configure([code()], options, launcher);
 		write(join(runtimes, "current.json"), '{"version":"0.3.69"}');
 		expect(verifiedCodingClients({ ...options, requiredProxy })).toEqual([]);
 		write(join(runtimes, "current.json"), '{"version":"0.3.70"}');
@@ -908,11 +871,8 @@ describe("verified coding clients for automatic startup assets", () => {
 			write(launch.command, "fixture-node");
 			const alias = join(home, "node-alias");
 			symlinkSync(launch.command, alias);
-			configureClients([code(), codex()], { ...launch, command: alias }, options);
-			expect(verifiedCodingClients({ ...options, runningLaunch: launch })).toEqual([
-				"claude-code",
-				"codex",
-			]);
+			configure([code(), codex()], options, { ...launch, command: alias });
+			expect(verifiedCodingClients({ ...options, runningLaunch: launch })).toEqual(codingClients);
 			const original = readFileSync(code().path, "utf8");
 			rmSync(code().path);
 			const outside = join(home, "outside.json");
@@ -937,18 +897,15 @@ describe("checkout-scoped installation", () => {
 	it("writes only the selected Claude project and preserves unrelated user and project fields", () => {
 		const root = join(home, "Mixed Case Project");
 		const scoped = local(root);
-		write(
-			code().path,
-			JSON.stringify({
-				theme: "dark",
-				projects: {
-					[root]: { allowedTools: ["Read"] },
-					"/other": { mcpServers: { custom: { url: "https://custom.example" } } },
-				},
-			}),
-		);
-		expect(configureClients([localCode()], launch, scoped)[0].status).toBe("configured");
-		const actual = JSON.parse(readFileSync(code().path, "utf8"));
+		writeJson(code().path, {
+			theme: "dark",
+			projects: {
+				[root]: { allowedTools: ["Read"] },
+				"/other": { mcpServers: { custom: { url: "https://custom.example" } } },
+			},
+		});
+		expect(configure([localCode()], scoped)[0].status).toBe("configured");
+		const actual = readJson(code().path);
 		expect(actual).toEqual({
 			theme: "dark",
 			projects: {
@@ -963,8 +920,8 @@ describe("checkout-scoped installation", () => {
 	it("keeps two Local ownership records separate and cleans only the selected checkout", () => {
 		const a = local(join(home, "a"));
 		const b = local(join(home, "b"));
-		configureClients([localCode()], launch, a);
-		configureClients([localCode()], launch, b);
+		configure([localCode()], a);
+		configure([localCode()], b);
 		expect(recordedLocalRoots(options).sort()).toEqual([
 			a.scope?.kind === "local" && a.scope.root,
 			b.scope?.kind === "local" && b.scope.root,
@@ -977,8 +934,7 @@ describe("checkout-scoped installation", () => {
 	it("requires explicit cleanup before switching either direction", () => {
 		const root = join(realpathSync(home), "project");
 		const scoped = local(root);
-		execFileSync("git", ["init", "--quiet", root]);
-		configureClients([code()], launch, options);
+		configure([code()]);
 		const targets = scopeInstallTargets([localCode()], scoped.scope!);
 		expect(preflightInstallScope(targets, scoped)[0]).toMatchObject({
 			status: "ambiguous",
@@ -986,7 +942,7 @@ describe("checkout-scoped installation", () => {
 		});
 		cleanupManagedClients(options);
 		expect(preflightInstallScope(targets, scoped)).toEqual([]);
-		configureClients([localCode()], launch, scoped);
+		configure([localCode()], scoped);
 		expect(preflightInstallScope([code()], options)[0]).toMatchObject({
 			status: "ambiguous",
 			recovery: expect.stringContaining("--scope local"),
@@ -998,8 +954,7 @@ describe("checkout-scoped installation", () => {
 		() => {
 			const root = join(realpathSync(home), "project $(printf expanded) 'quote'");
 			const scoped = local(root);
-			execFileSync("git", ["init", "--quiet", root]);
-			configureClients([localCode()], launch, scoped);
+			configure([localCode()], scoped);
 			const recovery = preflightInstallScope([code()], options)[0].recovery!;
 			const argument = recovery.split(" --path ")[1];
 			expect(execFileSync("sh", ["-c", `printf '%s' ${argument}`], { encoding: "utf8" })).toBe(
@@ -1014,7 +969,7 @@ describe("checkout-scoped installation", () => {
 	])("gives manual recovery for an owned Local registration whose root is %s", (state) => {
 		const root = join(home, "project");
 		const scoped = local(root);
-		configureClients([localCode()], launch, scoped);
+		configure([localCode()], scoped);
 		if (state === "missing") rmSync(root, { recursive: true });
 		else rmSync(join(root, ".git"), { recursive: true });
 		const before = readFileSync(code().path, "utf8");
@@ -1030,17 +985,14 @@ describe("checkout-scoped installation", () => {
 		const root = join(home, "project");
 		const scoped = local(root);
 		const original = { command: launch.command, args: [managed()] };
-		write(
-			code().path,
-			JSON.stringify({ projects: { [root]: { mcpServers: { pharaoh: original } } } }),
-		);
+		writeJson(code().path, { projects: { [root]: { mcpServers: { pharaoh: original } } } });
 		const selected = {
 			...original,
 			args: [...original.args, "--install-scope", "local", "--install-root", root],
 		};
-		expect(configureClients([localCode()], selected, scoped)[0].status).toBe("configured");
+		expect(configure([localCode()], scoped, selected)[0].status).toBe("configured");
 		expect(verifiedCodingClients(scoped)).toEqual(["claude-code"]);
-		expect(JSON.parse(readFileSync(code().path, "utf8")).mcpServers).toBeUndefined();
+		expect(readJson(code().path).mcpServers).toBeUndefined();
 	});
 
 	it("preserves custom and disabled project registrations", () => {
@@ -1052,7 +1004,7 @@ describe("checkout-scoped installation", () => {
 		]) {
 			const before = JSON.stringify({ projects: { [root]: project } });
 			write(code().path, before);
-			expect(configureClients([localCode()], launch, scoped)[0].status).toMatch(/^preserved-/);
+			expect(configure([localCode()], scoped)[0].status).toMatch(/^preserved-/);
 			expect(readFileSync(code().path, "utf8")).toBe(before);
 		}
 	});
@@ -1062,9 +1014,9 @@ describe("checkout-scoped installation", () => {
 		const scoped = local(root);
 		write(codex().path, 'model = "keep-global"\n');
 		const target = { ...codex(), cli: "codex", version: "0.166.0" };
-		expect(configureClients([target], launch, scoped)[0].status).toBe("configured");
+		expect(configure([target], scoped)[0].status).toBe("configured");
 		expect(readFileSync(codex().path, "utf8")).toBe('model = "keep-global"\n');
-		expect(parseToml(readFileSync(join(root, ".codex", "config.toml"), "utf8"))).toMatchObject({
+		expect(readToml(join(root, ".codex", "config.toml"))).toMatchObject({
 			mcp_servers: { pharaoh: launch },
 		});
 		expect(verifiedCodingClients(scoped)).toEqual(["codex"]);
@@ -1072,9 +1024,9 @@ describe("checkout-scoped installation", () => {
 
 	it("reports an unverified Codex project-hook version without creating global fallback", () => {
 		const scoped = local(join(home, "project"));
-		expect(
-			configureClients([{ ...codex(), cli: "codex", version: "0.100.0" }], launch, scoped)[0],
-		).toMatchObject({ status: "unavailable" });
+		expect(configure([{ ...codex(), cli: "codex", version: "0.100.0" }], scoped)[0]).toMatchObject({
+			status: "unavailable",
+		});
 		expect(preflightInstallScope([code()], options)).toEqual([]);
 	});
 
@@ -1090,7 +1042,7 @@ describe("checkout-scoped installation", () => {
 			scoped.scope!,
 		);
 		expect(preflightInstallScope(targets, scoped)[0].status).toBe("ambiguous");
-		expect(configureClients(targets, launch, scoped)[0].status).toBe("preserved-custom");
+		expect(configure(targets, scoped)[0].status).toBe("preserved-custom");
 		expect(readFileSync(path, "utf8")).toBe('model = "shared-team-model"\n');
 	});
 });
@@ -1098,7 +1050,7 @@ describe("checkout-scoped installation", () => {
 describe("failures and cleanup", () => {
 	it("retains a successful client when another configuration is malformed", () => {
 		write(code().path, '{"token":"private-canary", broken');
-		const outcomes = configureClients([code(), codex()], launch, options);
+		const outcomes = configure([code(), codex()]);
 		expect(outcomes.map(({ status }) => status)).toEqual(["failed", "configured"]);
 		expect(JSON.stringify(outcomes)).not.toContain("private-canary");
 	});
@@ -1107,36 +1059,29 @@ describe("failures and cleanup", () => {
 		const external = join(home, "external.json");
 		write(external, "{}\n");
 		symlinkSync(external, code().path);
-		expect(configureClients([code()], launch, options)[0].status).toBe("failed");
+		expect(configure([code()])[0].status).toBe("failed");
 		expect(readFileSync(external, "utf8")).toBe("{}\n");
 	});
 
 	it("removes managed registrations and preserves a later user edit", () => {
-		expect(
-			configureClients([code(), codex()], launch, options).map(({ status }) => status),
-		).toEqual(["configured", "configured"]);
+		expect(configure([code(), codex()]).map(({ status }) => status)).toEqual(bothConfigured);
 		write(code().path, '{"mcpServers":{"pharaoh":{"url":"https://custom.example"}}}\n');
 		const outcomes = cleanupManagedClients(options);
 		expect(outcomes.find(({ client }) => client === "claude-code")?.status).toBe(
 			"preserved-custom",
 		);
 		expect(outcomes.find(({ client }) => client === "codex")?.status).toBe("configured");
-		expect(parseToml(readFileSync(codex().path, "utf8")).mcp_servers).toBeUndefined();
+		expect(readToml(codex().path).mcp_servers).toBeUndefined();
 	});
 
 	it("reports unowned active registrations and treats an already removed registration as a successful retry", () => {
+		const selected = { ...options, client: "claude-code" as const };
 		write(code().path, '{"mcpServers":{"pharaoh":{"url":"https://custom.example"}}}');
-		expect(cleanupManagedClients({ ...options, client: "claude-code" })[0].status).toBe(
-			"preserved-custom",
-		);
+		expect(cleanupManagedClients(selected)[0].status).toBe("preserved-custom");
 		write(code().path, "{}");
-		configureClients([code()], launch, options);
-		expect(cleanupManagedClients({ ...options, client: "claude-code" })[0].status).toBe(
-			"configured",
-		);
-		expect(cleanupManagedClients({ ...options, client: "claude-code" })[0].status).toBe(
-			"already-configured",
-		);
+		configure([code()]);
+		expect(cleanupManagedClients(selected)[0].status).toBe("configured");
+		expect(cleanupManagedClients(selected)[0].status).toBe("already-configured");
 	});
 
 	it("targets the recorded Codex profile when cleaning a CLI-created registration", () => {
@@ -1168,9 +1113,9 @@ describe("failures and cleanup", () => {
 			return "";
 		};
 		write(codex().path, 'model = "retained"\n');
-		expect(
-			configureClients([{ ...codex(), cli: "codex" }], launch, { ...options, execute })[0].status,
-		).toBe("configured");
+		expect(configure([{ ...codex(), cli: "codex" }], { ...options, execute })[0].status).toBe(
+			"configured",
+		);
 		const outcomes = cleanupManagedClients({
 			...options,
 			execute,

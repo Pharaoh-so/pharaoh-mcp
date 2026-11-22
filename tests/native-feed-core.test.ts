@@ -14,9 +14,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setNativeFeedPreviewEnabled } from "../runtime/feed-hooks.mjs";
 import {
 	deriveFeedCohortKey,
 	feedCheckoutIdentity,
+	nativeFeedPreviewEnabled,
 	readFeedBranch,
 	readFeedSignInGeneration,
 	resolveFeedCheckout,
@@ -24,7 +26,12 @@ import {
 } from "../runtime/feed-identity.mjs";
 import { feedHash, feedRoot, writeFeedJSON } from "../runtime/feed-io.mjs";
 import { beginFeedSignIn, commitFeedSignIn } from "../runtime/feed-signin.mjs";
-import { createFeedStore, type FeedAccessProof } from "../runtime/feed-store.mjs";
+import {
+	createFeedStore,
+	type FeedAccessProof,
+	feedProofIdentity,
+	type HostedFeedPublication,
+} from "../runtime/feed-store.mjs";
 
 let home: string;
 let credentialsPath: string;
@@ -61,6 +68,16 @@ function recipient(agentId: string, interests = ["src/shared.ts"]) {
 	expect(store.registerFeedRoot({ cohort, rootId, checkout })).toBe(true);
 	expect(store.registerRecipient({ ...scope(agentId), checkout, interests })).toBe(true);
 }
+const publication = (
+	index: number,
+	modules: HostedFeedPublication["modules"],
+): HostedFeedPublication => ({
+	commit: String(index).repeat(40),
+	signature: "a".repeat(16),
+	generation: 7,
+	time: `2026-11-19T00:0${index}:00Z`,
+	modules,
+});
 function connection(clientVersion = "0.166.0", state: "pending" | "initialized" = "initialized") {
 	const value = {
 		id: randomUUID(),
@@ -264,6 +281,443 @@ describe("native feed authorization and sibling claims", () => {
 		const first = store.drainRecipient({ ...scope("worker-b"), maxChars: 160 })!;
 		expect(first.events).toHaveLength(1);
 		expect(store.drainRecipient(scope("worker-b"))).toMatchObject({ events: [], gap: true });
+	});
+	it("keeps preview notices outside the old v1 fallback's events and routes each proven author once", () => {
+		authorize();
+		recipient("worker-a");
+		recipient("worker-b");
+		setNativeFeedPreviewEnabled("codex", true, options());
+		const path = "src/shared.ts";
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort })!;
+		for (const agentId of ["worker-a", "worker-b", "worker-a"]) {
+			expect(store.recordObservation({ ...scope(agentId), paths: [path], kind: "read" })).toBe(
+				true,
+			);
+		}
+		for (const observation of store.readObservations({ cohort })) {
+			expect(
+				store.publishOverlap({
+					...scope(observation.agentId),
+					observationId: observation.id,
+					path,
+					provenance: { head: "a".repeat(40), fingerprint: "b".repeat(64) },
+					authorizationIdentity,
+				}),
+			).toBe("published");
+		}
+		const base = store.publishFinding({
+			...scope("worker-a"),
+			kind: "invalidation",
+			references: [path],
+			summary: "Saved file changed.",
+		});
+		expect(base).not.toBeNull();
+		setNativeFeedPreviewEnabled("codex", false, options());
+		const wire = () =>
+			JSON.parse(readFileSync(join(feedRoot(options()), "state", `${cohort}.json`), "utf8"));
+		// The previous runtime's v1 reader enumerates state.events only.
+		expect(wire().events).toEqual([base]);
+		expect(wire().previewEvents).toMatchObject([{ agentId: "worker-a" }, { agentId: "worker-b" }]);
+		const preview = () => nativeFeedPreviewEnabled("codex", options());
+		expect(store.drainRecipient({ ...scope("worker-b"), preview: preview() })?.events).toEqual([
+			base,
+		]);
+		setNativeFeedPreviewEnabled("codex", true, options());
+		for (const [reader, peer] of [
+			["worker-a", "worker-b"],
+			["worker-b", "worker-a"],
+		]) {
+			const drain = () => store.drainRecipient({ ...scope(reader), preview: preview() });
+			expect(drain()?.events).toMatchObject([{ agentId: peer, previewOnly: true }]);
+			expect(drain()?.events).toEqual([]);
+		}
+		authorize(2);
+		expect(wire().previewEvents).toEqual([]);
+	});
+
+	it("drops preview notices across a legacy proof rotation in the same epoch", () => {
+		const prior = authorize();
+		recipient("worker-a");
+		recipient("worker-b");
+		const path = "src/shared.ts";
+		expect(store.recordObservation({ ...scope("worker-a"), paths: [path], kind: "read" })).toBe(
+			true,
+		);
+		const [observation] = store.readObservations({ cohort });
+		expect(
+			store.publishOverlap({
+				...scope("worker-a"),
+				observationId: observation.id,
+				path,
+				provenance: { head: "a".repeat(40), fingerprint: "b".repeat(64) },
+				authorizationIdentity: store.currentAuthorizationIdentity({ cohort })!,
+			}),
+		).toBe("published");
+		const root = feedRoot(options());
+		const name = `${cohort}.json`;
+		const readState = () => JSON.parse(readFileSync(join(root, "state", name), "utf8"));
+		const state = readState();
+		expect(state.previewEvents).toHaveLength(1);
+		const next = { ...prior, actor: prior.actor + 1, scopeRevision: randomUUID() };
+		const identity = feedProofIdentity(next);
+		// The fallback rotates its known state fields and preserves the preview lane verbatim.
+		writeFeedJSON(
+			join(root, "state"),
+			name,
+			{
+				...state,
+				proofIdentity: identity,
+				revision: next.scopeRevision,
+				events: [],
+				observations: [],
+				receipts: [],
+				producer: {},
+				recipients: state.recipients.map((entry: Record<string, unknown>) => ({
+					...entry,
+					proofIdentity: identity,
+					seeded: false,
+					claimed: [],
+					pendingClaims: [],
+					capability: null,
+				})),
+			},
+			262_144,
+		);
+		writeFeedJSON(join(root, "proofs"), name, next, 4096);
+		expect(store.readAccessProof({ cohort })).toMatchObject({
+			actor: next.actor,
+			epoch: prior.epoch,
+		});
+		expect(readState().previewEvents).toHaveLength(1);
+		expect(store.drainRecipient({ ...scope("worker-b"), preview: true })?.events).toEqual([]);
+		expect(readState().previewEvents).toEqual([]);
+	});
+
+	it("drops hosted watch baselines when an overlap-only runtime rebinds the preview lane", () => {
+		const prior = authorize();
+		recipient("worker-a");
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort })!;
+		expect(
+			store.recordHostedModuleWatch({
+				...scope("worker-a"),
+				module: "auth",
+				authorizationIdentity,
+			}),
+		).toBe(true);
+		expect(store.readHostedModuleWatches({ cohort, authorizationIdentity })).toEqual(["auth"]);
+
+		const root = feedRoot(options());
+		const name = `${cohort}.json`;
+		const state = JSON.parse(readFileSync(join(root, "state", name), "utf8"));
+		const next = { ...prior, actor: prior.actor + 1, scopeRevision: randomUUID() };
+		const proofIdentity = feedProofIdentity(next);
+		const previewScope = feedHash(JSON.stringify([proofIdentity, next.scopeRevision]));
+		// Overlap-only code knows the preview binding but preserves the older hosted binding.
+		writeFeedJSON(
+			join(root, "state"),
+			name,
+			{
+				...state,
+				proofIdentity,
+				revision: next.scopeRevision,
+				previewScope,
+				recipients: state.recipients.map((entry: Record<string, unknown>) => ({
+					...entry,
+					proofIdentity,
+					capability: null,
+				})),
+			},
+			262_144,
+		);
+		writeFeedJSON(join(root, "proofs"), name, next, 4096);
+		expect(store.currentAuthorizationIdentity({ cohort })).toBe(previewScope);
+		expect(store.readHostedModuleWatches({ cohort, authorizationIdentity: previewScope })).toEqual(
+			[],
+		);
+	});
+
+	it.each([
+		"revocation",
+		"rotation",
+	])("retains dormant hosted watches through expiry until %s", (change) => {
+		authorize();
+		recipient("worker-a");
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
+		if (!authorizationIdentity) throw new Error("Fixture feed access was unavailable");
+		const access = { cohort, authorizationIdentity };
+		const input = { ...scope("worker-a"), module: "auth", authorizationIdentity };
+		const read = () => store.drainRecipient({ ...scope("worker-a"), preview: true });
+		const first = publication(1, [{ module: "auth", edges: [] }]);
+		const next = publication(2, [{ module: "auth", edges: [["auth", "db"]] }]);
+		expect(store.recordHostedModuleWatch(input)).toBe(true);
+		expect(store.applyHostedModulePublication({ ...access, publication: first })).toBe(true);
+		time += 60_001;
+		store.pruneExpired();
+		time += 10_000;
+		store.pruneExpired();
+		expect(existsSync(join(feedRoot(options()), "proofs", `${cohort}.json`))).toBe(false);
+		// A wall-clock rollback cannot authorize a previously expired proof.
+		time -= 20_000;
+		expect(store.readAccessProof({ cohort })).toBeNull();
+		expect(store.readHostedModuleWatches(access)).toEqual([]);
+		expect(store.recordHostedModuleWatch(input)).toBe(false);
+		expect(store.applyHostedModulePublication({ ...access, publication: next })).toBe(false);
+		expect(read()).toBeNull();
+
+		authorize();
+		expect(store.currentAuthorizationIdentity({ cohort })).toBe(authorizationIdentity);
+		expect(store.readHostedModuleWatches(access)).toEqual(["auth"]);
+		expect(store.applyHostedModulePublication({ ...access, publication: next })).toBe(true);
+		expect(read()?.events).toMatchObject([
+			{ kind: "fact", summary: expect.stringContaining("auth dependencies changed") },
+		]);
+
+		if (change === "revocation") {
+			expect(store.clearFeedScope(access)).toBe(true);
+			authorize();
+		} else authorize(2);
+		const refreshed = store.currentAuthorizationIdentity({ cohort });
+		if (!refreshed) throw new Error("Fixture feed access was unavailable");
+		expect(refreshed).not.toBe(authorizationIdentity);
+		expect(store.readHostedModuleWatches({ cohort, authorizationIdentity: refreshed })).toEqual([]);
+	});
+
+	it("keeps complete hosted evidence across same-stamp timeouts and invalidates incomplete advances", () => {
+		authorize();
+		recipient("worker-a");
+		recipient("worker-b");
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
+		if (!authorizationIdentity) throw new Error("Fixture feed access was unavailable");
+		const apply = (value: HostedFeedPublication) =>
+			expect(
+				store.applyHostedModulePublication({ cohort, authorizationIdentity, publication: value }),
+			).toBe(true);
+		const read = (agentId: string) => {
+			const input = scope(agentId);
+			const result = store.drainRecipient({ ...input, preview: true });
+			if (result?.claimId)
+				store.markEmitted({
+					...input,
+					claimId: result.claimId,
+					hostedGap: result.hostedGap,
+					hostedNoticeIds: result.events.filter((event) => event.hosted).map((event) => event.id),
+				});
+			return result?.events;
+		};
+		for (const [agentId, module] of [
+			["worker-a", "auth"],
+			["worker-b", "db"],
+		])
+			expect(
+				store.recordHostedModuleWatch({ ...scope(agentId), module, authorizationIdentity }),
+			).toBe(true);
+
+		const missing = { module: "db", edges: null };
+		apply(publication(1, [{ module: "auth", edges: [] }, missing]));
+		apply(publication(1, [{ module: "auth", edges: null }, missing]));
+		expect(read("worker-a")).toEqual([]);
+		expect(read("worker-b")).toEqual([]);
+
+		apply(publication(2, [{ module: "auth", edges: [["auth", "db"]] }, missing]));
+		expect(read("worker-a")).toMatchObject([
+			{ kind: "fact", summary: expect.stringContaining("auth dependencies changed") },
+		]);
+		expect(read("worker-b")).toMatchObject([
+			{ kind: "invalidation", summary: expect.stringContaining("db needs a dependency recheck") },
+		]);
+
+		apply(
+			publication(3, [
+				{ module: "auth", edges: null },
+				{ module: "db", edges: [] },
+			]),
+		);
+		expect(read("worker-a")).toMatchObject([
+			{ kind: "invalidation", summary: expect.stringContaining("auth needs a dependency recheck") },
+		]);
+		expect(read("worker-b")).toMatchObject([
+			{ kind: "invalidation", summary: expect.stringContaining("db needs a dependency recheck") },
+		]);
+		apply(
+			publication(3, [
+				{ module: "auth", edges: null },
+				{ module: "db", edges: [] },
+			]),
+		);
+		expect(read("worker-a")).toEqual([]);
+		expect(read("worker-b")).toEqual([]);
+	});
+
+	it.each([
+		"notice expiry",
+		"proof expiry",
+		"supersession",
+		"retirement",
+	])("reports a missed hosted notice only to its preview recipient after %s", (loss) => {
+		authorize();
+		recipient("worker-a");
+		recipient("worker-b");
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
+		if (!authorizationIdentity) throw new Error("Fixture feed access was unavailable");
+		const access = { cohort, authorizationIdentity };
+		const watcher = scope("worker-a");
+		const sibling = scope("worker-b");
+		for (const initial of [watcher, sibling]) {
+			const claimId = store.drainRecipient(initial)?.claimId;
+			if (!claimId) throw new Error("Fixture seed was not claimed");
+			expect(store.markEmitted({ ...initial, claimId })).toBe(true);
+		}
+		expect(
+			store.recordHostedModuleWatch({ ...watcher, module: "auth", authorizationIdentity }),
+		).toBe(true);
+		const apply = (value: HostedFeedPublication) =>
+			expect(store.applyHostedModulePublication({ ...access, publication: value })).toBe(true);
+		const changed: HostedFeedPublication["modules"] = [{ module: "auth", edges: [["auth", "db"]] }];
+		apply(publication(1, [{ module: "auth", edges: [] }]));
+		if (loss === "proof expiry") time += 10_000;
+		apply(publication(2, changed));
+		if (loss === "notice expiry") {
+			time += 30_000;
+			authorize();
+			time += 30_001;
+		} else if (loss === "proof expiry") {
+			time += 50_001;
+			store.pruneExpired();
+			expect(store.drainRecipient({ ...watcher, preview: true })).toBeNull();
+			authorize();
+		} else if (loss === "supersession") apply(publication(3, changed));
+		else expect(store.retireHostedModuleNotices(access)).toBe(true);
+
+		const quiet = { events: [], gap: false, hostedGap: false };
+		expect(store.drainRecipient(watcher)).toMatchObject(quiet);
+		expect(store.drainRecipient({ ...sibling, preview: true })).toMatchObject(quiet);
+		const preview = () => store.drainRecipient({ ...watcher, preview: true });
+		expect(preview()).toMatchObject({ ...quiet, hostedGap: true });
+		const wire = JSON.parse(
+			readFileSync(join(feedRoot(options()), "state", `${cohort}.json`), "utf8"),
+		);
+		expect(wire.recipients).toContainEqual(
+			expect.objectContaining({ agentId: watcher.agentId, pendingClaims: [] }),
+		);
+		// An abandoned preview claim stays invisible to the base feed and can be claimed again.
+		expect(store.drainRecipient(watcher)).toMatchObject(quiet);
+		const claim = preview();
+		expect(claim).toMatchObject({ ...quiet, hostedGap: true });
+		if (!claim?.claimId) throw new Error("Fixture hosted gap was not claimed");
+		expect(store.markEmitted({ ...watcher, claimId: claim.claimId, hostedGap: true })).toBe(true);
+		expect(preview()).toMatchObject(quiet);
+	});
+
+	it.each([
+		false,
+		true,
+	])("counts only the hosted notice confirmed in a mixed batch (visible=%s)", (visible) => {
+		authorize();
+		recipient("worker-a");
+		recipient("worker-b");
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
+		if (!authorizationIdentity) throw new Error("Fixture feed access was unavailable");
+		const access = { cohort, authorizationIdentity };
+		const watcher = scope("worker-a");
+		const preview = () => store.drainRecipient({ ...watcher, preview: true });
+		expect(
+			store.recordHostedModuleWatch({ ...watcher, module: "auth", authorizationIdentity }),
+		).toBe(true);
+		expect(
+			store.publishFinding({
+				...scope("worker-b"),
+				kind: "invalidation",
+				summary: "Saved file changed.",
+				references: ["src/shared.ts"],
+			}),
+		).not.toBeNull();
+		const first = publication(1, [{ module: "auth", edges: [] }]);
+		const changed = publication(2, [{ module: "auth", edges: [["auth", "db"]] }]);
+		expect(store.applyHostedModulePublication({ ...access, publication: first })).toBe(true);
+		expect(store.applyHostedModulePublication({ ...access, publication: changed })).toBe(true);
+		const claim = preview();
+		const hosted = claim?.events.find((event) => event.hosted);
+		const base = claim?.events.find((event) => !event.previewOnly);
+		if (!claim?.claimId || !hosted || !base)
+			throw new Error("Fixture did not claim a mixed packet");
+
+		if (!visible) {
+			expect(store.retireHostedModuleNotices(access)).toBe(true);
+			expect(store.currentHostedModuleNoticeIds({ ...access, ids: [hosted.id] })).toEqual([]);
+		}
+		// Supplying the base ID as a hosted acknowledgment must not affect delivery tracking.
+		expect(
+			store.markEmitted({
+				...watcher,
+				claimId: claim.claimId,
+				authorizationIdentity,
+				hostedNoticeIds: visible ? [hosted.id] : [base.id],
+			}),
+		).toBe(true);
+		if (visible) expect(store.retireHostedModuleNotices(access)).toBe(true);
+		expect(preview()).toMatchObject({ events: [], gap: false, hostedGap: !visible });
+	});
+
+	it("keeps individually current hosted IDs when a selected batch is partly stale", () => {
+		authorize();
+		recipient("worker-a");
+		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
+		if (!authorizationIdentity) throw new Error("Fixture feed access was unavailable");
+		const watcher = scope("worker-a");
+		const access = { cohort, authorizationIdentity };
+		for (const module of ["auth", "db"])
+			expect(store.recordHostedModuleWatch({ ...watcher, module, authorizationIdentity })).toBe(
+				true,
+			);
+		const first = publication(1, [
+			{ module: "auth", edges: [] },
+			{ module: "db", edges: [] },
+		]);
+		const next = publication(2, [
+			{ module: "auth", edges: [["auth", "api"]] },
+			{ module: "db", edges: [["auth", "db"]] },
+		]);
+		expect(store.applyHostedModulePublication({ ...access, publication: first })).toBe(true);
+		expect(store.applyHostedModulePublication({ ...access, publication: next })).toBe(true);
+		const ids = store
+			.drainRecipient({ ...watcher, preview: true })
+			?.events.map((event) => event.id);
+		if (!ids || ids.length !== 2) throw new Error("Fixture did not claim two hosted notices");
+		const [stale, current] = ids;
+		const directory = join(feedRoot(options()), "state");
+		const filename = `${cohort}.json`;
+		const state = JSON.parse(readFileSync(join(directory, filename), "utf8"));
+		const event = state.previewEvents.find((value: { id: string }) => value.id === stale);
+		event.createdAt = time - 60_001;
+		writeFeedJSON(directory, filename, state, 262_144);
+		expect(store.currentHostedModuleNoticeIds({ ...access, ids })).toEqual([current]);
+	});
+
+	it("distinguishes terminal overlap exclusions from temporary store contention", () => {
+		authorize();
+		recipient("worker-a");
+		const path = "src/shared.ts";
+		expect(store.recordObservation({ ...scope("worker-a"), paths: [path], kind: "read" })).toBe(
+			true,
+		);
+		const [observation] = store.readObservations({ cohort });
+		const input = {
+			...scope("worker-a"),
+			observationId: observation.id,
+			path,
+			provenance: { head: "a".repeat(40), fingerprint: "b".repeat(64) },
+			authorizationIdentity: store.currentAuthorizationIdentity({ cohort })!,
+		};
+		expect(store.publishOverlap(input)).toBe("irrelevant");
+		recipient("worker-b");
+		expect(
+			store.publishOverlap({ ...input, provenance: { ...input.provenance, head: "bad" } }),
+		).toBe("irrelevant");
+		const lock = join(feedRoot(options()), "state", `${cohort}.lock`);
+		mkdirSync(lock, { mode: 0o700 });
+		expect(store.publishOverlap(input)).toBe("retry");
+		rmSync(lock, { recursive: true });
+		expect(store.publishOverlap(input)).toBe("published");
 	});
 	it("rejects undeliverable reports and defers a valid report until the seed fits", () => {
 		authorize();

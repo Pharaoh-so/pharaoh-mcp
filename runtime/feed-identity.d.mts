@@ -31,3 +31,8 @@ export function resolveFeedProfile(
 		now?: number;
 	},
 ): { admit: boolean; basis: string; exactVersion: string; reason: string; contract?: string };
+/** Read explicit per-client enrollment for feed features awaiting wider qualification. */
+export function nativeFeedPreviewEnabled(
+	client: "codex" | "claude-code",
+	options?: { home?: string },
+): boolean;
