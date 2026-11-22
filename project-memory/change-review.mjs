@@ -1,8 +1,12 @@
 /** Local, opt-in change review: one native continuation and content-bound proof per turn. */
 import { createHash, randomUUID } from "node:crypto";
 import {
+	closeSync,
+	constants,
+	fstatSync,
 	lstatSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
 	readlinkSync,
@@ -13,8 +17,10 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { readActiveMemoryClients } from "./client-settings.mjs";
 import { atomicWrite, gitRawBefore, REPO, shellWord, updateLocalState } from "./local.mjs";
 import { changeReviewEnabled } from "./preferences.mjs";
+import { localReviewHooksInstalled } from "./user-target.mjs";
 
 const TTL = 12 * 60 * 60 * 1000;
 const MAX_DIFF = 2 * 1024 * 1024;
@@ -164,11 +170,19 @@ function identity(input, options) {
 	const key = sha(`${options.client}\0${input.session_id}\0${root}`);
 	const turn = input.turn_id ?? input.prompt_id;
 	if (turn !== undefined && (typeof turn !== "string" || turn.length > 256)) return;
-	return { key, root, turn, repo: options.target.repo };
+	return { key, root, turn, repo: options.target.repo, installRoot: options.scope?.root ?? null };
 }
 
 function enabled(options) {
-	return changeReviewEnabled(options.home ?? homedir(), options.scope) === true;
+	const home = options.home ?? homedir();
+	if (!changeReviewEnabled(home, options.scope)) return false;
+	// Only a complete, current local hook installation may displace or act in place of Global.
+	const local = { kind: "local", root: realpathSync(options.target.root) };
+	if (options.scope?.kind === "local" && options.scope.root !== local.root) return false;
+	const digest =
+		changeReviewEnabled(home, local) && readActiveMemoryClients(home, local)[options.client];
+	const localOwnsReview = Boolean(digest && localReviewHooksInstalled(home, local, digest));
+	return options.scope?.kind === "local" ? localOwnsReview : !localOwnsReview;
 }
 function stateName(key) {
 	return `turn-${key}.json`;
@@ -178,21 +192,28 @@ function runPath(directory, id) {
 	return join(directory, `run-${id}.json`);
 }
 
+function privateBytes(path, limit) {
+	const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const s = fstatSync(fd);
+		if (
+			!s.isFile() ||
+			s.nlink !== 1 ||
+			s.mode & 0o077 ||
+			s.uid !== process.getuid?.() ||
+			s.size > limit
+		)
+			throw new Error("Invalid private review record.");
+		return readFileSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+}
+
 /** Read an owned bounded review record. This file contains only local evidence and references. */
 export function readReviewRun(directory, id) {
 	privateDirectory(directory);
-	const path = runPath(directory, id);
-	const s = lstatSync(path);
-	if (
-		!s.isFile() ||
-		s.isSymbolicLink() ||
-		s.nlink !== 1 ||
-		s.mode & 0o077 ||
-		s.uid !== process.getuid?.() ||
-		s.size > MAX_RUN
-	)
-		throw new Error("Invalid private review record.");
-	const run = JSON.parse(readFileSync(path, "utf8"));
+	const run = JSON.parse(privateBytes(runPath(directory, id), MAX_RUN));
 	if (run.id !== id || run.version !== 1 || run.expires < Date.now())
 		throw new Error("Review expired.");
 	return run;
@@ -266,6 +287,7 @@ export function beginReviewTurn(input, options) {
 						root: who.root,
 						repo: options.target.repo,
 						nativeTurn: who.turn,
+						installRoot: who.installRoot,
 						turn,
 						baseline: manifest.codeFingerprint,
 						expires: now + TTL,
@@ -287,6 +309,7 @@ function matches(state, who, now) {
 		state.root === who.root &&
 		state.repo === who.repo &&
 		state.key === who.key &&
+		(!Object.hasOwn(state, "installRoot") || state.installRoot === who.installRoot) &&
 		state.expires > now &&
 		(!who.turn || state.nativeTurn === who.turn)
 	);
@@ -296,6 +319,7 @@ function matches(state, who, now) {
 export function reviewTurnInput(input, options) {
 	if (input.turn_id || input.prompt_id) return input;
 	try {
+		if (!enabled(options)) return input;
 		const who = identity(input, options);
 		if (!who) return input;
 		const now = options.now ?? Date.now();
@@ -471,8 +495,56 @@ export function observeReviewTool(input, options) {
 	}
 }
 
-/** Consume a verified receipt once, only in the same current native turn and unchanged worktree. */
-export function consumeReviewReceipt(input, options) {
+/** Read the preceding classic nonce before the native prompt enters the session. */
+export function completionBoundary(input, options) {
+	try {
+		if (!enabled(options)) return;
+		const who = identity(input, options);
+		if (!who) return;
+		privateDirectory(options.directory);
+		try {
+			const previous = JSON.parse(privateBytes(join(options.directory, stateName(who.key)), 8192));
+			if (previous.key === who.key && ID.test(previous.turn))
+				return { previousReviewTurn: previous.turn };
+		} catch (error) {
+			if (error.code === "ENOENT") return { previousReviewTurn: null };
+		}
+	} catch {
+		/* Unreadable prior state cannot authenticate a new prompt. */
+	}
+}
+
+/** Pair native turn.start with the new classic nonce created after prompt.submit. */
+export function bindCompletionTurn(input, options) {
+	try {
+		const prior = input.previous_review_turn;
+		const native = input.completion_turn_id;
+		if (!enabled(options) || !ID.test(native) || !(prior === null || ID.test(prior))) return;
+		const who = identity(input, options);
+		if (!who) return;
+		const now = options.now ?? Date.now();
+		return updateLocalState(
+			options.directory,
+			stateName(who.key),
+			(state) => {
+				if (
+					!matches(state, who, now) ||
+					state.installRoot !== who.installRoot ||
+					state.turn === prior ||
+					state.attempted ||
+					(state.completionTurn && state.completionTurn !== native)
+				)
+					return;
+				return { state: { ...state, completionTurn: native }, context: { reviewTurn: state.turn } };
+			},
+			now,
+		);
+	} catch {
+		/* Ambiguous or stale native observations earn no receipt. */
+	}
+}
+
+function claimVerifiedReview(input, options, display) {
 	try {
 		if (!enabled(options)) return;
 		const who = identity(input, options);
@@ -482,30 +554,56 @@ export function consumeReviewReceipt(input, options) {
 			options.directory,
 			stateName(who.key),
 			(state) => {
-				if (!matches(state, who, now) || !state.reviewId || state.delivered) return;
+				if (!matches(state, who, now) || !state.reviewId) return;
+				if (display) {
+					if (
+						state.delivered ||
+						state.installRoot !== who.installRoot ||
+						!ID.test(input.completion_turn_id) ||
+						state.completionTurn !== input.completion_turn_id ||
+						state.turn !== input.review_turn
+					)
+						return;
+				} else if (state.captureCheckTaken || state.delivered) return;
 				const run = readReviewRun(options.directory, state.reviewId);
-				if (run.turn !== state.turn || run.key !== who.key) return;
+				if (
+					run.turn !== state.turn ||
+					run.key !== who.key ||
+					run.root !== who.root ||
+					run.repo !== who.repo ||
+					(run.scope?.root ?? null) !== who.installRoot
+				)
+					return;
 				if (run.phase !== "verified" || !run.receipt) {
-					if (input.stop_hook_active === true) {
+					if (!display && input.stop_hook_active === true) {
 						run.phase = "unproven";
 						writeReviewRun(options.directory, run);
 					}
 					return;
 				}
+				if (!display && options.captureEnabled === false) return;
 				if (reviewManifest(who.root, options.deadline).fingerprint !== run.receipt.finalFingerprint)
 					return;
-				const message = `Pharaoh caught: ${run.finding.replace(/[.!?]+$/, "")}. Test failed before the fix; passed after. Proof: ${run.receipt.path}`;
+				const proof = join(realpathSync(options.directory), `proof-${run.id}.json`);
+				// Old private records can still supply their existing capture check. Visible delivery
+				// requires the verified artifact written by this version to remain byte-identical.
+				if (
+					(display || run.receipt.proofHash) &&
+					(run.receipt.path !== proof ||
+						sha(privateBytes(proof, MAX_RUN)) !== run.receipt.proofHash)
+				)
+					return;
+				if (display) {
+					const message = `Pharaoh caught: ${run.finding.replace(/[.!?]+$/, "")}. Test failed before the fix; passed after. Proof: ${proof}`;
+					return { state: { ...state, delivered: true }, context: { message } };
+				}
+				if (!run.receipt.command) return;
 				return {
-					state: { ...state, delivered: true },
+					state: { ...state, captureCheckTaken: true },
 					context: {
-						message,
-						finalCheck: run.receipt.command
-							? {
-									paths: run.receipt.repairedPaths,
-									check: run.receipt.command,
-									evidence: "the same behavioral test failed before repair and passed afterward",
-								}
-							: undefined,
+						paths: run.receipt.repairedPaths,
+						check: run.receipt.command,
+						evidence: "the same behavioral test failed before repair and passed afterward",
 					},
 				};
 			},
@@ -514,4 +612,14 @@ export function consumeReviewReceipt(input, options) {
 	} catch {
 		/* A stale or absent proof is never displayed as a success. */
 	}
+}
+
+/** Offer verifier evidence to optional capture once; leave visible delivery to native completion. */
+export function takeReviewCaptureCheck(input, options) {
+	return claimVerifiedReview(input, options, false);
+}
+
+/** Only the owning, explicitly bound foreground turn can consume its still-valid receipt. */
+export function consumeReviewReceipt(input, options) {
+	return claimVerifiedReview(input, options, true);
 }

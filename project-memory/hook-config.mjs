@@ -205,6 +205,46 @@ export function hasChangeReviewHooks(config, scope) {
 	);
 }
 
+/** Require the same scoped native groups and pinned hook argv that setup installs. */
+export function hasPinnedLocalReviewHooks(config, scope, hookPath) {
+	if (config?.disableAllHooks === true) return false;
+	const expected = updateUserHooks(
+		{},
+		"claude-code",
+		hookPath,
+		"",
+		false,
+		false,
+		false,
+		scope,
+		true,
+	);
+	return [
+		["UserPromptSubmit", "--user"],
+		["PostToolUse", "--review"],
+		["Stop", "--capture"],
+	].every(([event, mode]) => {
+		const wanted = expected.hooks[event].find((group) =>
+			hookCommand(group.hooks[0]).includes(shellWord(mode)),
+		);
+		const suffix = hookCommand(wanted.hooks[0]).slice(shellWord("").length);
+		return config?.hooks?.[event]?.some(
+			(group) =>
+				group.matcher === wanted.matcher &&
+				group.hooks?.some((entry) => {
+					const command = hookCommand(entry);
+					if (!command.endsWith(suffix)) return false;
+					// Only a single quoted absolute executable may precede the managed argument vector.
+					const executable = command.slice(0, -suffix.length);
+					return (
+						executable.startsWith("'/") &&
+						shellWord(executable.slice(1, -1).split("'\\''").join("'")) === executable
+					);
+				}),
+		);
+	});
+}
+
 /** Whether a Pharaoh user hook in one mode (`--graph`, `--capture`, `--diagnostics`) runs on `events`. */
 export function hasUserHookMode(config, events, mode, scope) {
 	const flag = shellWord(mode);

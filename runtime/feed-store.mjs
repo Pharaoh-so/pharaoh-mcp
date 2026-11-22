@@ -477,9 +477,10 @@ export function createFeedStore(options = {}) {
 							return false;
 						const state = load(cohort);
 						if (!state) return false;
-						const identity = authorizationIdentity(cohort, state);
+						const requiresAuthorization = guard.authorize !== false;
+						const identity = requiresAuthorization ? authorizationIdentity(cohort, state) : null;
 						if (
-							guard.authorize !== false &&
+							requiresAuthorization &&
 							(!identity ||
 								(guard.authorizationIdentity && identity !== guard.authorizationIdentity))
 						)
@@ -487,7 +488,7 @@ export function createFeedStore(options = {}) {
 						if (guard.expectedRevision && guard.expectedRevision !== state.revision) return false;
 						const result = operation(state);
 						if (result === false || result === null) return result;
-						if (guard.authorize !== false && authorizationIdentity(cohort, state) !== identity)
+						if (requiresAuthorization && authorizationIdentity(cohort, state) !== identity)
 							return false;
 						if (result === "irrelevant") return result;
 						if (!writeState(state)) return false;
@@ -1308,9 +1309,9 @@ export function createFeedStore(options = {}) {
 			);
 		},
 		readProducerState({ cohort }) {
-			const access = proof(cohort);
-			const state = access && load(cohort);
-			return state && state.proofIdentity === proofKey(access) ? state.producer : null;
+			if (!COHORT.test(cohort ?? "")) return null;
+			const state = load(cohort);
+			return state && proof(cohort, state) ? state.producer : null;
 		},
 		updateProducerState({ cohort, state: value, signIn, authorizationIdentity: expectedIdentity }) {
 			if (

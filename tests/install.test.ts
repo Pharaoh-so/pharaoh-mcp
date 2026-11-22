@@ -1267,11 +1267,17 @@ describe("NPX developer install", () => {
 		});
 		expect(await runFixture()).toBe(0);
 		expect(readFileSync(join(home, ".claude.json"), "utf8")).toContain("@pharaoh-so/mcp@0.3.50");
-		expect(output.join("\n")).toContain("install --migrate-legacy");
+		// Said once for the pins, and again as the kept client's own recovery line.
+		expect(output.filter((line) => line.startsWith("Kept those pins."))).toHaveLength(1);
+		expect(
+			output.filter((line) => line.startsWith("  ") && line.endsWith("install --migrate-legacy")),
+		).toHaveLength(1);
+		const firstRun = output.length;
 		expect(await runFixture({ migrateLegacy: true })).toBe(0);
 		expect(readJson(join(home, ".claude.json")).mcpServers.pharaoh).toEqual(
 			expectedClaudeRegistration(),
 		);
+		expect(output.slice(firstRun).some((line) => line.startsWith("Kept those pins."))).toBe(false);
 	});
 
 	it.each([

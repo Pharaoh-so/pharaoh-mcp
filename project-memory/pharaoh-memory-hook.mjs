@@ -4,9 +4,16 @@ import { fileURLToPath } from "node:url";
 import { memoryClientRoot } from "./client-settings.mjs";
 import { handleEvent, memoryReminder, skipMemoryPrompt } from "./hook-events.mjs";
 import { memoryScopeMatches, setMemoryInstallScope } from "./install-scope.mjs";
-import { conversationMemoryBinding, protectLocalShellAttempt, readStdin } from "./local.mjs";
+import {
+	checkout,
+	conversationMemoryBinding,
+	protectLocalShellAttempt,
+	readStdin,
+} from "./local.mjs";
 import {
 	activeMemoryRuntime,
+	matchingMemoryHint,
+	projectMemoryHint,
 	projectMemorySession,
 	readMemoryCredentials,
 	resolveMemoryHookTarget,
@@ -37,14 +44,23 @@ try {
 	setMemoryInstallScope(scope);
 	if (!memoryScopeMatches(input?.cwd, scope)) process.exit(0);
 	let result;
-	if (["--user", "--graph", "--diagnostics", "--capture", "--review"].includes(root)) {
+	const completion = new Map([
+		["--completion-boundary", "completionBoundary"],
+		["--completion-bind", "bindCompletionTurn"],
+		["--completion-receipt", "consumeReviewReceipt"],
+	]).get(root);
+	if (
+		completion ||
+		["--user", "--graph", "--diagnostics", "--capture", "--review"].includes(root)
+	) {
 		const reminder = root === "--user";
 		const diagnosticOnly = root === "--diagnostics";
 		const capture = root === "--capture";
 		const reviewOnly = root === "--review";
 		const event = input?.hook_event_name;
 		if (
-			reviewOnly
+			!completion &&
+			(reviewOnly
 				? event !== "PostToolUse"
 				: reminder
 					? event !== "UserPromptSubmit"
@@ -52,7 +68,7 @@ try {
 						? !["PostToolUse", "Stop", "StopFailure", "Interrupt", "SessionEnd"].includes(event)
 						: capture
 							? !["PostToolUse", "PostToolUseFailure", "Stop"].includes(event)
-							: event !== "PreToolUse" && event !== "PostToolUse"
+							: event !== "PreToolUse" && event !== "PostToolUse")
 		)
 			process.exit(0);
 		let structuralSearch;
@@ -69,7 +85,7 @@ try {
 		const review =
 			client === "claude-code" && choice?.graph !== false && changeReviewEnabled(undefined, scope);
 		const captureEnabled = choice?.capture !== false;
-		if (reviewOnly && !review) process.exit(0);
+		if ((reviewOnly || completion) && !review) process.exit(0);
 		if (
 			choice?.memory === false ||
 			(diagnosticOnly && choice?.diagnostics !== true) ||
@@ -90,17 +106,23 @@ try {
 		}
 		if (diagnosticOnly) protectLocalShellAttempt(client, input);
 		const credentials = await readMemoryCredentials();
-		const eligible = await resolveMemoryHookTarget(
-			client,
-			input?.cwd,
-			credentials,
-			reminder,
-			deadline,
-		);
+		// The first classic prompt may establish mapped-revision readiness. Its preceding native
+		// boundary reads only the preceding local nonce and never makes a readiness request.
+		let eligible;
+		if (completion === "completionBoundary") {
+			const local = checkout(input?.cwd, deadline);
+			if (local && matchingMemoryHint(local, projectMemoryHint(credentials))) eligible = local;
+		} else {
+			eligible = await resolveMemoryHookTarget(client, input?.cwd, credentials, reminder, deadline);
+		}
 		if (!eligible || performance.now() >= deadline) process.exit(0);
 		let reviewRuntime;
 		let reviewOptions;
-		if (review && (reminder || capture || reviewOnly) && performance.now() < deadline - 700) {
+		if (
+			review &&
+			(reminder || capture || reviewOnly || completion) &&
+			performance.now() < deadline - 700
+		) {
 			try {
 				reviewRuntime = await import("./change-review.mjs");
 			} catch {
@@ -114,10 +136,18 @@ try {
 					home: homedir(),
 					scope,
 					expectedServer: "pharaoh",
+					captureEnabled,
 				};
 		}
-		if (reviewOnly) {
-			reviewCall(reviewRuntime, "observeReviewTool", input, reviewOptions);
+		if (completion || reviewOnly) {
+			const response = reviewCall(
+				reviewRuntime,
+				completion ?? "observeReviewTool",
+				input,
+				reviewOptions,
+			);
+			if (completion && response && performance.now() < deadline)
+				await new Promise((done) => process.stdout.write(JSON.stringify(response), done));
 			process.exit(0);
 		}
 		if (capture) {
@@ -149,17 +179,21 @@ try {
 						reason: [continuation.reason, memoryCue].filter(Boolean).join("\n\n"),
 					};
 				} else {
-					const receipt = reviewCall(reviewRuntime, "consumeReviewReceipt", input, reviewOptions);
+					const verifiedCheck = reviewCall(
+						reviewRuntime,
+						"takeReviewCaptureCheck",
+						input,
+						reviewOptions,
+					);
 					let saved;
 					try {
 						saved = captureEnabled
-							? stopDecision(captureInput, { ...options, verifiedCheck: receipt?.finalCheck })
+							? stopDecision(captureInput, { ...options, verifiedCheck })
 							: undefined;
 					} catch {
-						/* Keep a verified local receipt visible even if optional capture cannot write. */
+						/* A failed optional capture leaves native completion free to claim its receipt. */
 					}
-					const message = [receipt?.message, saved?.systemMessage].filter(Boolean).join("\n");
-					result = message ? { ...(saved ?? {}), systemMessage: message } : saved;
+					result = saved;
 				}
 			} else if (captureEnabled) {
 				const ask = recordToolEvent(captureInput, options);

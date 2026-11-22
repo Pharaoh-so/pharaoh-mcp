@@ -116,6 +116,10 @@ beforeEach(() => {
 	);
 	mkdirSync(join(pkg, "hooks"));
 	cpSync(new URL("../hooks/route-grep.mjs", import.meta.url), join(pkg, "hooks/route-grep.mjs"));
+	cpSync(
+		new URL("../hooks/change-review-completion.js", import.meta.url),
+		join(pkg, "hooks/change-review-completion.js"),
+	);
 	writeFileSync(join(pkg, "dist/refresh.js"), "export function originBoundRefresh() {}\n");
 	writeFileSync(
 		join(pkg, "dist/credentials.js"),
@@ -2184,9 +2188,22 @@ function configureClaude(
 it("opts one existing Claude installation into review with capture off and preserves that choice on reinstall", () => {
 	const settings = configureClaude();
 	const options = { ...installOptions() };
+	const mod = join(home, ".claude", "skills", "pharaoh-change-review");
+	expect(existsSync(mod)).toBe(false);
 	expect(changeReviewEnabled(home)).toBe(false);
 	expect(readJson(settings).hooks.Stop).toBeUndefined();
 	expect(configureChangeReview(true, options)).toEqual([]);
+	expect(readJson(join(mod, "hooks/hooks.json")).modules).toEqual(["./register.js"]);
+	expect(readFileSync(join(mod, "hooks/register.js"), "utf8")).toContain(
+		join(
+			memoryClientRoot(home),
+			packagedMemoryBundle(packageRoot).sha256,
+			"pharaoh-memory-hook.mjs",
+		),
+	);
+	rmSync(join(mod, "hooks/register.js"));
+	expect(ensureMemoryHooks({ name: "claude-code" }, credentials, options)).toEqual([]);
+	expect(existsSync(join(mod, "hooks/register.js"))).toBe(true);
 	expect(changeReviewEnabled(home)).toBe(true);
 	const hooks = readJson(settings).hooks;
 	expect(hooks.Stop).toHaveLength(1);
@@ -2202,7 +2219,127 @@ it("opts one existing Claude installation into review with capture off and prese
 	configure({ enable: true, graphClients: ["claude-code"] });
 	expect(readJson(settings).hooks.Stop).toHaveLength(1);
 	expect(configureChangeReview(false, options)).toEqual([]);
+	expect(existsSync(mod)).toBe(false);
 	expect(readJson(settings).hooks.Stop).toBeUndefined();
+});
+
+it("keeps the Local receipt plugin private and preserves an edited file and disabled choice", () => {
+	const scope = { kind: "local" as const, root: checkout };
+	const options = { ...installOptions(), scope };
+	writeHookPreferences({ "claude-code": reviewChoice }, home);
+	configure({ enable: true, scope, clients: ["claude-code"], graphClients: ["claude-code"] });
+	const settings = join(checkout, ".claude/settings.local.json");
+	const config = readJson(settings);
+	config.enabledPlugins = { "pharaoh-change-review-local@skills-dir": false };
+	writeJson(settings, config);
+	expect(configureChangeReview(true, options)).toEqual([]);
+	const mod = join(checkout, ".claude/skills/pharaoh-change-review-local");
+	const module = join(mod, "hooks/register.js");
+	expect(readFileSync(module, "utf8")).toContain(JSON.stringify(["--install-root", checkout]));
+	expect(git("check-ignore", "--", module)).toContain("pharaoh-change-review-local");
+	expect(existsSync(join(home, ".claude", "skills"))).toBe(false);
+	writeFileSync(module, "// user edit");
+	expect(configureChangeReview(false, options)).toEqual([]);
+	expect(readFileSync(module, "utf8")).toBe("// user edit");
+	expect(readJson(settings).enabledPlugins).toEqual(config.enabledPlugins);
+	expect(existsSync(join(mod, ".claude-plugin/plugin.json"))).toBe(false);
+});
+
+it.each([
+	false,
+	true,
+])("keeps the receipt after a continuation unless final delivery is superseded (%s)", async (queued) => {
+	const settings = configureClaude();
+	expect(configureChangeReview(true, installOptions())).toEqual([]);
+	const file = join(home, ".claude/skills/pharaoh-change-review/hooks/register.js");
+	const { register } = await import(pathToFileURL(file).href);
+	type Handler = (
+		client: unknown,
+		event: Record<string, unknown>,
+		next: () => Promise<unknown>,
+	) => Promise<unknown>;
+	const hooks: Record<string, Handler> = {};
+	register((name: string, handler: Handler) => {
+		hooks[name] = handler;
+	});
+	const answer = { text: "Done" };
+	const next = vi.fn(async () => answer);
+	const operation = vi.fn(async (args: string[]): Promise<{ exitCode: number; stdout: string }> => {
+		if (args.includes("--completion-boundary"))
+			return { exitCode: 0, stdout: JSON.stringify({ previousReviewTurn: null }) };
+		if (args.includes("--completion-bind"))
+			return { exitCode: 0, stdout: JSON.stringify({ reviewTurn: "fixture-nonce" }) };
+		if (queued)
+			await hooks["prompt.submit"](client, { turnId: "first", origin: { kind: "composer" } }, next);
+		return { exitCode: 0, stdout: JSON.stringify({ message: "Fixture receipt" }) };
+	});
+	const client = {
+		session: { id: () => "session", root: () => checkout },
+		process: { run: operation },
+	};
+	await hooks["prompt.submit"](client, { origin: { kind: "composer" } }, next);
+	runHook(settings, "UserPromptSubmit", {
+		session_id: "session",
+		prompt: "Implement the requested change.",
+	});
+	await hooks["turn.start"](client, { turnId: "first" }, next);
+	writeFileSync(join(checkout, "changed.js"), "export const changed = true;");
+	const continued = JSON.parse(runHook(settings, "Stop", { session_id: "session" }));
+	expect(continued.decision).toBe("block");
+	expect(continued.systemMessage).toBeUndefined();
+	expect(operation.mock.calls.map(([args]) => args[3])).toEqual([
+		"--completion-boundary",
+		"--completion-bind",
+	]);
+	const final = { turnId: "first", answer: "Done", reason: "answer" };
+	expect(await hooks["turn.complete"](client, final, next)).toEqual(
+		queued ? answer : { text: "Fixture receipt" },
+	);
+	expect(next).toHaveBeenCalledWith(final);
+	expect(final.answer).toBe("Done");
+	expect(await hooks["turn.complete"](client, final, next)).toBe(answer);
+	expect(operation.mock.calls.map(([args]) => args[3])).toEqual([
+		"--completion-boundary",
+		"--completion-bind",
+		"--completion-receipt",
+	]);
+});
+
+it("keeps the review active and reports unowned receipt files on enrollment and startup", () => {
+	const settings = configureClaude();
+	const mod = join(home, ".claude/skills/pharaoh-change-review");
+	mkdirSync(mod, { recursive: true });
+	writeFileSync(join(mod, "SKILL.md"), "Mine");
+	const notices = configureChangeReview(true, installOptions());
+	expect(notices).toEqual([
+		expect.stringContaining("could not install verified receipts for your Claude Code profile"),
+	]);
+	expect(changeReviewEnabled(home)).toBe(true);
+	expect(readJson(settings).hooks.Stop).toHaveLength(1);
+	expect(ensureMemoryHooks({ name: "claude-code" }, credentials, installOptions())).toEqual(
+		notices,
+	);
+	expect(readdirSync(mod)).toEqual(["SKILL.md"]);
+	expect(configureChangeReview(false, installOptions())).toEqual([]);
+	expect(changeReviewEnabled(home)).toBe(false);
+	expect(readFileSync(join(mod, "SKILL.md"), "utf8")).toBe("Mine");
+});
+
+it("keeps review disabled if receipt cleanup fails and can retry cleanup", () => {
+	const settings = configureClaude();
+	expect(configureChangeReview(true, installOptions())).toEqual([]);
+	const mod = join(home, ".claude/skills/pharaoh-change-review");
+	chmodSync(join(mod, "hooks"), 0o777);
+	expect(configureChangeReview(false, installOptions())).toEqual([
+		expect.stringContaining(
+			"could not finish removing verified receipts for your Claude Code profile",
+		),
+	]);
+	expect(changeReviewEnabled(home)).toBe(false);
+	expect(readJson(settings).hooks.Stop).toBeUndefined();
+	chmodSync(join(mod, "hooks"), 0o700);
+	expect(configureChangeReview(false, installOptions())).toEqual([]);
+	expect(existsSync(mod)).toBe(false);
 });
 
 it("requires an active mapped Claude installation and never changes independent declines", () => {
@@ -2336,7 +2473,7 @@ it("keeps the memory reminder when the optional review uses its bounded scan bud
 	expect(left).toBeLessThanOrEqual(350);
 });
 
-it("emits the verified review receipt even when optional memory capture throws", () => {
+it("keeps Stop quiet when optional capture throws after receiving the verified check", () => {
 	setChangeReview(true, home);
 	writeFileSync(
 		new URL("project-memory/change-review.mjs", packageRoot),
@@ -2344,7 +2481,8 @@ it("emits the verified review receipt even when optional memory capture throws",
 		export const changeReviewDirectory = root => root + "/change-review";
 		export const reviewTurnInput = input => input;
 		export const reviewStop = () => undefined;
-		export const consumeReviewReceipt = () => ({ message: "Pharaoh review verified receipt", finalCheck: {} });
+		export const takeReviewCaptureCheck = () => ({ check: "test" });
+		export const consumeReviewReceipt = () => { throw new Error("Stop cannot consume a receipt"); };
 	`,
 	);
 	writeFileSync(
@@ -2361,5 +2499,5 @@ it("emits the verified review receipt even when optional memory capture throws",
 		prompt_id: "turn",
 		stop_hook_active: true,
 	});
-	expect(JSON.parse(output)).toEqual({ systemMessage: "Pharaoh review verified receipt" });
+	expect(output.trim()).toBe("");
 });

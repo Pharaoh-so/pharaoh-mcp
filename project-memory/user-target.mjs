@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, realpathSync, rmSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { memoryClientRoot, readActiveMemoryClients, readHookSettings } from "./client-settings.mjs";
-import { hasLegacyHooks } from "./hook-config.mjs";
+import { hasLegacyHooks, hasPinnedLocalReviewHooks } from "./hook-config.mjs";
 import { atomicWrite, checkout, gitBefore } from "./local.mjs";
 import { PROJECT_MEMORY_ORIGIN, requestMemoryReadiness } from "./memory-api.mjs";
 
@@ -187,6 +187,22 @@ export function legacyMemoryHooksMayRun(client, root, storage) {
 	} catch {
 		// An unreadable settings file cannot establish that the old hook is absent.
 		return true;
+	}
+}
+
+/** Ignore orphaned Local activation records when deciding who owns a review. */
+export function localReviewHooksInstalled(home, scope, digest) {
+	try {
+		const directory = join(realpathSync(memoryClientRoot(home)), digest);
+		const hook = join(directory, "pharaoh-memory-hook.mjs");
+		checkoutHookPath(directory, true);
+		checkoutHookPath(hook, false);
+		const config = readHookSettings(legacySettingsPath("claude-code", scope.root), {
+			privatePath: checkoutHookPath,
+		});
+		return hasPinnedLocalReviewHooks(config, scope, hook);
+	} catch {
+		return false;
 	}
 }
 

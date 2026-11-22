@@ -76,13 +76,13 @@ Adapt depth to change size. Skip sections that don't apply. **After each section
   governed by a MUST-bullet in `docs/VISION.md`? If yes, quote the
   assertion and verify the plan doesn't violate it. If the plan would
   violate a MUST, STOP and raise with the user — either the plan changes
-  or VISION.md needs an update first (with user approval).
+  or the technical contract in `docs/VISION.md` needs an update first (with user approval).
 - Component boundaries and coupling concerns
 - Dependency graph: does this change shrink or expand surface area?
 - Data flow bottlenecks and single points of failure
 - Does this need new code at all, or can a human process / existing pattern solve it?
-- **If this plan introduces a new invariant**, call it out and include a
-  step in the plan to add a `### assertion` to VISION.md with a pairing TEST.
+- **If this plan introduces a new invariant**, call it out. When the project uses
+  a technical contract in `docs/VISION.md`, propose a `### assertion` there with its TEST reference.
 
 ### Section 2 — Code Quality (always)
 

@@ -612,10 +612,12 @@ export async function runChangeReview(argv, { cwd = process.cwd() } = {}) {
 			regressions,
 			repairedPaths,
 		};
-		atomicWrite(proofPath, JSON.stringify(proof, null, 2));
+		const proofBytes = JSON.stringify(proof, null, 2);
+		atomicWrite(proofPath, proofBytes);
 		run.phase = "verified";
 		run.receipt = {
 			path: proofPath,
+			proofHash: sha(proofBytes),
 			finalFingerprint: manifest.fingerprint,
 			repairedPaths,
 			command: after.command,

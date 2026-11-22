@@ -335,11 +335,15 @@ async function main(): Promise<void> {
 		setMemoryInstallScope(scope);
 		const enabled = args.includes("--enable-change-review");
 		try {
-			configureChangeReview(enabled, { credentials: readCredentials() ?? undefined, scope });
+			const notices = configureChangeReview(enabled, {
+				credentials: readCredentials() ?? undefined,
+				scope,
+			});
 			printLines(
 				enabled
 					? "Pharaoh: automatic change review is on for this Claude Code installation. Restart Claude Code to load its hooks."
 					: "Pharaoh: automatic change review is off for this installation.",
+				...notices,
 			);
 		} catch (error) {
 			printLines(
