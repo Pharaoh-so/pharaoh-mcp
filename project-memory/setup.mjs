@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs"
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { bundledHook, installMemoryBundle, packagedMemoryBundle } from "./bundle.mjs";
+import { syncChangeReviewPlugin } from "./change-review-plugin.mjs";
 import {
 	hasOtherActiveMemoryClient,
 	memoryClientRoot,
@@ -426,8 +427,19 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 			(!reviewEligible(client, choice, home, scope) || hasChangeReviewHooks(config, scope)) &&
 			current === digest &&
 			existsSync(bundledHook(join(memoryClientRoot(home), digest)))
-		)
+		) {
+			if (reviewEligible(client, choice, home, scope))
+				return syncReceiptDisplay({
+					home,
+					env,
+					scope,
+					node: options.node ?? process.execPath,
+					hook: bundledHook(join(memoryClientRoot(home), digest)),
+					target: checkout(scope?.kind === "local" ? scope.root : (options.cwd ?? process.cwd())),
+					packageRoot: options.packageRoot,
+				});
 			return [];
+		}
 	}
 	const addsCue = !fresh && !hasMemoryCueHook(config, scope);
 	const addsCapture = !fresh && choice.capture !== false && !hasCaptureHook(config, scope);
@@ -445,14 +457,18 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 		writeHookPreferences({ ...readHookPreferences(home), [client]: kept }, home);
 	}
 	const graph = choice.graph === true && hasStructuralCueHooks(config, client, scope);
-	syncMemoryHooks({
-		...options,
-		credentials,
-		clients: [client],
-		graphClients: graph ? [client] : [],
-		diagnosticClients: missingDiagnostics ? [] : [client],
-		enable: true,
-	});
+	const receiptNotices = [];
+	syncHookInstallation(
+		{
+			...options,
+			credentials,
+			clients: [client],
+			graphClients: graph ? [client] : [],
+			diagnosticClients: missingDiagnostics ? [] : [client],
+			enable: true,
+		},
+		receiptNotices,
+	);
 	if ((addsCue || addsCapture) && client === "codex") {
 		// Announce only what the settings now show: a failed write is retried next start, silently.
 		let added = false;
@@ -470,9 +486,11 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 				: "Pharaoh added a project memory hook to Codex: when your agent edits a file, it shows what project memory says about that file. Review and trust it in /hooks or Settings > Hooks. To turn memory hooks off, run `npx @pharaoh-so/mcp --disable-memory-hooks`.",
 		];
 	}
-	if (!fresh || memoryHookStateForClient(info, { home, env, scope }) !== "installed") return [];
+	if (!fresh || memoryHookStateForClient(info, { home, env, scope }) !== "installed")
+		return receiptNotices;
 	const label = client === "codex" ? "Codex" : "Claude Code";
 	return [
+		...receiptNotices,
 		`Pharaoh turned on project memory reminders in ${label}: from your next conversation, the agent is reminded to check past decisions for this repo. To turn them off, run \`npx @pharaoh-so/mcp --disable-memory-hooks\`.`,
 		...(client === "codex"
 			? [
@@ -482,21 +500,43 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 	];
 }
 
+/** Keep an optional receipt display failure separate from the installed review and capture hooks. */
+function syncReceiptDisplay(options) {
+	try {
+		syncChangeReviewPlugin(options);
+		return [];
+	} catch (error) {
+		const scope = options.scope?.kind === "local" ? "this checkout" : "your Claude Code profile";
+		const operation = options.hook
+			? "install verified receipts"
+			: "finish removing verified receipts";
+		return [`Pharaoh: could not ${operation} for ${scope}. ${error.message}`];
+	}
+}
+
 /** Run only during setup or explicit cleanup of the local memory hooks. */
-export function syncMemoryHooks({
-	credentials,
-	clients = MEMORY_HOOK_CLIENTS,
-	graphClients = [],
-	diagnosticClients,
-	enable = false,
-	home = homedir(),
-	env = process.env,
-	cwd = process.cwd(),
-	node = process.execPath,
-	packageRoot,
-	scope = memoryInstallScope(),
-	preserveHandlers = false,
-} = {}) {
+export function syncMemoryHooks(options = {}) {
+	const receiptNotices = [];
+	return [...syncHookInstallation(options, receiptNotices), ...receiptNotices];
+}
+
+function syncHookInstallation(
+	{
+		credentials,
+		clients = MEMORY_HOOK_CLIENTS,
+		graphClients = [],
+		diagnosticClients,
+		enable = false,
+		home = homedir(),
+		env = process.env,
+		cwd = process.cwd(),
+		node = process.execPath,
+		packageRoot,
+		scope = memoryInstallScope(),
+		preserveHandlers = false,
+	},
+	receiptNotices,
+) {
 	if (typeof process.getuid !== "function")
 		return enable ? ["Pharaoh: project memory reminders need a POSIX client."] : [];
 	const root = memoryClientRoot(home);
@@ -534,6 +574,19 @@ export function syncMemoryHooks({
 		)
 			clearDiagnosticQueue(client, home);
 		try {
+			const review = reviewEligible(client, preferences[client], home, scope);
+			if (client === "claude-code" && receiptNotices)
+				receiptNotices.push(
+					...syncReceiptDisplay({
+						home,
+						env,
+						scope,
+						node,
+						hook: enable && review ? installed : undefined,
+						target,
+						packageRoot,
+					}),
+				);
 			ensureLocalPrivatePaths(scope, [userSettings(client, home, env, scope)]);
 			// Enable the replacement before swapping any settings, so failed
 			// activation cannot strand an existing hook or remove a legacy one.
@@ -554,7 +607,7 @@ export function syncMemoryHooks({
 						(diagnosticClients === undefined || diagnosticClients.includes(client)),
 					preferences[client]?.capture !== false,
 					scope,
-					reviewEligible(client, preferences[client], home, scope),
+					review,
 					preserveHandlers,
 				);
 			} catch (error) {
@@ -615,14 +668,18 @@ export function configureChangeReview(
 	};
 	if (!enabled) {
 		setChangeReview(false, home, scope);
-		if (memoryHookStateForClient({ name: "claude-code" }, { home, env, scope }) === "installed") {
-			const choice = readHookPreferences(home)["claude-code"];
-			return syncMemoryHooks({
+		// Optional display cleanup needs neither a current grant nor a working hook bundle.
+		const removalNotices = syncReceiptDisplay({ home, env, scope });
+		if (memoryHookStateForClient({ name: "claude-code" }, { home, env, scope }) !== "installed")
+			return removalNotices;
+		const choice = readHookPreferences(home)["claude-code"];
+		return [
+			...syncHookInstallation({
 				...options,
 				graphClients: choice?.graph === true ? ["claude-code"] : [],
-			});
-		}
-		return [];
+			}),
+			...removalNotices,
+		];
 	}
 	const previous = changeReviewEnabled(home, scope);
 	const choice = readHookPreferences(home)["claude-code"];
@@ -641,18 +698,24 @@ export function configureChangeReview(
 		);
 	setChangeReview(true, home, scope);
 	try {
-		const notices = syncMemoryHooks({
-			...options,
-			graphClients: choice?.graph === true ? ["claude-code"] : [],
-		});
+		const receiptNotices = [];
+		const notices = syncHookInstallation(
+			{
+				...options,
+				graphClients: choice?.graph === true ? ["claude-code"] : [],
+			},
+			receiptNotices,
+		);
 		const config = inspectSettings(userSettings("claude-code", home, env, scope)).config;
 		if (notices.length || !hasChangeReviewHooks(config, scope))
 			throw new Error(
 				"Could not install the change review hooks. Existing choices were preserved.",
 			);
-		return notices;
+		return receiptNotices;
 	} catch (error) {
 		setChangeReview(previous, home, scope);
+		if (!previous)
+			syncMemoryHooks({ ...options, graphClients: choice?.graph === true ? ["claude-code"] : [] });
 		throw error;
 	}
 }

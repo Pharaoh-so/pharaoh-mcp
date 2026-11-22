@@ -10,6 +10,7 @@ export type ReviewOptions = {
 	proofPath?: string;
 	deadline?: number;
 	expectedServer?: "pharaoh";
+	captureEnabled?: boolean;
 };
 export type ReviewManifest = {
 	head: string;
@@ -35,12 +36,19 @@ export function reviewStop(
 	options: ReviewOptions,
 ): { decision: "block"; reason: string } | undefined;
 export function observeReviewTool(input: ReviewInput, options: ReviewOptions): void;
+export function completionBoundary(
+	input: ReviewInput,
+	options: ReviewOptions,
+): { previousReviewTurn: string | null } | undefined;
+export function bindCompletionTurn(
+	input: ReviewInput,
+	options: ReviewOptions,
+): { reviewTurn: string } | undefined;
+export function takeReviewCaptureCheck(
+	input: ReviewInput,
+	options: ReviewOptions,
+): { paths: string[]; check: string; evidence: string } | undefined;
 export function consumeReviewReceipt(
 	input: ReviewInput,
 	options: ReviewOptions,
-):
-	| {
-			message: string;
-			finalCheck?: { paths: string[]; check: string; evidence: string };
-	  }
-	| undefined;
+): { message: string } | undefined;

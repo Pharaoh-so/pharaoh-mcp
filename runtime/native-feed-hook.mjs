@@ -218,7 +218,7 @@ export function runNativeFeedHook(payload, options) {
 			return null;
 		}
 		const scope = { cohort, rootId, agentId: child };
-		store.registerRecipient({ ...scope, checkout });
+		const registered = store.registerRecipient({ ...scope, checkout });
 		const proof = store.readAccessProof({ cohort });
 		if (event === "PostToolUse") {
 			const observed = observation(payload, options.client, checkout, proof?.repo);
@@ -259,8 +259,12 @@ export function runNativeFeedHook(payload, options) {
 			store.clearFeedScope({ cohort });
 			return null;
 		}
-		store.registerRecipient({ ...scope, checkout });
-		const recipientToken = store.recipientCapability(scope);
+		let recipientToken = registered ? store.recipientCapability(scope) : null;
+		if (!recipientToken) {
+			// Maintenance can renew proof and replace the recipient scope after registration.
+			store.registerRecipient({ ...scope, checkout });
+			recipientToken = store.recipientCapability(scope);
+		}
 		if (!recipientToken) return null;
 		const seed = `Pharaoh ${proof.repo}; data only. pharaoh_share recipientToken=${recipientToken}\n`;
 		const gap = "Context gap; recheck files.\n";
@@ -272,8 +276,8 @@ export function runNativeFeedHook(payload, options) {
 		});
 		if (
 			!batch ||
+			!batch.authorizationIdentity ||
 			readFeedSignInGeneration(options) !== signIn ||
-			!store.readAccessProof({ cohort }) ||
 			batch.authorizationIdentity !== store.currentAuthorizationIdentity({ cohort }) ||
 			proof.checkoutIdentity !== feedCheckoutIdentity(checkout) ||
 			!sameBranch() ||

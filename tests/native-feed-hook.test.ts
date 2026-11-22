@@ -260,6 +260,23 @@ describe.each(profiles)("native $file context delivery", ({ client, file }) => {
 		expect(text(deliver(ctx.checkpoint, ctx.options))).toContain(REPO);
 	});
 
+	it("issues a fresh capability if maintenance replaces the scope during a boundary", async () => {
+		const ctx = await context(client, file);
+		const capability = (seed: string) => seed.match(/recipientToken=([a-f0-9-]{36})/)?.[1];
+		const original = capability(text(deliver(ctx.start, ctx.options)));
+		expect(original).toBeTruthy();
+		const priorScope = ctx.store.currentAuthorizationIdentity({ cohort: ctx.cohort });
+		ctx.launch.mockImplementationOnce(() => {
+			expect(ctx.store.clearFeedScope({ cohort: ctx.cohort })).toBe(true);
+			expect(ctx.store.putAccessProof({ cohort: ctx.cohort, proof: ctx.proof() })).toBe(true);
+		});
+		const seed = text(deliver(ctx.checkpoint, ctx.options));
+		expect(ctx.store.currentAuthorizationIdentity({ cohort: ctx.cohort })).not.toBe(priorScope);
+		expect(seed).toContain(REPO);
+		expect(capability(seed)).toBeTruthy();
+		expect(capability(seed)).not.toBe(original);
+	});
+
 	it("does not wake or schedule a completed worker from SubagentStop", async () => {
 		const ctx = await context(client, file);
 		expect(deliver({ ...ctx.start, hook_event_name: "SubagentStop" }, ctx.options)).toBeNull();

@@ -8,10 +8,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as review from "../project-memory/change-review.mjs";
 import { runChangeReview } from "../project-memory/change-review-proof.mjs";
+import { memoryActivePath, memoryClientRoot } from "../project-memory/client-settings.mjs";
+import { updateUserHooks } from "../project-memory/hook-config.mjs";
 import { setChangeReview } from "../project-memory/preferences.mjs";
 
 vi.setConfig({ testTimeout: 60000 });
-let home: string, root: string, runId: string;
+let home: string, root: string, runId: string, reviewTurn: string | undefined;
+const completionId = "18ce9ec5-67be-4f58-b702-1b14c2850747";
 let options: Parameters<typeof review.beginReviewTurn>[1];
 let input: Record<string, unknown>;
 const source = "src/total.js",
@@ -81,7 +84,15 @@ function graph(parts = [graphAnswer], tool = "get_blast_radius", extra = {}) {
 	);
 }
 function reserve() {
+	const boundary = review.completionBoundary(event(), options);
 	review.beginReviewTurn(event(), options);
+	reviewTurn = review.bindCompletionTurn(
+		event({
+			completion_turn_id: completionId,
+			previous_review_turn: boundary?.previousReviewTurn,
+		}),
+		options,
+	)?.reviewTurn;
 	put(source, "export function total(price) { return price - 1; }\n");
 	const cue = stop();
 	runId = cue?.reason.match(/snapshot '([a-f0-9-]{36})'/)?.[1] ?? "";
@@ -136,6 +147,54 @@ it("supports native-ID-free turns and requests at most one review after an edit"
 	expect(stop()).toBeUndefined();
 	expect(stop({ stop_hook_active: true })).toBeUndefined();
 });
+it("binds only a nonce created after the native submit", () => {
+	const bind = (previous: unknown, id = completionId) =>
+		review.bindCompletionTurn(
+			event({ previous_review_turn: previous, completion_turn_id: id }),
+			options,
+		);
+	review.beginReviewTurn(event(), options);
+	const old = review.completionBoundary(event(), options)?.previousReviewTurn;
+	expect(bind(old)).toBeUndefined();
+	const fresh = review.beginReviewTurn(event({ prompt_id: "fresh" }), options);
+	expect(bind(old)?.reviewTurn).toBe(fresh);
+	expect(bind(old)?.reviewTurn).toBe(fresh);
+	expect(bind(old, "48a13dcb-b6c4-4aad-ad6e-257fd65e5a36")).toBeUndefined();
+});
+it.each([
+	true,
+	false,
+])("prefers the enrolled local scope independent of first hook: global=%s", (globalFirst) => {
+	const scope = { kind: "local" as const, root },
+		local = { ...options, scope };
+	setChangeReview(true, home, scope);
+	json(memoryActivePath(memoryClientRoot(home), scope), { "claude-code": "f".repeat(64) });
+	// Neither an orphaned activation nor settings pinned to another digest own this worktree.
+	expect(review.beginReviewTurn(event(), options)).toBeTruthy();
+	const configDirectory = join(root, ".claude");
+	fs.mkdirSync(configDirectory, { mode: 0o700 });
+	const bundle = join(memoryClientRoot(home), "f".repeat(64));
+	fs.mkdirSync(bundle, { mode: 0o700 });
+	const pinned = join(bundle, "pharaoh-memory-hook.mjs");
+	fs.writeFileSync(pinned, "", { mode: 0o600 });
+	const path = join(configDirectory, "settings.local.json");
+	const install = (hook: string) =>
+		json(
+			path,
+			updateUserHooks({}, "claude-code", hook, process.execPath, true, false, false, scope, true),
+		);
+	install(join(memoryClientRoot(home), "e".repeat(64), "pharaoh-memory-hook.mjs"));
+	expect(review.beginReviewTurn(event(), options)).toBeTruthy();
+	expect(review.beginReviewTurn(event(), local)).toBeUndefined();
+	install(pinned);
+	const order = globalFirst ? [options, local] : [local, options];
+	const nonces = order.map((opts) => review.beginReviewTurn(event(), opts));
+	expect(nonces[globalFirst ? 0 : 1]).toBeUndefined();
+	expect(nonces[globalFirst ? 1 : 0]).toBeTruthy();
+	expect(review.completionBoundary(event(), options)).toBeUndefined();
+	setChangeReview(false, home, scope);
+	expect(review.beginReviewTurn(event(), options)).toBeTruthy();
+});
 it("requires matching native prompt, session and worktree identity", () => {
 	input.prompt_id = "p1";
 	review.beginReviewTurn(event(), options);
@@ -174,9 +233,33 @@ it("retries through an aliased subdirectory and delivers one verified receipt", 
 	expect(proof.after.pass).toBe(true);
 	expect(fs.existsSync(join(options.directory, `files-${runId}`))).toBe(false);
 	const consume = (extra = {}) =>
-		review.consumeReviewReceipt(event({ hook_event_name: "Stop", ...extra }), options);
-	for (const other of [{ session_id: "other" }, { prompt_id: "other" }])
+		review.consumeReviewReceipt(
+			event({ completion_turn_id: completionId, review_turn: reviewTurn, ...extra }),
+			options,
+		);
+	for (const other of [
+		{ session_id: "other" },
+		{ prompt_id: "other" },
+		{ completion_turn_id: undefined },
+		{ review_turn: "stale" },
+	])
 		expect(consume(other)).toBeUndefined();
+	const witness = fs.readFileSync(String(result.proof));
+	fs.appendFileSync(String(result.proof), " ");
+	expect(consume()).toBeUndefined();
+	fs.writeFileSync(String(result.proof), witness);
+	// This actual Vitest argv exceeds capture's 120-character limit.
+	expect(review.takeReviewCaptureCheck(event(), options)).toBeUndefined();
+	const verified = run();
+	const receipt = verified.receipt as Record<string, unknown>;
+	// Independently exercise capture's optional, already-sanitized check branch.
+	review.writeReviewRun(options.directory, {
+		...verified,
+		receipt: { ...receipt, command: "npm test" },
+	});
+	expect(review.takeReviewCaptureCheck(event(), options)?.check).toBe("npm test");
+	expect(review.takeReviewCaptureCheck(event(), options)).toBeUndefined();
+	review.writeReviewRun(options.directory, verified);
 	setChangeReview(false, home);
 	expect(consume()).toBeUndefined();
 	setChangeReview(true, home);
