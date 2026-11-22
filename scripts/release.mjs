@@ -55,6 +55,11 @@ const CHANGE_REVIEW_PACK_PATHS = [
 	"project-memory/change-review-proof.d.mts",
 	"project-memory/change-review-proof.mjs",
 ];
+// The completion mod and its installer are optional until introduced together.
+const CHANGE_REVIEW_COMPLETION_PATHS = [
+	"hooks/change-review-completion.js",
+	"project-memory/change-review-plugin.mjs",
+];
 // Split out of user-target.mjs (Pharaoh-so/pharaoh#1691): required once the verified source has it.
 const MEMORY_CLIENT_SETTINGS_PACK_PATHS = ["project-memory/client-settings.mjs"];
 // Checkout scoping ships as one complete, source-bound helper group when introduced.
@@ -210,6 +215,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 				MEMORY_DIAGNOSTIC_PACK_PATHS.includes(path) ||
 				MEMORY_CAPTURE_PACK_PATHS.includes(path) ||
 				CHANGE_REVIEW_PACK_PATHS.includes(path) ||
+				CHANGE_REVIEW_COMPLETION_PATHS.includes(path) ||
 				MEMORY_CLIENT_SETTINGS_PACK_PATHS.includes(path) ||
 				INSTALL_SCOPE_PACK_PATHS.includes(path) ||
 				/^(?:package\.json|README\.md|LICENSE|NOTICE|CHANGELOG\.md|\.mcp\.json|inspect-tools\.json|trace-app\.html|\.claude-plugin\/plugin\.json|dist\/[a-z][a-z0-9-]*\.(?:js|d\.ts)(?:\.map)?|skills\/(?:\.gitkeep|[a-z-]+\/SKILL\.md)|npx-skills\/[a-z-]+\/SKILL\.md|commands\/(?:plan|review|sessions)\.md|hooks\/(?:hooks\.json|route-grep\.mjs))$/.test(
@@ -227,6 +233,7 @@ export function verifyPackPaths(paths, packageFiles = [], sourcePaths) {
 		["Local worktree", LOCAL_WORKTREE_PACK_PATHS, LOCAL_WORKTREE_SOURCE_PATHS],
 		["Install scope", INSTALL_SCOPE_PACK_PATHS, INSTALL_SCOPE_PACK_PATHS],
 		["Change review", CHANGE_REVIEW_PACK_PATHS, CHANGE_REVIEW_PACK_PATHS],
+		["Change review completion", CHANGE_REVIEW_COMPLETION_PATHS, CHANGE_REVIEW_COMPLETION_PATHS],
 	]) {
 		if (
 			!packed.some((path) => paths.includes(path)) &&
@@ -396,6 +403,7 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 		...LOCAL_WORKTREE_RAW_PATHS,
 		...INSTALL_SCOPE_PACK_PATHS,
 		...CHANGE_REVIEW_PACK_PATHS,
+		...CHANGE_REVIEW_COMPLETION_PATHS,
 	]) {
 		if (!names.includes(`package/${path}`)) continue;
 		const archived = execFileSync("tar", ["-xOzf", tarball, `package/${path}`], {
