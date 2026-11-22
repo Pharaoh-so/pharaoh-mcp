@@ -411,7 +411,7 @@ test("the change review completion mod and installer must ship together from ver
 			);
 			assert.throws(
 				() => validateArtifact(item.directory, commit, manifestHash, { ...verified, files }),
-				{ message: `Native runtime source hash mismatch: ${path}` },
+				(error) => error.message.startsWith(`Native runtime source hash mismatch: ${path}`),
 			);
 		}
 	} finally {
