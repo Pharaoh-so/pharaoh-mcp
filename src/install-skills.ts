@@ -13,6 +13,7 @@ import {
 	constants,
 	cpSync,
 	existsSync,
+	fchmodSync,
 	fstatSync,
 	lstatSync,
 	mkdirSync,
@@ -22,14 +23,23 @@ import {
 	readSync,
 	renameSync,
 	rmSync,
+	type Stats,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
 import { ensureLocalPrivatePaths } from "../project-memory/install-scope.mjs";
+import {
+	ensureFeedRoot,
+	feedLock,
+	feedRoot,
+	readFeedJSON,
+	removeFeedFile,
+	writeFeedJSON,
+} from "../runtime/feed-io.mjs";
 import { readPointer, withActivateLockSync } from "../runtime/launcher-v1.mjs";
 import { ensurePharaohHome } from "./credentials.js";
 import { writeStderr } from "./helpers.js";
@@ -395,6 +405,10 @@ export function uninstallClaudePlugin(
 	claude(["plugin", "marketplace", "remove", MARKETPLACE_NAME]);
 	rmSync(claudeMarketplaceDir(home), { recursive: true, force: true });
 	removeLegacyClaudePlugin(home);
+	for (const client of ["codex", "claude-code"] as const) {
+		const notice = removeScopedDelegationGuidance(client, home);
+		if (notice) writeStderr(`${notice}\n`);
+	}
 	removeClaudeMdBlock(home);
 	removeAdditionalAgentInstructionLines(home);
 	removeManagedAgentSkills(home, "codex");
@@ -1492,6 +1506,9 @@ export function describeAllowReadTools(
 const PHARAOH_CLAUDE_MD_LINE =
 	"In repos Pharaoh has mapped, before searching or reading files, ask Pharaoh where the relevant code is, what calls it, and whether what you need already exists.";
 
+const PHARAOH_DELEGATION_LINE =
+	"In repos Pharaoh has mapped, consider native subagents only when the user's request, applicable instructions and client permissions allow delegation. Use Pharaoh's map to identify separate scopes. Delegate only when each part has a clear independent outcome and can proceed without conflicting changes. Keep small or coupled tasks in the current agent.";
+
 /** File under ~/.pharaoh holding the user's answer, so setup asks once. */
 const CLAUDE_MD_ANSWER_FILE = "claude-md-answer";
 
@@ -1518,9 +1535,15 @@ function writeNoFollow(path: string, text: string, flags: number): void {
  * Pharaoh's block. `pharaoh-mcp:start+nl` records that the installer also added
  * the newline before it (the file didn't end in one), so removal takes it back too.
  */
-function claudeMdBlock(addedNewline: boolean): string {
-	const start = `<!-- pharaoh-mcp:start${addedNewline ? "+nl" : ""} (managed by npx ${PACKAGE_NAME}; --clean or --logout removes it) -->`;
-	return `${start}\n${PHARAOH_CLAUDE_MD_LINE}\n<!-- pharaoh-mcp:end -->\n`;
+type InstructionPurpose = "pharaoh-mcp" | "pharaoh-native-delegation-v1";
+
+function instructionLine(purpose: InstructionPurpose): string {
+	return purpose === "pharaoh-mcp" ? PHARAOH_CLAUDE_MD_LINE : PHARAOH_DELEGATION_LINE;
+}
+
+function claudeMdBlock(addedNewline: boolean, purpose: InstructionPurpose = "pharaoh-mcp"): string {
+	const start = `<!-- ${purpose}:start${addedNewline ? "+nl" : ""} (managed by npx ${PACKAGE_NAME}; --clean or --logout removes it) -->`;
+	return `${start}\n${instructionLine(purpose)}\n<!-- ${purpose}:end -->\n`;
 }
 
 /** Where Pharaoh's block sits in CLAUDE.md, as offsets into its text. */
@@ -1541,9 +1564,14 @@ interface ClaudeMdBlock {
  * Find the one Pharaoh block in `text`: null when there is none, "broken"
  * when a marker is missing its pair, repeated or out of order.
  */
-function findClaudeMdBlock(text: string): ClaudeMdBlock | null | "broken" {
-	const starts = [...text.matchAll(/^<!-- pharaoh-mcp:start(\+nl)?\b[^\n]*\n/gm)];
-	const ends = [...text.matchAll(/^<!-- pharaoh-mcp:end -->\n?/gm)];
+function findClaudeMdBlock(
+	text: string,
+	purpose: InstructionPurpose = "pharaoh-mcp",
+): ClaudeMdBlock | null | "broken" {
+	const starts = [
+		...text.matchAll(new RegExp(`^<!-- ${purpose}:start(\\+nl)?\\b[^\\n]*\\n`, "gm")),
+	];
+	const ends = [...text.matchAll(new RegExp(`^<!-- ${purpose}:end -->\\n?`, "gm"))];
 	if (starts.length === 0 && ends.length === 0) return null;
 	const [start, end] = [starts[0], ends[0]];
 	const body = start ? start.index + start[0].length : 0;
@@ -1661,8 +1689,11 @@ function readBoundedText(
 
 /** Whether `text` holds the suggested line, otherwise mentions Pharaoh, or neither. */
 function classifyInstructionText(text: string): "exact" | "mention" | "none" {
-	if (text.includes(PHARAOH_CLAUDE_MD_LINE)) return "exact";
-	return /\bpharaoh\b/i.test(text) ? "mention" : "none";
+	const pilot = findClaudeMdBlock(text, "pharaoh-native-delegation-v1");
+	const instructions =
+		pilot && pilot !== "broken" ? text.slice(0, pilot.from) + text.slice(pilot.through) : text;
+	if (instructions.includes(PHARAOH_CLAUDE_MD_LINE)) return "exact";
+	return /\bpharaoh\b/i.test(instructions) ? "mention" : "none";
 }
 
 /** The configured Claude directory for observations; an invalid override never falls back. */
@@ -1848,13 +1879,7 @@ export function describeClaudeMdOutcome(outcome: ClaudeMdOutcome): string | null
 function removeClaudeMdBlock(home: string): void {
 	try {
 		const { path, text, block } = readClaudeMd(home);
-		if (block) {
-			// The newline before a start+nl marker is Pharaoh's only while the block
-			// ends the file; once the user writes below it, it ends their line.
-			const ownsNewline = block.addedNewline && block.from > 0 && block.through === text.length;
-			const from = ownsNewline ? block.from - 1 : block.from;
-			writeNoFollow(path, text.slice(0, from) + text.slice(block.through), REWRITE_NO_FOLLOW);
-		}
+		removeInstructionBlocks(path, text, [block]);
 		rmSync(join(home, ".pharaoh", CLAUDE_MD_ANSWER_FILE), { force: true });
 	} catch (err) {
 		// ALLOWED-CATCH: the other cleanup steps (credentials on --logout) must still run; the user is told what's left
@@ -1871,6 +1896,7 @@ export interface AgentInstructionOutcome {
 	client: AgentInstructionClient;
 	path: string;
 	outcome: ClaudeMdOutcome;
+	purpose?: InstructionPurpose;
 }
 
 interface AgentInstructionTarget {
@@ -1878,6 +1904,7 @@ interface AgentInstructionTarget {
 	directory: string;
 	path: string;
 	answerPath: string;
+	purpose: InstructionPurpose;
 	blocked?: boolean;
 }
 
@@ -1910,6 +1937,7 @@ function codexInstructionPath(directory: string): { path: string; blocked: boole
 function agentInstructionTarget(
 	client: AgentInstructionClient,
 	home: string,
+	purpose: InstructionPurpose = "pharaoh-mcp",
 ): AgentInstructionTarget {
 	const directory =
 		client === "codex"
@@ -1924,11 +1952,15 @@ function agentInstructionTarget(
 		directory,
 		path: selected.path,
 		blocked: selected.blocked,
-		answerPath: join(
-			home,
-			".pharaoh",
-			client === "codex" ? "codex-agents-answer" : CLAUDE_MD_ANSWER_FILE,
-		),
+		purpose,
+		answerPath:
+			purpose === "pharaoh-native-delegation-v1"
+				? join(feedRoot({ home }), `${client}-native-delegation-v1-answer.json`)
+				: join(
+						home,
+						".pharaoh",
+						client === "codex" ? "codex-agents-answer" : CLAUDE_MD_ANSWER_FILE,
+					),
 	};
 }
 
@@ -1942,23 +1974,31 @@ function readAgentInstruction(target: AgentInstructionTarget): AgentInstructionF
 	let text = "";
 	if (file) {
 		try {
-			text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(target.path));
+			text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+				readFileSync(target.path),
+			);
 		} catch {
 			// ALLOWED-CATCH: undecodable user instructions are preserved byte for byte.
 			return kept;
 		}
 	}
-	const block = findClaudeMdBlock(text);
+	const line = instructionLine(target.purpose);
+	const block = findClaudeMdBlock(text, target.purpose);
 	if (block === "broken") return kept;
-	if (!block)
-		return { state: text.includes(PHARAOH_CLAUDE_MD_LINE) ? "current" : "absent", text, block };
-	if (text.slice(block.body, block.to) !== `${PHARAOH_CLAUDE_MD_LINE}\n`) return kept;
+	if (!block) return { state: text.includes(line) ? "current" : "absent", text, block };
+	if (text.slice(block.body, block.to) !== `${line}\n`) return kept;
+	if (
+		target.purpose === "pharaoh-native-delegation-v1" &&
+		text.slice(block.from, block.through) !== claudeMdBlock(block.addedNewline, target.purpose)
+	)
+		return kept;
 	return { state: "current", text, block };
 }
 
 function hasAgentInstructionAnswer(target: AgentInstructionTarget): boolean {
 	const entry = lstatSync(target.answerPath, { throwIfNoEntry: false });
 	if (!entry) return false;
+	if (target.purpose === "pharaoh-native-delegation-v1") return true;
 	if (target.client !== "codex" || !entry.isFile() || entry.size > 4096) return true;
 	try {
 		const saved = readFileSync(target.answerPath, "utf-8").trim();
@@ -1977,6 +2017,15 @@ function saveAgentInstructionAnswer(
 	target: AgentInstructionTarget,
 	answer: "yes" | "no",
 ): void {
+	if (target.purpose === "pharaoh-native-delegation-v1") {
+		writeFeedJSON(
+			ensureFeedRoot({ home }),
+			basename(target.answerPath),
+			{ version: 1, answer, path: target.path },
+			4_096,
+		);
+		return;
+	}
 	if (target.client !== "codex") {
 		saveClaudeMdAnswer(home, target.answerPath, answer);
 		return;
@@ -1992,19 +2041,62 @@ function saveAgentInstructionAnswer(
 	}
 }
 
-/** Offer one consent for the verified coding clients, with one remembered answer per client. */
+/** Offer the lookup cue together or pilot delegation separately, with remembered per-client answers. */
 export async function offerAgentInstructionLines(
 	clients: readonly AgentInstructionClient[],
 	ask: (question: string) => Promise<boolean | null>,
 	isTerminal: boolean,
 	home = homedir(),
+	purpose: InstructionPurpose = "pharaoh-mcp",
+	eligible?: () => boolean,
 ): Promise<AgentInstructionOutcome[]> {
-	const targets = [...new Set(clients)].map((client) => agentInstructionTarget(client, home));
+	const targets = [...new Set(clients)].map((client) =>
+		agentInstructionTarget(client, home, purpose),
+	);
+	if (purpose === "pharaoh-mcp")
+		return offerInstructionLine(targets, ask, isTerminal, home, purpose);
+	const outcomes: AgentInstructionOutcome[] = [];
+	for (const target of targets) {
+		outcomes.push(
+			...(await offerInstructionLine([target], ask, isTerminal, home, purpose, eligible)),
+		);
+	}
+	return outcomes;
+}
+
+/** Ask for this client's pilot guidance separately from the ordinary lookup cue. */
+export async function offerNativeDelegationGuidance(
+	client: AgentInstructionClient,
+	ask: (question: string) => Promise<boolean | null>,
+	isTerminal: boolean,
+	eligible?: () => boolean,
+): Promise<AgentInstructionOutcome | undefined> {
+	const [result] = await offerAgentInstructionLines(
+		[client],
+		ask,
+		isTerminal,
+		undefined,
+		"pharaoh-native-delegation-v1",
+		eligible,
+	);
+	return result;
+}
+
+async function offerInstructionLine(
+	targets: readonly AgentInstructionTarget[],
+	ask: (question: string) => Promise<boolean | null>,
+	isTerminal: boolean,
+	home: string,
+	purpose: InstructionPurpose,
+	eligible?: () => boolean,
+): Promise<AgentInstructionOutcome[]> {
+	const delegation = purpose === "pharaoh-native-delegation-v1";
 	if (!isTerminal)
 		return targets.map((target) => ({
 			client: target.client,
 			path: target.path,
 			outcome: "no-terminal",
+			...(delegation && { purpose }),
 		}));
 	const pending: AgentInstructionTarget[] = [];
 	for (const target of targets) {
@@ -2017,7 +2109,7 @@ export async function offerAgentInstructionLines(
 	}
 	const answer = pending.length
 		? await ask(
-				`Add this Pharaoh line to your global agent instructions?\n  ${pending.map((target) => target.path).join(" and ")}\n  "${PHARAOH_CLAUDE_MD_LINE}"\n[Y/n] `,
+				`Add this ${delegation ? "pilot native delegation guidance" : "Pharaoh line"} to your global agent instructions?\n  ${pending.map((target) => target.path).join(" and ")}\n  "${instructionLine(purpose)}"\n${delegation ? "[y/N]" : "[Y/n]"} `,
 			)
 		: null;
 	return targets.map((target) => {
@@ -2025,15 +2117,28 @@ export async function offerAgentInstructionLines(
 			client: target.client,
 			path: target.path,
 			outcome,
+			...(delegation && { purpose }),
 		});
 		try {
-			const selected = agentInstructionTarget(target.client, home);
+			const selected = agentInstructionTarget(target.client, home, purpose);
 			if (selected.path !== target.path || selected.blocked) return result("kept");
 			let file = readAgentInstruction(target);
 			if (file.state === "absent") {
 				if (!pending.includes(target)) return result("answered");
 				if (answer === null) return result("cancelled");
 				if (!answer) {
+					if (delegation) {
+						const outcome = feedLock(
+							ensureFeedRoot({ home }),
+							() => {
+								if (hasAgentInstructionAnswer(target)) return "answered" as const;
+								saveAgentInstructionAnswer(home, target, "no");
+								return "declined" as const;
+							},
+							pilotLockName(target.client),
+						);
+						return result(outcome ?? "failed");
+					}
 					saveAgentInstructionAnswer(home, target, "no");
 					return result("declined");
 				}
@@ -2042,11 +2147,10 @@ export async function offerAgentInstructionLines(
 			if (file.state === "absent") {
 				mkdirSync(target.directory, { recursive: true });
 				const newline = file.text !== "" && !file.text.endsWith("\n");
-				writeNoFollow(
-					target.path,
-					`${newline ? "\n" : ""}${claudeMdBlock(newline)}`,
-					APPEND_NO_FOLLOW,
-				);
+				const addition = `${newline ? "\n" : ""}${claudeMdBlock(newline, purpose)}`;
+				if (delegation)
+					return result(installDelegationBlock(home, target, file.text, addition, eligible));
+				writeNoFollow(target.path, addition, APPEND_NO_FOLLOW);
 				saveAgentInstructionAnswer(home, target, "yes");
 				return result("added");
 			}
@@ -2066,6 +2170,15 @@ export async function offerAgentInstructionLines(
  * @param result - One client's `offerAgentInstructionLines` outcome.
  */
 export function describeAgentInstructionOutcome(result: AgentInstructionOutcome): string | null {
+	if (result.purpose === "pharaoh-native-delegation-v1") {
+		if (result.outcome === "added" || result.outcome === "current")
+			return `${result.client}: pilot native delegation guidance is present. Inspect update delivery with --native-context-status.`;
+		if (result.outcome === "kept" || result.outcome === "failed")
+			return `${result.client}: pilot native delegation guidance could not be added safely.`;
+		if (result.outcome === "no-terminal")
+			return `${result.client}: run the install in a terminal to approve pilot native delegation guidance.`;
+		return null;
+	}
 	switch (result.outcome) {
 		case "kept":
 			return `Pharaoh: preserved ${result.path} because its path or managed markers need attention. You can add the instruction by hand: ${PHARAOH_CLAUDE_MD_LINE}`;
@@ -2086,16 +2199,8 @@ function removeAdditionalAgentInstructionLines(home: string): void {
 	for (const target of targets) {
 		try {
 			const file = readAgentInstruction(target);
-			if (file.block && file.state === "current") {
-				const ownsNewline =
-					file.block.addedNewline && file.block.from > 0 && file.block.through === file.text.length;
-				const from = ownsNewline ? file.block.from - 1 : file.block.from;
-				writeNoFollow(
-					target.path,
-					file.text.slice(0, from) + file.text.slice(file.block.through),
-					REWRITE_NO_FOLLOW,
-				);
-			}
+			removeInstructionBlocks(target.path, file.text, [file.block]);
+			// A person who removed the pilot line or declined must not receive it on reinstall.
 			rmSync(target.answerPath, { force: true });
 		} catch {
 			// ALLOWED-CATCH: one protected user file must not prevent the remaining cleanup.
@@ -2103,6 +2208,199 @@ function removeAdditionalAgentInstructionLines(home: string): void {
 				`Pharaoh: could not remove its instruction from ${target.path}. Remove its marked block by hand.\n`,
 			);
 		}
+	}
+}
+
+function withoutInstructionBlocks(original: string, blocks: (ClaudeMdBlock | null)[]): string {
+	let text = original;
+	// Remove later managed blocks first so an earlier block can reclaim its own trailing separator.
+	for (const block of blocks
+		.filter((item) => item !== null)
+		.sort((left, right) => right.from - left.from)) {
+		const ownsNewline = block.addedNewline && block.from > 0 && block.through === text.length;
+		text = text.slice(0, ownsNewline ? block.from - 1 : block.from) + text.slice(block.through);
+	}
+	return text;
+}
+
+function removeInstructionBlocks(
+	path: string,
+	original: string,
+	blocks: (ClaudeMdBlock | null)[],
+): void {
+	const text = withoutInstructionBlocks(original, blocks);
+	if (text !== original) writeNoFollow(path, text, REWRITE_NO_FOLLOW);
+}
+
+function sameInstructionFile(left: Stats | undefined, right: Stats | undefined): boolean {
+	if (!left || !right) return left === right;
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.ctimeMs === right.ctimeMs &&
+		left.mtimeMs === right.mtimeMs
+	);
+}
+
+/** Read the exact UTF-8 bytes and identity of an owned regular instruction file. */
+function pilotInstructionSnapshot(path: string): { text: string; file?: Stats } {
+	const file = lstatSync(path, { throwIfNoEntry: false });
+	if (!file) return { text: "" };
+	if (!file.isFile() || file.uid !== process.getuid?.() || file.size > INSTRUCTION_READ_CAP)
+		throw new Error("Unsafe pilot instruction file.");
+	const fd = openSync(path, constants.O_RDONLY | NO_FOLLOW | (constants.O_NONBLOCK ?? 0));
+	try {
+		if (!sameInstructionFile(file, fstatSync(fd))) throw new Error("Instruction file changed.");
+		const bytes = Buffer.alloc(file.size + 1);
+		let length = 0;
+		while (length < bytes.length) {
+			const count = readSync(fd, bytes, length, bytes.length - length, null);
+			if (count === 0) break;
+			length += count;
+		}
+		if (
+			length !== file.size ||
+			!sameInstructionFile(file, fstatSync(fd)) ||
+			!sameInstructionFile(file, lstatSync(path, { throwIfNoEntry: false }))
+		)
+			throw new Error("Instruction file changed.");
+		return {
+			text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+				bytes.subarray(0, length),
+			),
+			file,
+		};
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function replacePilotInstruction(
+	path: string,
+	original: string,
+	text: string,
+	eligible?: () => boolean,
+): void {
+	const directory = dirname(path);
+	const parent = lstatSync(directory);
+	if (
+		!parent.isDirectory() ||
+		parent.uid !== process.getuid?.() ||
+		Buffer.byteLength(text) > INSTRUCTION_READ_CAP
+	)
+		throw new Error("Unsafe pilot instruction directory or file size.");
+	const before = pilotInstructionSnapshot(path);
+	if (before.text !== original) throw new Error("Instruction file changed.");
+	const temporary = join(directory, `.pharaoh-instruction-${randomUUID()}.tmp`);
+	try {
+		const fd = openSync(temporary, "wx", 0o600);
+		try {
+			writeFileSync(fd, text);
+			if (before.file) fchmodSync(fd, before.file.mode & 0o777);
+		} finally {
+			closeSync(fd);
+		}
+		if (eligible && !eligible()) throw new Error("Native hook eligibility changed.");
+		const current = lstatSync(directory);
+		const after = pilotInstructionSnapshot(path);
+		if (
+			current.dev !== parent.dev ||
+			current.ino !== parent.ino ||
+			!sameInstructionFile(before.file, after.file) ||
+			after.text !== original
+		)
+			throw new Error("Instructions changed.");
+		renameSync(temporary, path);
+	} finally {
+		rmSync(temporary, { force: true });
+	}
+}
+
+function pilotLockName(client: AgentInstructionClient): string {
+	return `${client}-native-delegation.lock`;
+}
+
+function installDelegationBlock(
+	home: string,
+	target: AgentInstructionTarget,
+	original: string,
+	addition: string,
+	eligible?: () => boolean,
+): ClaudeMdOutcome {
+	const root = ensureFeedRoot({ home });
+	const outcome = feedLock(
+		root,
+		() => {
+			if (hasAgentInstructionAnswer(target)) return "answered" as const;
+			if (eligible && !eligible()) return "kept" as const;
+			const updated = original + addition;
+			replacePilotInstruction(target.path, original, updated, eligible);
+			try {
+				saveAgentInstructionAnswer(home, target, "yes");
+			} catch (error) {
+				replacePilotInstruction(target.path, updated, original);
+				throw error;
+			}
+			return "added" as const;
+		},
+		pilotLockName(target.client),
+	);
+	if (!outcome) throw new Error("Pilot instruction update is busy.");
+	return outcome;
+}
+
+function removeScopedDelegationGuidance(
+	client: AgentInstructionClient,
+	home: string,
+): string | null {
+	const target = agentInstructionTarget(client, home, "pharaoh-native-delegation-v1");
+	try {
+		if (!lstatSync(target.answerPath, { throwIfNoEntry: false })) return null;
+		const result = feedLock(
+			ensureFeedRoot({ home }),
+			() => {
+				const answer = readFeedJSON(target.answerPath, 4_096) as {
+					version?: unknown;
+					answer?: unknown;
+					path?: unknown;
+				} | null;
+				if (answer?.version === 1 && answer.answer === "no") return true;
+				if (
+					!answer ||
+					answer.version !== 1 ||
+					answer.answer !== "yes" ||
+					typeof answer.path !== "string" ||
+					!isAbsolute(answer.path) ||
+					resolve(answer.path) !== answer.path
+				)
+					throw new Error("Could not verify the recorded guidance profile.");
+				const { path } = answer;
+				const allowed = client === "codex" ? ["AGENTS.md", "AGENTS.override.md"] : ["CLAUDE.md"];
+				const directory = dirname(path);
+				if (!allowed.some((name) => join(directory, name) === path))
+					throw new Error("Could not verify the recorded instructions file.");
+				const file = readAgentInstruction({ ...target, path, directory, blocked: false });
+				if (file.state === "kept")
+					throw new Error("The recorded instructions are edited or unsafe.");
+				// A manual removal keeps the affirmative receipt and suppresses later offers.
+				if (!file.block) return true;
+				const updated = withoutInstructionBlocks(file.text, [file.block]);
+				replacePilotInstruction(path, file.text, updated);
+				try {
+					removeFeedFile(target.answerPath);
+				} catch (error) {
+					replacePilotInstruction(path, updated, file.text);
+					throw error;
+				}
+				return true;
+			},
+			pilotLockName(client),
+		);
+		if (result) return null;
+		throw new Error("Pilot instruction cleanup is busy.");
+	} catch {
+		return `Pharaoh could not safely remove ${client} pilot native delegation guidance from its recorded instructions.`;
 	}
 }
 
@@ -2497,6 +2795,10 @@ export function cleanupInstallExtras(
 ): string[] {
 	const messages: string[] = [];
 	for (const client of clients) {
+		if (scope.kind === "global") {
+			const notice = removeScopedDelegationGuidance(client, home);
+			if (notice) messages.push(notice);
+		}
 		try {
 			removeManagedAgentSkills(home, client, scope);
 			if (client !== "claude-code") continue;

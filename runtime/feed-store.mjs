@@ -28,6 +28,11 @@ const LEASE = 30_000;
 const STATE_LIMIT = 262_144;
 const MAX_CONNECTIONS = 1024;
 const MAX_EVENTS = 128;
+const MAX_PREVIEW_EVENTS = 32;
+const GIT_HEAD = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const MAX_MODULE_WATCHES = 16;
+const PUBLISHED_TTL = 60_000;
+const MODULE = /^[@$A-Za-z0-9_][@$A-Za-z0-9_./-]{0,55}$/;
 /** Hard UTF-8 packet limit shared by native assembly and store admission. */
 export const FEED_PACKET_BYTES = 300;
 /** Largest normal event, leaving room for a seed or loss notice in the native packet. */
@@ -42,7 +47,8 @@ const PRIVATE_TEXT =
 // without importing that network-capable module into the native hook.
 const SOURCE_TEXT =
 	/```|~~~|=>|[{}]|^\s*(?:assistant|user|system|tool)\s*:|^\s*(?:import\s.+\sfrom\s+["']|(?:const|let|var)\s+\w+\s*=|(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(|def\s+\w+\s*\()/im;
-const safeText = (value) =>
+/** Whether data-only text is safe to retain or render in a feed notice. */
+export const safeFeedText = (value) =>
 	typeof value === "string" &&
 	!PRIVATE_TEXT.test(value) &&
 	!SOURCE_TEXT.test(value) &&
@@ -50,8 +56,117 @@ const safeText = (value) =>
 		(character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
 	) &&
 	!/\p{Bidi_Control}/u.test(value);
+const safeText = safeFeedText;
 const safeId = (value) =>
 	typeof value === "string" && value.length > 0 && value.length <= 256 && safeText(value);
+/** Published module selectors are bounded names, independent of local file interests. */
+export function isHostedFeedModule(value) {
+	return (
+		safeId(value) &&
+		MODULE.test(value) &&
+		!value.split("/").some((part) => !part || part === "." || part === "..")
+	);
+}
+
+export const HOSTED_MODULE_WATCH_KEY = "pharaoh/hosted-module-watch-v1";
+export const HOSTED_MODULE_WATCH_PREFIX = "[pharaoh/hosted-module-watch-";
+
+/** Validate the exact hosted success identity against its original tool arguments. */
+export function boundHostedModuleWatch(marker, input) {
+	if (
+		!marker ||
+		typeof marker !== "object" ||
+		Array.isArray(marker) ||
+		Object.keys(marker).length !== 3 ||
+		marker.version !== 1 ||
+		typeof marker.repo !== "string" ||
+		!/^[a-z\d][a-z\d-]{0,38}\/[a-z\d_.-]{1,100}$/i.test(marker.repo) ||
+		typeof input?.repo !== "string" ||
+		input.repo.toLowerCase() !== marker.repo.toLowerCase() ||
+		!isHostedFeedModule(input.module) ||
+		marker.module !== input.module
+	)
+		return null;
+	return { repo: marker.repo, module: input.module };
+}
+
+/** Versioned standalone receipt for a host that flattens outer MCP metadata. */
+export function hostedModuleWatchText(repo, module) {
+	return `[${HOSTED_MODULE_WATCH_KEY}] ${JSON.stringify({ version: 1, repo, module })}`;
+}
+
+function validStamp(value) {
+	return (
+		value &&
+		typeof value.commit === "string" &&
+		/^[a-f0-9]{40}$/.test(value.commit) &&
+		typeof value.signature === "string" &&
+		/^[a-f0-9]{16}$/.test(value.signature) &&
+		typeof value.time === "string" &&
+		value.time.length <= 64 &&
+		Number.isFinite(Date.parse(value.time)) &&
+		Number.isSafeInteger(value.generation) &&
+		value.generation >= 0
+	);
+}
+
+function stampKey({ commit, signature, time, generation }) {
+	return feedHash(JSON.stringify([generation, commit, time, signature]));
+}
+
+function validWatch(input) {
+	return (
+		input &&
+		UUID.test(input.id ?? "") &&
+		safeId(input.agentId) &&
+		safeId(input.rootId) &&
+		isHostedFeedModule(input.module) &&
+		Number.isFinite(input.seenAt) &&
+		Number.isFinite(input.checkedAt) &&
+		(input.missedNotice === undefined ||
+			input.missedNotice === true ||
+			(typeof input.missedNotice === "string" && UUID.test(input.missedNotice))) &&
+		(input.baseline === null ||
+			(input.baseline &&
+				COHORT.test(input.baseline.stamp ?? "") &&
+				(input.baseline.digest === null || COHORT.test(input.baseline.digest ?? ""))))
+	);
+}
+
+function edgeDigest(module, edges) {
+	if (edges === null) return null;
+	if (!Array.isArray(edges) || edges.length > 24) return undefined;
+	const pairs = [];
+	for (const edge of edges) {
+		if (
+			!Array.isArray(edge) ||
+			edge.length !== 2 ||
+			!edge.every(isHostedFeedModule) ||
+			!edge.includes(module)
+		)
+			return undefined;
+		pairs.push(JSON.stringify(edge));
+	}
+	return feedHash(JSON.stringify([...new Set(pairs)].sort()));
+}
+
+function publicationDigests(publication) {
+	if (
+		!validStamp(publication) ||
+		!Array.isArray(publication.modules) ||
+		publication.modules.length === 0 ||
+		publication.modules.length > 4
+	)
+		return null;
+	const digests = new Map();
+	for (const row of publication.modules) {
+		if (!row || !isHostedFeedModule(row.module) || digests.has(row.module)) return null;
+		const digest = edgeDigest(row.module, row.edges);
+		if (digest === undefined) return null;
+		digests.set(row.module, digest);
+	}
+	return digests;
+}
 const safePaths = (values) =>
 	Array.isArray(values) &&
 	values.length <= 16 &&
@@ -93,6 +208,7 @@ export function feedProofIdentity(value) {
 	);
 }
 const proofKey = feedProofIdentity;
+const scopeKey = (proofIdentity, revision) => feedHash(JSON.stringify([proofIdentity, revision]));
 const attempt = (operation, fallback = false) => {
 	try {
 		return operation();
@@ -108,19 +224,40 @@ const blank = (cohort) => ({
 	updatedAt: Date.now(),
 	eviction: 0,
 	events: [],
+	previewEviction: 0,
+	previewEvents: [],
 	recipients: [],
 	observations: [],
 	receipts: [],
 	producer: {},
+	hostedWatches: [],
 });
 const recipientKey = ({ rootId, agentId }) => feedHash(JSON.stringify([rootId, agentId]));
+const watchRecipient = (state, watch) =>
+	state.recipients.some(
+		(entry) => entry.key === recipientKey(watch) && entry.proofIdentity === state.proofIdentity,
+	);
+const currentHostedWatch = (state, event) =>
+	event.stamp === state.hostedStamp?.stamp
+		? state.hostedWatches.find(
+				(watch) =>
+					watch.id === event.hosted &&
+					watch.rootId === event.rootId &&
+					watch.agentId === event.agentId &&
+					watchRecipient(state, watch),
+			)
+		: undefined;
 
 /** Render only useful event data; private routing IDs and timestamps do not consume context. */
 export function formatFeedEvent(event) {
 	const kind = ["reported", "proposed", "invalidation", "fact"].includes(event?.kind)
 		? event.kind
 		: "update";
-	const author = safeId(event?.agentId) ? event.agentId.slice(-8) : "unknown";
+	const author = event?.hosted
+		? "map"
+		: safeId(event?.agentId)
+			? event.agentId.slice(-8)
+			: "unknown";
 	const refs = safePaths(event?.references) ? event.references.join(",") : "";
 	const summary =
 		typeof event?.summary === "string"
@@ -142,6 +279,55 @@ export function createFeedStore(options = {}) {
 			options.credentialsPath ?? join(options.home ?? homedir(), ".pharaoh", "credentials.json"),
 		);
 	const statePath = (cohort) => join(directory("state"), `${cohort}.json`);
+	function retainedEvent(event) {
+		return (
+			event &&
+			event.createdAt > now() - TTL &&
+			safePaths(event.references) &&
+			(event.summary === undefined || safeText(event.summary)) &&
+			feedPayloadBytes(formatFeedEvent(event)) <= FEED_EVENT_BYTES
+		);
+	}
+	function clearPreview(state) {
+		state.previewEvents = [];
+		state.previewEviction = 0;
+		delete state.previewScope;
+		for (const recipient of state.recipients) {
+			delete recipient.previewClaimed;
+			delete recipient.seenPreviewEviction;
+		}
+	}
+	function clearHosted(state) {
+		if (state.hostedScope !== undefined)
+			for (const recipient of state.recipients) {
+				delete recipient.pendingHostedGapClaim;
+				delete recipient.pendingHostedNoticeIds;
+				delete recipient.emittedHostedNoticeIds;
+			}
+		state.hostedWatches = [];
+		delete state.hostedStamp;
+		delete state.hostedScope;
+		delete state.dormantHostedProof;
+	}
+	function noteHostedLoss(state, event, watch = currentHostedWatch(state, event)) {
+		if (!watch || !UUID.test(event.id ?? "")) return;
+		const entry = state.recipients.find((recipient) => recipient.key === recipientKey(watch));
+		if (
+			entry &&
+			!(
+				Array.isArray(entry.emittedHostedNoticeIds) &&
+				entry.emittedHostedNoticeIds.includes(event.id)
+			)
+		)
+			watch.missedNotice = true;
+	}
+	function retireHostedNotices(state, liveStamp) {
+		state.previewEvents = state.previewEvents.filter((event) => {
+			if (!event.hosted || event.stamp === liveStamp) return true;
+			noteHostedLoss(state, event);
+			return false;
+		});
+	}
 	function load(cohort) {
 		const state = readFeedJSON(statePath(cohort), STATE_LIMIT);
 		if (!state)
@@ -157,17 +343,52 @@ export function createFeedStore(options = {}) {
 		)
 			return null;
 		const count = state.events.length;
+		// A pre-preview launcher reads only v1 events, so this collection must always be base-only.
 		state.events = state.events
-			.filter(
-				(event) =>
-					event.createdAt > now() - TTL &&
-					safePaths(event.references) &&
-					(event.summary === undefined || safeText(event.summary)) &&
-					feedPayloadBytes(formatFeedEvent(event)) <= FEED_EVENT_BYTES,
-			)
+			.filter((event) => retainedEvent(event) && event.previewOnly !== true && !event.hosted)
 			.slice(-MAX_EVENTS);
 		if (state.events.length < count) state.eviction = (state.eviction ?? 0) + 1;
+		const scope = COHORT.test(state.proofIdentity ?? "")
+			? scopeKey(state.proofIdentity, state.revision)
+			: null;
+		// A v1 fallback can rotate the base proof while preserving unknown preview fields.
+		if (
+			(state.previewScope !== undefined || state.previewEvents?.length) &&
+			(!scope || state.previewScope !== scope)
+		)
+			clearPreview(state);
+		// An overlap-only fallback can rebind the preview lane while preserving older hosted watches.
+		const hostedCurrent = scope && state.hostedScope === scope;
+		if (hostedCurrent && Array.isArray(state.hostedWatches))
+			state.hostedWatches = state.hostedWatches
+				.slice(-MAX_MODULE_WATCHES)
+				.filter((watch) => validWatch(watch) && watch.seenAt > now() - TTL);
+		else clearHosted(state);
 		state.recipients = state.recipients.filter((entry) => entry.lastSeen > now() - TTL);
+		const previewEvents = (Array.isArray(state.previewEvents) ? state.previewEvents : []).filter(
+			(event) => {
+				if (!event?.hosted) return true;
+				if (!hostedCurrent || !UUID.test(event.hosted) || !COHORT.test(event.stamp ?? ""))
+					return false;
+				const watch = currentHostedWatch(state, event);
+				if (!watch) return false;
+				if (event.createdAt > now() - PUBLISHED_TTL) return true;
+				noteHostedLoss(state, event, watch);
+				return false;
+			},
+		);
+		if (!Number.isSafeInteger(state.previewEviction) || state.previewEviction < 0)
+			state.previewEviction = 0;
+		state.previewEvents = previewEvents
+			.filter(
+				(event) =>
+					retainedEvent(event) &&
+					event.previewOnly === true &&
+					Number.isSafeInteger(event.sequence),
+			)
+			.slice(-MAX_PREVIEW_EVENTS);
+		if (state.previewEvents.length < previewEvents.length)
+			state.previewEviction = (state.previewEviction ?? 0) + 1;
 		state.observations = state.observations
 			.filter((entry) => entry.createdAt > now() - TTL)
 			.slice(-MAX_EVENTS);
@@ -178,7 +399,11 @@ export function createFeedStore(options = {}) {
 		if (touch) state.updatedAt = now();
 		// Count limits alone are insufficient for long paths or many concurrent workers.
 		while (feedPayloadBytes(JSON.stringify(state)) > STATE_LIMIT) {
-			if (state.observations.length) {
+			if (state.hostedWatches.length) state.hostedWatches.shift();
+			else if (state.previewEvents.length) {
+				state.previewEvents.shift();
+				state.previewEviction = (state.previewEviction ?? 0) + 1;
+			} else if (state.observations.length) {
 				state.observations.shift();
 				state.eviction = (state.eviction ?? 0) + 1;
 			} else if (state.events.length) {
@@ -193,11 +418,8 @@ export function createFeedStore(options = {}) {
 		writeFeedJSON(directory("state", true), `${state.cohort}.json`, state, STATE_LIMIT);
 		return true;
 	}
-	function proof(cohort, state) {
-		if (!COHORT.test(cohort ?? "")) return null;
-		state ??= load(cohort);
+	function matchesProofScope(state, value) {
 		const active = marker();
-		const value = readFeedJSON(join(directory("proofs"), `${cohort}.json`), 4096);
 		if (
 			!active ||
 			!state ||
@@ -221,16 +443,23 @@ export function createFeedStore(options = {}) {
 			state.proofIdentity !== proofKey(value) ||
 			!Number.isFinite(value.requestedAt) ||
 			!Number.isFinite(value.expiresAt) ||
-			value.expiresAt <= now() ||
+			value.expiresAt <= value.requestedAt ||
 			value.requestedAt > now() ||
 			value.expiresAt > value.requestedAt + 60_000
 		)
-			return null;
-		return value;
+			return false;
+		return true;
+	}
+	function proof(cohort, state) {
+		if (!COHORT.test(cohort ?? "")) return null;
+		state ??= load(cohort);
+		if (state?.dormantHostedProof) return null;
+		const value = readFeedJSON(join(directory("proofs"), `${cohort}.json`), 4096);
+		return matchesProofScope(state, value) && value.expiresAt > now() ? value : null;
 	}
 	function authorizationIdentity(cohort, state) {
 		const access = proof(cohort, state);
-		return access ? feedHash(JSON.stringify([proofKey(access), access.scopeRevision])) : null;
+		return access ? scopeKey(proofKey(access), access.scopeRevision) : null;
 	}
 	function mutate(cohort, operation, guard = {}) {
 		if (!COHORT.test(cohort ?? "")) return false;
@@ -260,6 +489,7 @@ export function createFeedStore(options = {}) {
 						if (result === false || result === null) return result;
 						if (guard.authorize !== false && authorizationIdentity(cohort, state) !== identity)
 							return false;
+						if (result === "irrelevant") return result;
 						if (!writeState(state)) return false;
 						return result;
 					},
@@ -297,8 +527,10 @@ export function createFeedStore(options = {}) {
 		if (input.dedupeKey !== undefined && !COHORT.test(input.dedupeKey)) return null;
 		if (containsCapability(state, { summary: input.summary, references: input.references }))
 			return null;
+		const preview = input.previewOnly === true;
+		const events = preview ? state.previewEvents : state.events;
 		if (input.dedupeKey) {
-			const existing = state.events.find(
+			const existing = events.find(
 				(event) => event.rootId === input.rootId && event.dedupeKey === input.dedupeKey,
 			);
 			if (existing) return existing;
@@ -312,6 +544,8 @@ export function createFeedStore(options = {}) {
 					!safeText(input.summary)))
 		)
 			return null;
+		if (input.hosted && (!preview || !UUID.test(input.hosted) || !COHORT.test(input.stamp ?? "")))
+			return null;
 		const access = proof(input.cohort);
 		if (!access) return null;
 		const provenance = {};
@@ -321,10 +555,12 @@ export function createFeedStore(options = {}) {
 		const event = {
 			id: randomUUID(),
 			...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-			sequence: ++state.sequence,
+			sequence: state.sequence + 1,
 			cohort: input.cohort,
 			rootId: input.rootId,
 			agentId: input.agentId,
+			...(preview ? { previewOnly: true } : {}),
+			...(input.hosted ? { hosted: input.hosted, stamp: input.stamp } : {}),
 			kind: input.kind,
 			references: [...new Set(input.references)].slice(0, 8),
 			...(input.summary ? { summary: input.summary } : {}),
@@ -333,8 +569,36 @@ export function createFeedStore(options = {}) {
 			epoch: access.epoch,
 		};
 		if (feedPayloadBytes(formatFeedEvent(event)) > FEED_EVENT_BYTES) return null;
-		state.events.push(event);
-		state.events = state.events.slice(-MAX_EVENTS);
+		if (preview) {
+			const previewScope = scopeKey(state.proofIdentity, state.revision);
+			// Include the next sequence, touch and eviction counter when checking capacity.
+			const kept = [...events, event].slice(-MAX_PREVIEW_EVENTS);
+			let evictions = (state.previewEviction ?? 0) + events.length + 1 - kept.length;
+			while (
+				kept.length &&
+				feedPayloadBytes(
+					JSON.stringify({
+						...state,
+						sequence: event.sequence,
+						updatedAt: now(),
+						previewScope,
+						previewEviction: evictions,
+						previewEvents: kept,
+					}),
+				) > STATE_LIMIT
+			) {
+				kept.shift();
+				evictions++;
+			}
+			if (!kept.length) return null;
+			state.previewScope = previewScope;
+			state.previewEvents = kept;
+			state.previewEviction = evictions;
+		} else {
+			state.events.push(event);
+			state.events = state.events.slice(-MAX_EVENTS);
+		}
+		state.sequence = event.sequence;
 		return event;
 	}
 	function rebuild(cohort) {
@@ -419,10 +683,9 @@ export function createFeedStore(options = {}) {
 						const state = load(cohort);
 						const proofFile = join(directory("proofs"), `${cohort}.json`);
 						const rawProof = readFeedJSON(proofFile, 4096);
-						if (rawProof && rawProof.expiresAt <= now()) {
-							removeFeedFile(proofFile);
-							removed++;
-						}
+						const dormantProof = state?.dormantHostedProof;
+						const scopedProof = matchesProofScope(state, dormantProof ?? rawProof);
+						const expired = Boolean(dormantProof) || rawProof?.expiresAt <= now();
 
 						const roots = join(directory("roots"), cohort);
 						for (const file of boundedNames(roots, 64)) {
@@ -440,7 +703,21 @@ export function createFeedStore(options = {}) {
 							attempt(() => removeFeedFile(join(directory("cohorts"), `${cohort}.json`)));
 							attempt(() => rmdirSync(roots));
 							removed++;
-						} else writeState(state, false);
+						} else {
+							if (scopedProof && expired && state.hostedWatches.length) {
+								// Keep scope evidence outside the proof file and fence it before unlinking.
+								state.dormantHostedProof = dormantProof ?? rawProof;
+								for (const event of state.previewEvents) {
+									if (event.hosted) noteHostedLoss(state, event);
+								}
+							} else delete state.dormantHostedProof;
+							if (!scopedProof || expired) clearPreview(state);
+							if (!scopedProof) clearHosted(state);
+							if (writeState(state, false) && expired && rawProof) {
+								removeFeedFile(proofFile);
+								removed++;
+							}
+						}
 					},
 					`${cohort}.lock`,
 					now(),
@@ -616,12 +893,209 @@ export function createFeedStore(options = {}) {
 				return true;
 			});
 		},
+		recordHostedModuleWatch(input) {
+			if (
+				!authorized(input) ||
+				!isHostedFeedModule(input.module) ||
+				!COHORT.test(input.authorizationIdentity ?? "")
+			)
+				return false;
+			return mutate(
+				input.cohort,
+				(state) => {
+					if (!watchRecipient(state, input) || containsCapability(state, input.module))
+						return false;
+					state.hostedScope = input.authorizationIdentity;
+					const old = state.hostedWatches.find(
+						(entry) =>
+							entry.rootId === input.rootId &&
+							entry.agentId === input.agentId &&
+							entry.module === input.module,
+					);
+					state.hostedWatches = [
+						...state.hostedWatches.filter((entry) => entry !== old),
+						{
+							id: old?.id ?? randomUUID(),
+							rootId: input.rootId,
+							agentId: input.agentId,
+							module: input.module,
+							seenAt: now(),
+							checkedAt: old?.checkedAt ?? 0,
+							baseline: old?.baseline ?? null,
+							...(old?.missedNotice ? { missedNotice: old.missedNotice } : {}),
+						},
+					].slice(-MAX_MODULE_WATCHES);
+					return true;
+				},
+				{ authorizationIdentity: input.authorizationIdentity },
+			);
+		},
+		readHostedModuleWatches({ cohort, authorizationIdentity: expected }) {
+			if (!COHORT.test(cohort ?? "")) return [];
+			const state = load(cohort);
+			if (!state || !expected || authorizationIdentity(cohort, state) !== expected) return [];
+			return [
+				...new Set(
+					state.hostedWatches
+						.filter((watch) => watchRecipient(state, watch))
+						.sort((left, right) => left.checkedAt - right.checkedAt)
+						.map(({ module }) => module),
+				),
+			].slice(0, 4);
+		},
+		retireHostedModuleNotices({ cohort, authorizationIdentity: expected }) {
+			if (!COHORT.test(expected ?? "")) return false;
+			return mutate(
+				cohort,
+				(state) => {
+					retireHostedNotices(state);
+					return true;
+				},
+				{ authorizationIdentity: expected },
+			);
+		},
+		currentHostedModuleNoticeIds({ cohort, authorizationIdentity: expected, ids }) {
+			if (
+				!COHORT.test(cohort ?? "") ||
+				!COHORT.test(expected ?? "") ||
+				!Array.isArray(ids) ||
+				!ids.length
+			)
+				return [];
+			const state = load(cohort);
+			if (!state?.hostedStamp) return [];
+			const access = proof(cohort, state);
+			if (!access || scopeKey(state.proofIdentity, state.revision) !== expected) return [];
+			const requested = new Set(ids);
+			return state.previewEvents
+				.filter(
+					(event) =>
+						event.hosted &&
+						requested.has(event.id) &&
+						sameEpoch(event.epoch, access.epoch) &&
+						event.createdAt > now() - PUBLISHED_TTL,
+				)
+				.map((event) => event.id);
+		},
+		applyHostedModulePublication({ cohort, authorizationIdentity: expected, publication }) {
+			const digests = publicationDigests(publication);
+			if (!digests || !COHORT.test(expected ?? "")) return false;
+			const stamp = stampKey(publication);
+			return mutate(
+				cohort,
+				(state) => {
+					const current = state.hostedStamp;
+					if (
+						current &&
+						(publication.generation < current.generation ||
+							(publication.generation === current.generation &&
+								Date.parse(publication.time) < Date.parse(current.time)))
+					)
+						return false;
+					retireHostedNotices(state, stamp);
+					state.hostedStamp = { stamp, generation: publication.generation, time: publication.time };
+					state.hostedScope = expected;
+					for (const watch of state.hostedWatches) {
+						if (!watchRecipient(state, watch) || !digests.has(watch.module)) continue;
+						const digest = digests.get(watch.module);
+						const prior = watch.baseline;
+						const advanced = prior && prior.stamp !== stamp;
+						const incomplete = digest === null || prior?.digest === null;
+						if (advanced && (incomplete || digest !== prior.digest)) {
+							const summary = `Published default branch g${publication.generation}: ${watch.module} ${incomplete ? "needs a dependency recheck." : "dependencies changed."}`;
+							const event = append(state, {
+								cohort,
+								rootId: watch.rootId,
+								agentId: watch.agentId,
+								hosted: watch.id,
+								stamp,
+								previewOnly: true,
+								kind: incomplete ? "invalidation" : "fact",
+								summary,
+								references: [],
+								provenance: { head: publication.commit },
+								dedupeKey: feedHash(JSON.stringify([watch.id, stamp])),
+							});
+							if (!event) continue;
+						}
+						watch.checkedAt = now();
+						// The latest sampled stamp and most recent complete digest advance independently.
+						watch.baseline = { stamp, digest: digest ?? prior?.digest ?? null };
+					}
+					return true;
+				},
+				{ authorizationIdentity: expected },
+			);
+		},
 		publishFinding(input) {
 			if (!authorized(input)) return null;
 			return (
 				mutate(input.cohort, (state) => append(state, input), {
 					authorizationIdentity: input.authorizationIdentity,
 				}) || null
+			);
+		},
+		publishOverlap(input) {
+			const { head, fingerprint } = input.provenance ?? {};
+			if (
+				!safeId(input.agentId) ||
+				!safeId(input.rootId) ||
+				!UUID.test(input.observationId ?? "") ||
+				!safePaths([input.path]) ||
+				!COHORT.test(input.authorizationIdentity ?? "") ||
+				typeof fingerprint !== "string" ||
+				!COHORT.test(fingerprint) ||
+				typeof head !== "string" ||
+				!GIT_HEAD.test(head)
+			)
+				return "irrelevant";
+			if (!authorized(input)) return "retry";
+			return (
+				mutate(
+					input.cohort,
+					(state) => {
+						const observation = state.observations.find(
+							(entry) => entry.id === input.observationId,
+						);
+						if (
+							observation?.kind !== "read" ||
+							observation.rootId !== input.rootId ||
+							observation.agentId !== input.agentId ||
+							!observation.paths.includes(input.path) ||
+							!state.recipients.some(
+								(entry) =>
+									entry.rootId === input.rootId &&
+									entry.agentId === input.agentId &&
+									entry.proofIdentity === state.proofIdentity &&
+									entry.interests.includes(input.path),
+							) ||
+							!state.recipients.some(
+								(entry) =>
+									entry.rootId === input.rootId &&
+									entry.agentId !== input.agentId &&
+									entry.proofIdentity === state.proofIdentity &&
+									entry.interests.includes(input.path),
+							)
+						)
+							return "irrelevant";
+						return append(state, {
+							cohort: input.cohort,
+							rootId: input.rootId,
+							agentId: input.agentId,
+							previewOnly: true,
+							kind: "fact",
+							summary: "Sibling referenced this saved file.",
+							references: [input.path],
+							provenance: input.provenance,
+							dedupeKey: feedHash(
+								JSON.stringify(["saved-overlap", input.agentId, input.path, head, fingerprint]),
+							),
+						})
+							? "published"
+							: "irrelevant";
+					},
+					{ authorizationIdentity: input.authorizationIdentity },
+				) || "retry"
 			);
 		},
 		drainRecipient(input) {
@@ -633,22 +1107,43 @@ export function createFeedStore(options = {}) {
 					if (!entry || !access) return false;
 					const identity = authorizationIdentity(input.cohort, state);
 					const claimed = new Set(entry.claimed);
-					const candidates = state.events.filter(
+					const preview = input.preview === true;
+					const missed =
+						preview && entry.proofIdentity === state.proofIdentity
+							? state.hostedWatches.filter(
+									(watch) =>
+										watch.rootId === input.rootId &&
+										watch.agentId === input.agentId &&
+										(watch.missedNotice === true || UUID.test(watch.missedNotice ?? "")),
+								)
+							: [];
+					const hostedGap = missed.length > 0;
+					const previewClaimed = new Set(
+						preview && Array.isArray(entry.previewClaimed) ? entry.previewClaimed : [],
+					);
+					const events = preview
+						? [...state.events, ...state.previewEvents].sort((a, b) => a.sequence - b.sequence)
+						: state.events;
+					const candidates = events.filter(
 						(event) =>
 							event.rootId === input.rootId &&
-							event.agentId !== input.agentId &&
 							sameEpoch(event.epoch, access.epoch) &&
-							!claimed.has(event.id) &&
-							event.references.some((path) => entry.interests.includes(path)),
+							!(event.previewOnly === true ? previewClaimed : claimed).has(event.id) &&
+							(event.hosted
+								? event.agentId === input.agentId && currentHostedWatch(state, event)
+								: event.agentId !== input.agentId &&
+									event.references.some((path) => entry.interests.includes(path))),
 					);
 					const gap =
-						entry.pendingClaims.length > 0 || (entry.seenEviction ?? 0) < (state.eviction ?? 0);
+						entry.pendingClaims.length > 0 ||
+						(entry.seenEviction ?? 0) < (state.eviction ?? 0) ||
+						(preview && (entry.seenPreviewEviction ?? 0) < (state.previewEviction ?? 0));
 					const seedNeeded = entry.seeded !== true;
 					const budget = Math.max(
 						0,
 						Math.min(input.maxChars ?? FEED_PACKET_BYTES, FEED_PACKET_BYTES) -
 							(seedNeeded ? Math.max(0, input.seedChars ?? 0) : 0) -
-							(gap ? Math.max(0, input.gapChars ?? 0) : 0),
+							(gap || hostedGap ? Math.max(0, input.gapChars ?? 0) : 0),
 					);
 					const selected = [];
 					let size = 0;
@@ -658,15 +1153,36 @@ export function createFeedStore(options = {}) {
 						selected.push(event);
 						size += length;
 					}
-					const claimId = selected.length || seedNeeded || gap ? randomUUID() : null;
-					entry.claimed = [
-						...new Set([...entry.claimed, ...selected.map((event) => event.id)]),
-					].slice(-MAX_EVENTS);
-					entry.pendingClaims = claimId ? [claimId] : [];
+					const packetClaim = selected.length || seedNeeded || gap;
+					const claimId = packetClaim || hostedGap ? randomUUID() : null;
+					const hosted = [];
+					for (const event of selected) {
+						(event.previewOnly === true ? previewClaimed : claimed).add(event.id);
+						if (event.hosted) hosted.push(event.id);
+					}
+					if (hosted.length) entry.pendingHostedNoticeIds = hosted;
+					else delete entry.pendingHostedNoticeIds;
+					entry.claimed = [...claimed].slice(-MAX_EVENTS);
+					if (preview) {
+						entry.previewClaimed = [...previewClaimed].slice(-MAX_PREVIEW_EVENTS);
+						entry.seenPreviewEviction = state.previewEviction ?? 0;
+						for (const watch of missed) watch.missedNotice = claimId;
+					}
+					entry.pendingClaims = packetClaim ? [claimId] : [];
+					// Keep hosted-only gap claims out of the legacy packet claim lane.
+					if (hostedGap && !packetClaim) entry.pendingHostedGapClaim = claimId;
+					else delete entry.pendingHostedGapClaim;
 					entry.pendingAuthorization = identity;
 					entry.seenEviction = state.eviction ?? 0;
 					entry.lastSeen = now();
-					return { events: selected, gap, claimId, seedNeeded, authorizationIdentity: identity };
+					return {
+						events: selected,
+						gap,
+						hostedGap,
+						claimId,
+						seedNeeded,
+						authorizationIdentity: identity,
+					};
 				}) || null
 			);
 		},
@@ -678,11 +1194,37 @@ export function createFeedStore(options = {}) {
 					const entry = state.recipients.find((item) => item.key === recipientKey(input));
 					if (
 						!entry ||
-						!entry.pendingClaims.includes(input.claimId) ||
+						(!entry.pendingClaims.includes(input.claimId) &&
+							entry.pendingHostedGapClaim !== input.claimId) ||
 						entry.pendingAuthorization !== authorizationIdentity(input.cohort, state)
 					)
 						return false;
 					entry.pendingClaims = entry.pendingClaims.filter((id) => id !== input.claimId);
+					delete entry.pendingHostedGapClaim;
+					// A claim can contain notices that the hook subsequently filters out.
+					if (Array.isArray(entry.pendingHostedNoticeIds) && Array.isArray(input.hostedNoticeIds)) {
+						const emitted = entry.pendingHostedNoticeIds.filter((id) =>
+							input.hostedNoticeIds.includes(id),
+						);
+						if (emitted.length) {
+							const prior = Array.isArray(entry.emittedHostedNoticeIds)
+								? entry.emittedHostedNoticeIds
+								: [];
+							entry.emittedHostedNoticeIds = [...new Set([...prior, ...emitted])].slice(
+								-MAX_PREVIEW_EVENTS,
+							);
+						}
+					}
+					delete entry.pendingHostedNoticeIds;
+					if (input.hostedGap === true)
+						for (const watch of state.hostedWatches) {
+							if (
+								watch.rootId === input.rootId &&
+								watch.agentId === input.agentId &&
+								watch.missedNotice === input.claimId
+							)
+								delete watch.missedNotice;
+						}
 					entry.emitted = (entry.emitted ?? 0) + 1;
 					entry.seeded = true;
 					return true;
@@ -718,6 +1260,8 @@ export function createFeedStore(options = {}) {
 					const identity = proofKey(value);
 					if (state.proofIdentity !== identity) {
 						state.events = [];
+						clearPreview(state);
+						clearHosted(state);
 						state.observations = [];
 						state.receipts = [];
 						state.producer = {};
@@ -731,6 +1275,7 @@ export function createFeedStore(options = {}) {
 						}
 					}
 					state.proofIdentity = identity;
+					delete state.dormantHostedProof;
 					const stored = { ...value, scopeRevision: state.revision };
 					writeFeedJSON(directory("proofs", true), `${cohort}.json`, stored, 4096);
 					if (!proof(cohort, state)) {
@@ -894,7 +1439,9 @@ export function createFeedStore(options = {}) {
 				for (const file of names) {
 					if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
 					const cohort = file.slice(0, -5);
-					const access = readFeedJSON(join(directory("proofs"), file), 4096);
+					const access =
+						readFeedJSON(join(directory("proofs"), file), 4096) ??
+						(input.signIn ? load(cohort)?.dormantHostedProof : null);
 					if (input.signIn && access?.signIn !== input.signIn) continue;
 					cleared = api.clearFeedScope({ cohort }) && cleared;
 				}

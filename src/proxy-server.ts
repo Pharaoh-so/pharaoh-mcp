@@ -393,6 +393,20 @@ export class ProxyServer {
 				allowMemory() ? target.callTool(name, args, options) : Promise.resolve(MEMORY_PROTECTED);
 			const cleanMemoryResult = (result: CallToolResult) =>
 				memoryTool && !allowMemory() ? withoutMemoryFeedback(result) : result;
+			const finishHosted = (target: Backend, result: CallToolResult, allowRuntime: boolean) => {
+				const clean = sanitizeRuntimeResult(
+					cleanMemoryResult(result),
+					allowRuntime,
+				) as CallToolResult;
+				const withWatch =
+					name === "get_module_context" &&
+					this.downstream?.client.name === "claude-code" &&
+					target.name === "sse" &&
+					target === this.backend
+						? this.nativeFeed?.withHostedModuleWatch(args, clean)
+						: undefined;
+				return this.withMemoryNotice(withWatch ?? clean);
+			};
 			const result = await hostedCall(backend);
 			if (runtime && backend.name === "sse")
 				recordRuntimeReceipt(this.downstream?.client.name, result, { scope: this.installScope });
@@ -400,19 +414,13 @@ export class ProxyServer {
 			// it from there instead of asking the agent to call again.
 			if (backend.name === "auth-required" && this.backend !== backend && !result.isError) {
 				extra.signal.throwIfAborted();
-				const replay = await hostedCall(this.backend);
+				const replayBackend = this.backend;
+				const replay = await hostedCall(replayBackend);
 				if (runtime && this.backend.name === "sse")
 					recordRuntimeReceipt(this.downstream?.client.name, replay, { scope: this.installScope });
-				return this.withMemoryNotice(
-					sanitizeRuntimeResult(cleanMemoryResult(replay), Boolean(runtime)) as CallToolResult,
-				);
+				return finishHosted(replayBackend, replay, Boolean(runtime));
 			}
-			return this.withMemoryNotice(
-				sanitizeRuntimeResult(
-					cleanMemoryResult(result),
-					backend.name === "sse" && Boolean(runtime),
-				) as CallToolResult,
-			);
+			return finishHosted(backend, result, backend.name === "sse" && Boolean(runtime));
 		});
 	}
 

@@ -24,6 +24,10 @@ export function writeHookPreferences(
 ): void;
 export function resetHookPreferences(disable: boolean, home?: string): void;
 export function setMemoryCapture(enabled: boolean, home?: string): void;
+/** The explicit opt-in of this installation, separate from all collection choices. */
+export function changeReviewEnabled(home?: string, scope?: MemoryInstallScope): boolean;
+/** Updates only the chosen installation's review opt-in. */
+export function setChangeReview(enabled: boolean, home?: string, scope?: MemoryInstallScope): void;
 export function nativeMemoryClient(
 	info: { name?: string } | undefined,
 ): MemoryHookClient | undefined;

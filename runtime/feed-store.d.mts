@@ -1,4 +1,7 @@
 /** Public native feed contracts; compatibility metadata never grants repository access. */
+/** Whether data-only text is safe to retain or render in a feed notice. */
+export function safeFeedText(value: unknown): value is string;
+
 export interface FeedOptions {
 	/** Scratch or installed home. */
 	home?: string;
@@ -55,6 +58,8 @@ export interface FeedScope {
 	/** Actual native child identity. */ agentId: string;
 }
 export interface FeedFinding extends FeedScope {
+	/** Requires explicit preview enrollment at delivery. */
+	previewOnly?: true;
 	/** Stable hash identifying one producer transition retry. */
 	dedupeKey?: string;
 	/** Whether this is a worker assertion or a verified structural observation. */
@@ -78,6 +83,8 @@ export interface FeedProvenance {
 	fingerprint?: string;
 }
 export interface FeedEvent extends FeedFinding {
+	/** Opaque recipient-specific watched module identity. */
+	hosted?: string;
 	/** Event UUID used by deduplicated claims. */ id: string;
 	/** Monotonic sequence within this cohort. */ sequence: number;
 	/** Creation time in milliseconds. */ createdAt: number;
@@ -87,6 +94,14 @@ export interface FeedObservation extends FeedScope {
 	/** Structured repository-relative paths, never command text. */ paths: string[];
 	/** Read or edit boundary. */ kind: string;
 	/** Observation time in milliseconds. */ createdAt: number;
+}
+/** One exact hosted map stamp and its bounded watched module edge sets. */
+export interface HostedFeedPublication {
+	commit: string;
+	signature: string;
+	time: string;
+	generation: number;
+	modules: Array<{ module: string; edges: [from: string, to: string][] | null }>;
 }
 export interface FeedStore {
 	recordFeedConnection(connection: FeedConnection): boolean;
@@ -103,15 +118,59 @@ export interface FeedStore {
 	registerRecipient(input: FeedScope & { checkout: string; interests?: string[] }): boolean;
 	recipientCapability(input: FeedScope): string | null;
 	recordObservation(input: FeedScope & { paths: string[]; kind?: string }): boolean;
+	/** Register exact module interest following a verified native child result. */
+	recordHostedModuleWatch(
+		input: FeedScope & { module: string; authorizationIdentity: string },
+	): boolean;
+	/** Return up to four live module selectors, oldest sampled first. */
+	readHostedModuleWatches(input: { cohort: string; authorizationIdentity: string }): string[];
+	/** Retire pending notices when current publication evidence becomes unavailable. */
+	retireHostedModuleNotices(input: { cohort: string; authorizationIdentity: string }): boolean;
+	/** Return the subset of selected IDs still belonging to the current observed map. */
+	currentHostedModuleNoticeIds(input: {
+		cohort: string;
+		authorizationIdentity: string;
+		ids: string[];
+	}): string[];
+	/** Compare and persist one authorized map read and its recipient claims atomically. */
+	applyHostedModulePublication(input: {
+		cohort: string;
+		authorizationIdentity: string;
+		publication: HostedFeedPublication;
+	}): boolean;
 	publishFinding(input: FeedFinding): FeedEvent | null;
-	drainRecipient(input: FeedScope & { maxChars?: number; seedChars?: number; gapChars?: number }): {
+	/** Publish one author's verified reference for matching siblings, or identify a terminal or retryable outcome. */
+	publishOverlap(
+		input: FeedScope & {
+			observationId: string;
+			path: string;
+			provenance: FeedProvenance & { head: string; fingerprint: string };
+			authorizationIdentity: string;
+		},
+	): "published" | "irrelevant" | "retry";
+	drainRecipient(
+		input: FeedScope & {
+			maxChars?: number;
+			seedChars?: number;
+			gapChars?: number;
+			preview?: boolean;
+		},
+	): {
 		events: FeedEvent[];
 		gap: boolean;
+		hostedGap: boolean;
 		seedNeeded: boolean;
 		claimId: string | null;
 		authorizationIdentity: string;
 	} | null;
-	markEmitted(input: FeedScope & { claimId: string; authorizationIdentity?: string }): boolean;
+	markEmitted(
+		input: FeedScope & {
+			claimId: string;
+			authorizationIdentity?: string;
+			hostedGap?: boolean;
+			hostedNoticeIds?: string[];
+		},
+	): boolean;
 	readScopeRevision(input: { cohort: string }): string | null;
 	currentAuthorizationIdentity(input: { cohort: string }): string | null;
 	putAccessProof(input: {
@@ -154,6 +213,17 @@ export function createFeedStore(options?: FeedOptions): FeedStore;
 export function feedProofIdentity(proof: FeedAccessProof): string;
 /** Render only useful event data using the same representation as byte admission. */
 export function formatFeedEvent(event: FeedEvent): string;
+/** Whether a bounded exact module selector is eligible for a published watch. */
+export function isHostedFeedModule(value: unknown): value is string;
+export const HOSTED_MODULE_WATCH_KEY: string;
+export const HOSTED_MODULE_WATCH_PREFIX: string;
+/** Validate a hosted module receipt against the original arguments. */
+export function boundHostedModuleWatch(
+	marker: unknown,
+	input: Record<string, unknown>,
+): { repo: string; module: string } | null;
+/** Render the exact dedicated text block for a verified watch. */
+export function hostedModuleWatchText(repo: string, module: string): string;
 /** Maximum encoded native packet size. */
 export const FEED_PACKET_BYTES: number;
 /** Maximum encoded normal event size. */

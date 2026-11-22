@@ -15,7 +15,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { nativeFeedRegistration, setNativeFeedEnabled } from "../runtime/feed-hooks.mjs";
+import {
+	nativeFeedRegistration,
+	setNativeFeedEnabled,
+	setNativeFeedPreviewEnabled,
+} from "../runtime/feed-hooks.mjs";
 import {
 	deriveFeedCohortKey,
 	feedCheckoutIdentity,
@@ -23,7 +27,11 @@ import {
 	resolveFeedProfile,
 } from "../runtime/feed-identity.mjs";
 import { feedRoot } from "../runtime/feed-io.mjs";
-import { createFeedStore, type FeedAccessProof } from "../runtime/feed-store.mjs";
+import {
+	createFeedStore,
+	type FeedAccessProof,
+	hostedModuleWatchText,
+} from "../runtime/feed-store.mjs";
 import { confirmNativeFeedEmission, runNativeFeedHook } from "../runtime/native-feed-hook.mjs";
 import { readCredentials, saveAuthorizedCredentials } from "../src/credentials.js";
 import { NativeFeedRuntime } from "../src/native-feed.js";
@@ -301,8 +309,11 @@ describe("observed native payload contracts", () => {
 			`Startup-inclusive delivery samples (ms): ${delivery.map((value) => value.toFixed(3)).join(", ")}`,
 		).toBeLessThanOrEqual(75);
 	});
-	it("shares only through a child capability and its matching native hook", async () => {
-		const ctx = await context("codex", "codex-0.166.0.json");
+	it.each(profiles.slice(0, 2))("shares only through the matching $client child hook", async ({
+		client,
+		file,
+	}) => {
+		const ctx = await context(client, file);
 		const seed = deliver(ctx.start, ctx.options);
 		const recipientToken = /recipientToken=([a-f0-9-]{36})/.exec(text(seed))?.[1];
 		if (!recipientToken) throw new Error("Missing native child capability");
@@ -324,7 +335,11 @@ describe("observed native payload contracts", () => {
 			if (!reply || reply.type !== "text") throw new Error("Missing share receipt");
 			expect(JSON.parse(reply.text).state).toBe("awaiting_child_hook");
 			deliver(
-				{ ...ctx.checkpoint, tool_name: "mcp__pharaoh__pharaoh_share", tool_response: pending },
+				{
+					...ctx.checkpoint,
+					tool_name: "mcp__pharaoh__pharaoh_share",
+					tool_response: client === "claude-code" ? pending.content : pending,
+				},
 				ctx.options,
 			);
 			interest(ctx, ctx.rootId, SIBLING);
@@ -401,9 +416,46 @@ describe("observed native payload contracts", () => {
 		const structured = {
 			...ctx.checkpoint,
 			tool_name: "mcp__pharaoh__get_blast_radius",
-			tool_input: { entity: PATH },
+			tool_input: { repo: REPO, entity_type: "file", entity: PATH },
 		};
-		expect(text(deliver(structured, ctx.options))).toContain(PRIVATE_DELTA);
+		expect(
+			deliver(
+				{ ...structured, tool_input: { ...structured.tool_input, repo: "another/repo" } },
+				ctx.options,
+			),
+		).toBeNull();
+		expect(
+			deliver(
+				{ ...structured, tool_input: { ...structured.tool_input, entity_type: "function" } },
+				ctx.options,
+			),
+		).toBeNull();
+		expect(
+			text(
+				deliver(
+					{ ...structured, tool_input: { ...structured.tool_input, repo: "native-feed" } },
+					ctx.options,
+				),
+			),
+		).toContain(PRIVATE_DELTA);
+	});
+
+	it("uses a verified repo's exact file search to deliver the base feed without preview", async () => {
+		const ctx = await context("codex", "codex-0.166.0.json");
+		deliver(ctx.start, ctx.options);
+		publish(ctx);
+		const search = {
+			...ctx.checkpoint,
+			tool_name: "mcp__pharaoh__search_functions",
+			tool_input: { repo: REPO, file: PATH, query: "fixture" },
+		};
+		expect(
+			deliver(
+				{ ...search, tool_input: { ...search.tool_input, repo: "another/repo" } },
+				ctx.options,
+			),
+		).toBeNull();
+		expect(text(deliver(search, ctx.options))).toContain(PRIVATE_DELTA);
 	});
 
 	it("uses structured Claude Read interest for late replay without storing returned file contents", async () => {
@@ -421,5 +473,173 @@ describe("observed native payload contracts", () => {
 			.map((name) => readFileSync(join(state, name), "utf8"))
 			.join("");
 		expect(persisted).not.toContain("DO_NOT_PERSIST_FILE_BODY");
+	});
+
+	it("requires the current client preview choice to emit a preview notice", async () => {
+		const ctx = await context("claude-code", "claude-code-2.1.328.json");
+		deliver(ctx.start, ctx.options);
+		interest(ctx, ctx.rootId, SIBLING);
+		const queue = (summary: string) =>
+			ctx.store.publishFinding({
+				cohort: ctx.cohort,
+				rootId: ctx.rootId,
+				agentId: SIBLING,
+				previewOnly: true,
+				kind: "fact",
+				summary,
+				references: [PATH],
+			});
+		expect(queue("First preview")).not.toBeNull();
+		setNativeFeedPreviewEnabled("codex", true, { home: ctx.home });
+		expect(deliver(ctx.checkpoint, ctx.options)).toBeNull();
+		setNativeFeedPreviewEnabled("claude-code", true, { home: ctx.home });
+		expect(text(deliver(ctx.checkpoint, ctx.options))).toContain("First preview");
+		expect(queue("Second preview")).not.toBeNull();
+		setNativeFeedPreviewEnabled("claude-code", false, { home: ctx.home });
+		expect(deliver(ctx.checkpoint, ctx.options)).toBeNull();
+	});
+
+	it("renders one saved-change notice per packet and keeps the base fallback after opt-out", async () => {
+		const ctx = await context("claude-code", "claude-code-2.1.328.json");
+		deliver(ctx.start, ctx.options);
+		interest(ctx, ctx.rootId, SIBLING);
+		const queue = (dedupeKey: string, summary: string) => {
+			const transition = {
+				cohort: ctx.cohort,
+				rootId: ctx.rootId,
+				agentId: SIBLING,
+				dedupeKey,
+				references: [PATH],
+			};
+			expect(
+				ctx.store.publishFinding({
+					...transition,
+					kind: "invalidation",
+					summary: "Saved file changed.",
+				}),
+			).not.toBeNull();
+			expect(
+				ctx.store.publishFinding({ ...transition, kind: "fact", previewOnly: true, summary }),
+			).not.toBeNull();
+		};
+		setNativeFeedPreviewEnabled("claude-code", true, { home: ctx.home });
+		queue("a".repeat(64), "Saved exports added First (interface).");
+		const preview = text(deliver(ctx.checkpoint, ctx.options));
+		expect(preview).toContain("Saved exports added First (interface).");
+		expect(preview).not.toContain("Saved file changed.");
+		expect(deliver(ctx.checkpoint, ctx.options)).toBeNull();
+
+		queue("b".repeat(64), "Saved exports added Second (interface).");
+		setNativeFeedPreviewEnabled("claude-code", false, { home: ctx.home });
+		const base = text(deliver(ctx.checkpoint, ctx.options));
+		expect(base).toContain("Saved file changed.");
+		expect(base).not.toContain("Saved exports added Second (interface).");
+	});
+
+	it("watches only a bound hosted module success and routes map facts to that preview child", async () => {
+		const ctx = await context("codex", "codex-0.166.0.json");
+		const scope = { cohort: ctx.cohort, rootId: ctx.rootId, agentId: ctx.agentId };
+		const authorizationIdentity = ctx.store.currentAuthorizationIdentity(scope);
+		if (!authorizationIdentity) throw new Error("Fixture feed access was unavailable");
+		const current = { cohort: ctx.cohort, authorizationIdentity };
+		const module = "auth";
+		const marker = { version: 1, repo: REPO, module };
+		const valid = {
+			...ctx.checkpoint,
+			tool_name: "mcp__pharaoh__get_module_context",
+			tool_input: { repo: REPO, module },
+			tool_response: { _meta: { "pharaoh/hosted-module-watch-v1": marker } },
+		};
+		deliver(ctx.start, ctx.options);
+		deliver(valid, ctx.options);
+		expect(ctx.store.readHostedModuleWatches(current)).toEqual([]);
+		setNativeFeedPreviewEnabled("codex", true, { home: ctx.home });
+		for (const event of [
+			{ ...valid, tool_response: { content: [{ type: "text", text: JSON.stringify(marker) }] } },
+			{ ...valid, tool_response: [{ type: "text", text: hostedModuleWatchText(REPO, module) }] },
+			{ ...valid, tool_response: { ...valid.tool_response, isError: true } },
+			{ ...valid, tool_input: { repo: "another/repo", module } },
+			{ ...valid, tool_input: { repo: REPO, module: "another" } },
+			{ ...valid, agent_id: undefined },
+		])
+			deliver(event, ctx.options);
+		expect(ctx.store.readHostedModuleWatches(current)).toEqual([]);
+		deliver(valid, ctx.options);
+		expect(ctx.store.readHostedModuleWatches(current)).toEqual([module]);
+
+		const publication = {
+			commit: "a".repeat(40),
+			signature: "a".repeat(16),
+			generation: 7,
+			time: "2026-11-19T00:00:00Z",
+			modules: [{ module, edges: [] }],
+		};
+		expect(ctx.store.applyHostedModulePublication({ ...current, publication })).toBe(true);
+		expect(text(deliver(ctx.checkpoint, ctx.options))).toBe("");
+		expect(
+			ctx.store.applyHostedModulePublication({
+				...current,
+				publication: {
+					...publication,
+					commit: "b".repeat(40),
+					time: "2026-11-19T00:01:00Z",
+					modules: [{ module, edges: [["auth", "db"]] }],
+				},
+			}),
+		).toBe(true);
+		expect(text(deliver({ ...ctx.checkpoint, agent_id: SIBLING }, ctx.options))).not.toContain(
+			"Published default branch",
+		);
+		setNativeFeedPreviewEnabled("codex", false, { home: ctx.home });
+		expect(text(deliver(ctx.checkpoint, ctx.options))).toBe("");
+		setNativeFeedPreviewEnabled("codex", true, { home: ctx.home });
+		expect(text(deliver(ctx.checkpoint, ctx.options))).toContain(
+			"Published default branch g7: auth dependencies changed.",
+		);
+		expect(ctx.store.retireHostedModuleNotices(current)).toBe(true);
+		expect(text(deliver(ctx.checkpoint, ctx.options))).toBe("");
+	});
+
+	it("admits only an exact standalone hosted success in Claude's content-array response", async () => {
+		const ctx = await context("claude-code", "claude-code-2.1.328.json");
+		const authorizationIdentity = ctx.store.currentAuthorizationIdentity({ cohort: ctx.cohort });
+		if (!authorizationIdentity) throw new Error("Fixture feed access was unavailable");
+		const watches = () =>
+			ctx.store.readHostedModuleWatches({ cohort: ctx.cohort, authorizationIdentity });
+		const body = { type: "text", text: "# Module: auth\n\nHosted result." };
+		const receipt = {
+			type: "text",
+			text: '[pharaoh/hosted-module-watch-v1] {"version":1,"repo":"fixture/native-feed","module":"auth"}',
+		};
+		const hook = {
+			...ctx.checkpoint,
+			tool_name: "mcp__pharaoh__get_module_context",
+			tool_input: { repo: REPO, module: "auth" },
+			tool_response: [body, receipt],
+		};
+		deliver(ctx.start, ctx.options);
+		deliver(hook, ctx.options);
+		expect(watches()).toEqual([]);
+		setNativeFeedPreviewEnabled("claude-code", true, { home: ctx.home });
+
+		for (const tool_response of [
+			[receipt],
+			[{ ...body, text: `${body.text}\n${receipt.text}` }],
+			[body, { ...receipt, text: `${receipt.text}\n` }],
+			[body, { ...receipt, annotations: { audience: ["assistant"] } }],
+			[body, { type: "text", text: hostedModuleWatchText("other/repo", "auth") }],
+			[body, { type: "text", text: hostedModuleWatchText(REPO, "other") }],
+			[body, receipt, receipt],
+			[body, receipt, { ...receipt, text: "[pharaoh/hosted-module-watch-v0] {}" }],
+			[{ ...body, isError: true }, receipt],
+			{ content: [body, receipt] },
+		])
+			deliver({ ...hook, tool_response }, ctx.options);
+		deliver({ ...hook, tool_input: { repo: "native-feed", module: "auth" } }, ctx.options);
+		deliver({ ...hook, agent_id: undefined }, ctx.options);
+		expect(watches()).toEqual([]);
+
+		deliver(hook, ctx.options);
+		expect(watches()).toEqual(["auth"]);
 	});
 });

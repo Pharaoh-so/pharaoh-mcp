@@ -122,6 +122,8 @@ describe("native feed status", () => {
 		expect(before.cohorts[0]).toMatchObject({
 			repo: "fixture/repo",
 			compatibility: "eligible",
+			compatibilityReason: "compatible",
+			observedProfiles: [{ client: "codex", version: "0.166.0" }],
 			queuedEvents: 1,
 			recipients: 2,
 			claimedEvents: 1,
@@ -133,6 +135,7 @@ describe("native feed status", () => {
 		expect(JSON.stringify(before)).not.toContain("fixture-access");
 		expect(JSON.stringify(before)).not.toContain(checkout);
 		expect(before.semantics.emitted).toContain("not model consumption");
+		expect(before.semantics.observed).toContain("requires independent native evidence");
 		expect(
 			store.markEmitted({ cohort, rootId: ROOT, agentId: "reader", claimId: pending.claimId! }),
 		).toBe(true);
@@ -148,8 +151,32 @@ describe("native feed status", () => {
 		setNativeFeedEnabled("codex", false, { home });
 		expect(nativeFeedStatus(options()).cohorts[0]).toMatchObject({
 			compatibility: "unavailable",
+			compatibilityReason: "disabled",
+			observedProfiles: [],
 			queuedEvents: 1,
 		});
+	});
+
+	it("reports incompatible build metadata without repeating the reported string", () => {
+		expect(
+			store.recordFeedConnection({
+				id: randomUUID(),
+				cohort,
+				client: "codex",
+				signIn: generation,
+				checkout,
+				state: "initialized",
+				name: "codex-mcp-client",
+				clientVersion: "PRIVATE-BUILD-METADATA",
+			}),
+		).toBe(true);
+		const inspected = nativeFeedStatus(options());
+		expect(inspected.cohorts[0]).toMatchObject({
+			compatibility: "unavailable",
+			compatibilityReason: "incompatible",
+			observedProfiles: [],
+		});
+		expect(JSON.stringify(inspected)).not.toContain("PRIVATE-BUILD-METADATA");
 	});
 
 	it("does not expose records after proof expiry or a changed sign-in", async () => {

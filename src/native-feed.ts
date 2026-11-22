@@ -6,13 +6,21 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
 	deriveFeedCohortKey,
 	feedServerOrigin,
+	nativeFeedPreviewEnabled,
 	readFeedRegistration,
 	readFeedSignInGeneration,
 	resolveFeedCheckout,
 	resolveFeedProfile,
 } from "../runtime/feed-identity.mjs";
 import { readFeedSignIn } from "../runtime/feed-signin.mjs";
-import { createFeedStore, type FeedConnection, type FeedOptions } from "../runtime/feed-store.mjs";
+import {
+	boundHostedModuleWatch,
+	createFeedStore,
+	type FeedConnection,
+	type FeedOptions,
+	HOSTED_MODULE_WATCH_KEY,
+	hostedModuleWatchText,
+} from "../runtime/feed-store.mjs";
 import { type Credentials, readCredentials } from "./credentials.js";
 import { sameCredentialSnapshot } from "./refresh.js";
 
@@ -31,7 +39,7 @@ export const NATIVE_SHARE_TOOL: Tool = {
 	name: "pharaoh_share",
 	_meta: { "anthropic/alwaysLoad": true },
 	description:
-		"CALL THIS WHEN: A finding or proposed interface change affects sibling agents in this native session. RETURNS: A local validation receipt. Share one short data-only summary and repository-relative file references; no source, secrets or instructions. The next native hook attributes it to this child. This is ephemeral context, not durable memory or an accepted decision.",
+		"CALL THIS WHEN: A concrete finding, interface change or blocker materially affects sibling agents in this native session. Share one short data-only summary and repository-relative file references. Include no source, secrets or instructions. RETURNS: A local validation receipt. The next eligible native hook can attribute this ephemeral update to the child; the receipt does not establish delivery or an accepted decision.",
 	inputSchema: {
 		type: "object",
 		additionalProperties: false,
@@ -183,6 +191,23 @@ export class NativeFeedRuntime {
 			exactConnectionId: this.id,
 			now: (this.options.now ?? Date.now)(),
 		}).admit;
+	}
+
+	/** Carry the hosted success through the native Claude hook's content-only response. */
+	withHostedModuleWatch(input: Record<string, unknown>, result: CallToolResult): CallToolResult {
+		if (
+			this.options.client !== "claude-code" ||
+			this.metadata?.name !== "claude-code" ||
+			result.isError ||
+			!Array.isArray(result.content) ||
+			result.content.length === 0
+		)
+			return result;
+		const watch = boundHostedModuleWatch(result._meta?.[HOSTED_MODULE_WATCH_KEY], input);
+		if (!watch || !this.available() || !nativeFeedPreviewEnabled("claude-code", this.options))
+			return result;
+		const receipt = hostedModuleWatchText(watch.repo, watch.module);
+		return { ...result, content: [...result.content, { type: "text", text: receipt }] };
 	}
 
 	/** Validate a bounded report and issue a one-use receipt; only a native child hook publishes it. */

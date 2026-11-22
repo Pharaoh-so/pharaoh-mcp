@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { shellWord } from "./local.mjs";
 import { memoryInstallScope, memoryScopeKey } from "./install-scope.mjs";
+import { shellWord } from "./local.mjs";
 
 const EVENTS = {
 	"claude-code": ["UserPromptSubmit", "Stop", "StopFailure", "SessionEnd"],
@@ -96,6 +96,8 @@ export function updateUserHooks(
 	diagnostics = false,
 	capture = true,
 	scope = memoryInstallScope(),
+	review = false,
+	preserve,
 ) {
 	const additions = {};
 	const add = (event, entry) => {
@@ -112,22 +114,26 @@ export function updateUserHooks(
 		if (diagnostics) {
 			const diagnostic = command("--diagnostics");
 			for (const event of EVENTS[client])
-				if (event !== "UserPromptSubmit") additions[event] = group(diagnostic);
+				if (event !== "UserPromptSubmit" && (!preserve || preserve.diagnostics.includes(event)))
+					additions[event] = group(diagnostic);
 			const edit = client === "codex" ? "apply_patch" : "Edit|Write|MultiEdit";
-			additions.PostToolUse = group(
-				diagnostic,
-				`^(?:${edit}|Bash|exec_command|functions\\.exec_command|mcp__.*__pharaoh_memory_(?:recall|expand|capture|feedback))$`,
-			);
+			if (!preserve || preserve.diagnostics.includes("PostToolUse"))
+				additions.PostToolUse = group(
+					diagnostic,
+					`^(?:${edit}|Bash|exec_command|functions\\.exec_command|mcp__.*__pharaoh_memory_(?:recall|expand|capture|feedback))$`,
+				);
 		}
 		// The memory cue (records that cite an edited file) is part of project memory, so
 		// its edit hook comes with the reminder. The structural cues (a Pharaoh query for a
 		// code grep, a note after the map) stay a separate choice: graphCues.
 		const graph = command("--graph");
 		const edit = client === "codex" ? "apply_patch" : "Edit|Write|MultiEdit";
-		if (graphCues) additions.PreToolUse = group(graph, "^Bash$");
+		if (graphCues && preserve?.graphPre !== false) additions.PreToolUse = group(graph, "^Bash$");
 		const graphGroup = group(
 			graph,
-			graphCues ? `^(?:${edit}|mcp__pharaoh__get_codebase_map)$` : `^(?:${edit})$`,
+			graphCues && preserve?.graphMap !== false
+				? `^(?:${edit}|mcp__pharaoh__get_codebase_map)$`
+				: `^(?:${edit})$`,
 		);
 		add("PostToolUse", graphGroup);
 		if (capture) {
@@ -136,8 +142,16 @@ export function updateUserHooks(
 			const shell = client === "codex" ? "Bash|exec_command|functions\\.exec_command" : "Bash";
 			add("PostToolUse", group(recorder, `^(?:${edit}|${shell})$`));
 			if (client === "claude-code") add("PostToolUseFailure", group(recorder, "^Bash$"));
-			add("Stop", group(recorder));
 		}
+		if (review && client === "claude-code")
+			add(
+				"PostToolUse",
+				group(
+					command("--review"),
+					"^mcp__.*__(?:get_codebase_map|get_module_context|search_functions|get_blast_radius|get_unused_code|pharaoh_recon)$",
+				),
+			);
+		if (capture || (review && client === "claude-code")) add("Stop", group(command("--capture")));
 	}
 	const toolEvents = TOOL_EVENTS.filter(
 		(event) =>
@@ -182,6 +196,13 @@ export function hasMemoryCueHook(config, scope) {
 /** Whether Pharaoh's automatic capture (a Stop `--capture` entry) is installed. */
 export function hasCaptureHook(config, scope) {
 	return hasUserHookMode(config, ["Stop"], "--capture", scope);
+}
+
+/** Whether review's graph observer and shared completion hook are both installed. */
+export function hasChangeReviewHooks(config, scope) {
+	return (
+		hasUserHookMode(config, ["PostToolUse"], "--review", scope) && hasCaptureHook(config, scope)
+	);
 }
 
 /** Whether a Pharaoh user hook in one mode (`--graph`, `--capture`, `--diagnostics`) runs on `events`. */

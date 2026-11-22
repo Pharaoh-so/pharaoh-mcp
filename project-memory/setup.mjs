@@ -16,6 +16,7 @@ import {
 } from "./diagnostics-collector.mjs";
 import {
 	hasCaptureHook,
+	hasChangeReviewHooks,
 	hasLegacyHooks,
 	hasMemoryCueHook,
 	hasStructuralCueHooks,
@@ -24,22 +25,24 @@ import {
 	updateHooks,
 	updateUserHooks,
 } from "./hook-config.mjs";
-import { atomicWrite, checkout, git, hasMemoryGit } from "./local.mjs";
-import { requestMemory, requestMemoryPolicy } from "./memory-api.mjs";
-import {
-	MEMORY_HOOK_CLIENTS,
-	memoryHookStateForClient,
-	nativeMemoryClient,
-	readHookPreferences,
-	writeHookPreferences,
-} from "./preferences.mjs";
-import { legacySettingsPath, matchingMemoryHint, projectMemoryHint } from "./user-target.mjs";
 import {
 	ensureLocalPrivatePaths,
 	memoryActivePath,
 	memoryInstallScope,
 	memorySettingsPath,
 } from "./install-scope.mjs";
+import { atomicWrite, checkout, git, hasMemoryGit } from "./local.mjs";
+import { requestMemory, requestMemoryPolicy } from "./memory-api.mjs";
+import {
+	changeReviewEnabled,
+	MEMORY_HOOK_CLIENTS,
+	memoryHookStateForClient,
+	nativeMemoryClient,
+	readHookPreferences,
+	setChangeReview,
+	writeHookPreferences,
+} from "./preferences.mjs";
+import { legacySettingsPath, matchingMemoryHint, projectMemoryHint } from "./user-target.mjs";
 
 function userSettings(client, home, env, scope) {
 	return memorySettingsPath(client, home, env, scope);
@@ -118,6 +121,8 @@ function syncUserHooks(
 	diagnostics,
 	capture,
 	scope,
+	review,
+	preserveHandlers,
 ) {
 	let known = Boolean(alreadyActive);
 	try {
@@ -129,6 +134,25 @@ function syncUserHooks(
 				legacy &&
 				[settings.path, settings.resolved].includes(legacy) &&
 				hasLegacyHooks(settings.config, client, target.root);
+			const preserve = preserveHandlers
+				? {
+						diagnostics: ["PostToolUse", "Stop", "StopFailure", "Interrupt", "SessionEnd"].filter(
+							(event) => hasUserHookMode(settings.config, [event], "--diagnostics", scope),
+						),
+						graphPre: hasUserHookMode(settings.config, ["PreToolUse"], "--graph", scope),
+						graphMap: (settings.config.hooks?.PostToolUse ?? []).some(
+							(entry) =>
+								typeof entry.matcher === "string" &&
+								entry.matcher.includes("mcp__pharaoh__get_codebase_map") &&
+								hasUserHookMode(
+									{ hooks: { PostToolUse: [entry] } },
+									["PostToolUse"],
+									"--graph",
+									scope,
+								),
+						),
+					}
+				: undefined;
 			writeSettings(
 				settings,
 				updateUserHooks(
@@ -140,6 +164,8 @@ function syncUserHooks(
 					diagnostics,
 					capture,
 					scope,
+					review,
+					preserve,
 				),
 				target ?? (scope?.kind === "local" ? { root: scope.root } : undefined),
 				checkoutHook,
@@ -397,6 +423,7 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 		if (
 			hasMemoryCueHook(config, scope) &&
 			(choice.capture === false || hasCaptureHook(config, scope)) &&
+			(!reviewEligible(client, choice, home, scope) || hasChangeReviewHooks(config, scope)) &&
 			current === digest &&
 			existsSync(bundledHook(join(memoryClientRoot(home), digest)))
 		)
@@ -468,6 +495,7 @@ export function syncMemoryHooks({
 	node = process.execPath,
 	packageRoot,
 	scope = memoryInstallScope(),
+	preserveHandlers = false,
 } = {}) {
 	if (typeof process.getuid !== "function")
 		return enable ? ["Pharaoh: project memory reminders need a POSIX client."] : [];
@@ -526,6 +554,8 @@ export function syncMemoryHooks({
 						(diagnosticClients === undefined || diagnosticClients.includes(client)),
 					preferences[client]?.capture !== false,
 					scope,
+					reviewEligible(client, preferences[client], home, scope),
+					preserveHandlers,
 				);
 			} catch (error) {
 				if (replacing) writeActivation(activePath, active);
@@ -555,4 +585,84 @@ export function syncMemoryHooks({
 			migrateCheckout(client, target, notices);
 	}
 	return notices;
+}
+
+/**
+ * Change review is an explicit local workflow, independent of capture and analytics.
+ * It reuses an existing active Claude installation and never enables memory on its behalf.
+ */
+export function configureChangeReview(
+	enabled,
+	{
+		credentials,
+		home = homedir(),
+		env = process.env,
+		cwd = process.cwd(),
+		scope = memoryInstallScope(),
+		packageRoot,
+	} = {},
+) {
+	const options = {
+		credentials,
+		home,
+		env,
+		cwd,
+		scope,
+		packageRoot,
+		clients: ["claude-code"],
+		enable: true,
+		preserveHandlers: true,
+	};
+	if (!enabled) {
+		setChangeReview(false, home, scope);
+		if (memoryHookStateForClient({ name: "claude-code" }, { home, env, scope }) === "installed") {
+			const choice = readHookPreferences(home)["claude-code"];
+			return syncMemoryHooks({
+				...options,
+				graphClients: choice?.graph === true ? ["claude-code"] : [],
+			});
+		}
+		return [];
+	}
+	const previous = changeReviewEnabled(home, scope);
+	const choice = readHookPreferences(home)["claude-code"];
+	const target = checkout(scope?.kind === "local" ? scope.root : cwd);
+	if (
+		choice?.memory === false ||
+		choice?.graph === false ||
+		!credentials?.access_token ||
+		!(Date.parse(credentials.expires_at) > Date.now()) ||
+		!target ||
+		!matchingMemoryHint(target, projectMemoryHint(credentials)) ||
+		memoryHookStateForClient({ name: "claude-code" }, { home, env, scope }) !== "installed"
+	)
+		throw new Error(
+			"Run this in a mapped checkout with active, signed-in Claude Code memory hooks and structural hints enabled.",
+		);
+	setChangeReview(true, home, scope);
+	try {
+		const notices = syncMemoryHooks({
+			...options,
+			graphClients: choice?.graph === true ? ["claude-code"] : [],
+		});
+		const config = inspectSettings(userSettings("claude-code", home, env, scope)).config;
+		if (notices.length || !hasChangeReviewHooks(config, scope))
+			throw new Error(
+				"Could not install the change review hooks. Existing choices were preserved.",
+			);
+		return notices;
+	} catch (error) {
+		setChangeReview(previous, home, scope);
+		throw error;
+	}
+}
+
+/** Use the same opt-in and decline rules for startup repair and actual hook registration. */
+function reviewEligible(client, choice, home, scope) {
+	return (
+		client === "claude-code" &&
+		choice?.memory !== false &&
+		choice?.graph !== false &&
+		changeReviewEnabled(home, scope)
+	);
 }

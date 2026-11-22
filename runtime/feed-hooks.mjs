@@ -51,6 +51,18 @@ export function setNativeFeedEnabled(client, enabled, options = {}) {
 	writeRuntimeJSON(root, `choice-${client}.json`, { version: 1, enabled }, 1024);
 }
 
+/** Persist the preview choice without changing native hook trust or the base feed choice. */
+export function setNativeFeedPreviewEnabled(client, enabled, options = {}) {
+	if (!CLIENTS.includes(client) || typeof enabled !== "boolean" || process.platform === "win32")
+		throw new Error("Native context preview is unavailable for this client.");
+	writeRuntimeJSON(
+		ensureSettingsRoot(options),
+		`preview-${client}.json`,
+		{ version: 1, enabled },
+		256,
+	);
+}
+
 /** Resolve the native settings file shared by this adapter's managed feed hooks. */
 export function nativeFeedSettingsPath(client, options = {}) {
 	return runtimeSettingsPath(client, options);
@@ -151,6 +163,48 @@ function matchingFeedHooks(hooks, desired) {
 		}
 	}
 	return seen.size === Object.keys(desired).length;
+}
+
+/** Read-only proof that the managed registration still has all enabled feed handlers. */
+export function nativeFeedHooksReady(client, hookPath, options = {}) {
+	try {
+		if (process.platform === "win32" || !nativeFeedEnabled(client, options)) return false;
+		const registration = readRuntimeJSON(
+			join(settingsRoot(options), `registration-${client}.json`),
+			1024,
+		);
+		if (
+			registration?.version !== 1 ||
+			registration.client !== client ||
+			registration.registration !== options.registration
+		)
+			return false;
+		const path = options.settingsPath ?? runtimeSettingsPath(client, options);
+		const directory = lstatSync(dirname(path));
+		const stat = lstatSync(path);
+		if (
+			!directory.isDirectory() ||
+			directory.uid !== process.getuid() ||
+			!stat.isFile() ||
+			stat.uid !== process.getuid() ||
+			stat.size > 262_144
+		)
+			return false;
+		const config = JSON.parse(readFileSync(path, "utf8"));
+		const desired = desiredFeedHooks(client, hookPath, options);
+		if (!config || config.disableAllHooks === true || !matchingFeedHooks(config.hooks, desired))
+			return false;
+		return Object.entries(desired).every(([name]) =>
+			config.hooks[name].some(
+				(group) =>
+					group.enabled !== false &&
+					group.disabled !== true &&
+					group.hooks.some((handler) => ownsFeedHandler(handler)),
+			),
+		);
+	} catch {
+		return false;
+	}
 }
 
 /** Install/remove only Pharaoh's feed handlers; native trust and unrelated hooks are preserved. */

@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { installMemoryBundle, packagedMemoryBundle } from "../project-memory/bundle.mjs";
 import {
 	memoryActivePath,
 	memoryClientRoot,
@@ -49,15 +50,18 @@ import {
 } from "../project-memory/local.mjs";
 import { PilotError, requestMemory } from "../project-memory/memory-api.mjs";
 import {
+	changeReviewEnabled,
 	memoryDiagnosticsForClient,
 	memoryHookStateForClient,
 	readHookPreferences,
 	resetHookPreferences,
+	setChangeReview,
 	writeHookPreferences,
 } from "../project-memory/preferences.mjs";
 import {
 	applyMemoryHookChoices,
 	chooseMemoryHooks,
+	configureChangeReview,
 	ensureMemoryHooks,
 	syncMemoryHooks,
 } from "../project-memory/setup.mjs";
@@ -105,6 +109,11 @@ beforeEach(() => {
 	cpSync(new URL("../project-memory/", import.meta.url), join(pkg, "project-memory"), {
 		recursive: true,
 	});
+	mkdirSync(join(pkg, "runtime"));
+	cpSync(
+		new URL("../runtime/feed-signin.mjs", import.meta.url),
+		join(pkg, "runtime/feed-signin.mjs"),
+	);
 	mkdirSync(join(pkg, "hooks"));
 	cpSync(new URL("../hooks/route-grep.mjs", import.meta.url), join(pkg, "hooks/route-grep.mjs"));
 	writeFileSync(join(pkg, "dist/refresh.js"), "export function originBoundRefresh() {}\n");
@@ -141,14 +150,22 @@ afterEach(() => {
 
 function configure(options: Partial<Parameters<typeof syncMemoryHooks>[0]> = {}) {
 	return syncMemoryHooks({
-		home,
-		cwd: checkout,
-		env: {},
-		packageRoot,
-		credentials,
+		...installOptions(),
 		clients: ["claude-code", "codex"],
 		...options,
 	});
+}
+
+function installOptions() {
+	return { home, cwd: checkout, env: {}, packageRoot, credentials };
+}
+
+function readJson(path: string | URL) {
+	return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function writeJson(path: string | URL, value: unknown) {
+	writeFileSync(path, JSON.stringify(value));
 }
 
 /** Pharaoh's last answer about giving this sign-in's memories back, fresh, so the hook starts no fetch. */
@@ -167,7 +184,7 @@ async function retrieval(binding: string, locked = false) {
 const SESSION = "5a0f3d1e-6c2b-4e8a-9f71-0b3c2d4e5f60";
 
 function hookCommand(settings: string, event: string): string {
-	const hooks = JSON.parse(readFileSync(settings, "utf8")).hooks[event];
+	const hooks = readJson(settings).hooks[event];
 	return hooks.find((group: { hooks: Array<{ command?: string }> }) =>
 		group.hooks[0]?.command?.endsWith("# pharaoh-project-memory:user-v1"),
 	).hooks[0].command;
@@ -184,13 +201,7 @@ it("keeps Local memory active through repair without writing user-level hooks or
 	expect(memoryHookStateForClient({ name: "claude-code" }, { home, env: {}, scope })).toBe(
 		"installed",
 	);
-	ensureMemoryHooks({ name: "claude-code" }, credentials, {
-		home,
-		env: {},
-		scope,
-		cwd: checkout,
-		packageRoot,
-	});
+	ensureMemoryHooks({ name: "claude-code" }, credentials, { ...installOptions(), scope });
 	expect(existsSync(join(home, ".claude/settings.json"))).toBe(false);
 	expect(readFileSync(settings, "utf8")).toContain("pharaoh-project-memory:local-v1:");
 });
@@ -216,23 +227,16 @@ it("Local cleanup preserves another checkout's activation and user-level hooks",
 
 it("scoped memory setup and cleanup preserve another installation's diagnostics", async () => {
 	const fixture = diagnosticFixture();
-	const event = collectDiagnosticEvent(
-		{ ...fixture.input, hook_event_name: "UserPromptSubmit", prompt: "Check the saved decision" },
-		fixture.options,
-	);
+	const event = fixture.collect({
+		hook_event_name: "UserPromptSubmit",
+		prompt: "Check the saved decision",
+	});
 	const queued = join(fixture.directory, `event-${event?.eventId}.json`);
 	const before = readFileSync(queued, "utf8");
 	const saved = readHookPreferences(home).codex;
 	const scope = { kind: "local" as const, root: checkout };
 	const decision = await choose({ scope, requested: true, ask: async () => false });
-	applyMemoryHookChoices(decision, {
-		home,
-		env: {},
-		cwd: checkout,
-		scope,
-		credentials,
-		packageRoot,
-	});
+	applyMemoryHookChoices(decision, { ...installOptions(), scope });
 	expect(readHookPreferences(home).codex).toEqual({ ...saved, graph: false });
 	expect(readFileSync(queued, "utf8")).toBe(before);
 	const local = join(checkout, ".codex/hooks.json");
@@ -243,11 +247,11 @@ it("scoped memory setup and cleanup preserve another installation's diagnostics"
 	// A Global repair or cleanup must likewise preserve a live Local target.
 	configure({ scope, clients: ["codex"], enable: true });
 	const global = join(home, ".codex/hooks.json");
-	const config = JSON.parse(readFileSync(global, "utf8"));
+	const config = readJson(global);
 	delete config.hooks.Stop;
-	writeFileSync(global, JSON.stringify(config));
+	writeJson(global, config);
 	appendFileSync(new URL("project-memory/local.mjs", packageRoot), "\n// force repair\n");
-	ensureMemoryHooks({ name: "codex" }, credentials, { home, env: {}, cwd: checkout, packageRoot });
+	ensureMemoryHooks({ name: "codex" }, credentials, { ...installOptions() });
 	expect(readHookPreferences(home).codex?.diagnostics).toBe(true);
 	expect(readFileSync(global, "utf8")).not.toContain("--diagnostics");
 	configure({ clients: ["codex"] });
@@ -258,7 +262,7 @@ it("scoped memory setup and cleanup preserve another installation's diagnostics"
 it("a Local memory hook ignores a native event from a different checkout", () => {
 	const scope = { kind: "local" as const, root: checkout };
 	configure({ scope, enable: true });
-	const config = JSON.parse(readFileSync(join(checkout, ".claude/settings.local.json"), "utf8"));
+	const config = readJson(join(checkout, ".claude/settings.local.json"));
 	const command = config.hooks.UserPromptSubmit[0].hooks[0].command;
 	const child = spawnSync(command, {
 		shell: true,
@@ -317,9 +321,9 @@ it.each([
 	if (state === "declined") writeHookPreferences({ codex: { memory: false } }, home);
 	if (state === "installed") {
 		configure({ clients: ["codex"], enable: true });
-		const config = JSON.parse(readFileSync(settings, "utf8"));
+		const config = readJson(settings);
 		delete config.hooks.Stop;
-		writeFileSync(settings, JSON.stringify(config));
+		writeJson(settings, config);
 	}
 	const before = existsSync(settings) ? readFileSync(settings, "utf8") : null;
 	const backend: Backend = {
@@ -386,19 +390,17 @@ it("recognizes configured active reminders without asserting native trust, execu
 	const configured = readFileSync(settings, "utf8");
 	expect(memoryHookStateForClient(info, options)).toBe("installed");
 	expect(memoryDiagnosticsForClient(info, home)).toBeUndefined();
-	const active = JSON.parse(
-		readFileSync(join(home, ".pharaoh/project-memory-client/active.json"), "utf8"),
-	);
+	const active = readJson(join(home, ".pharaoh/project-memory-client/active.json"));
 	const runtime = join(home, ".pharaoh/project-memory-client", active.codex);
 	const installed = await import(pathToFileURL(join(runtime, "preferences.mjs")).href);
 	expect(installed.memoryHookStateForClient(info, options)).toBe("installed");
 	expect(readFileSync(settings, "utf8")).toBe(configured);
 	const claudeSettings = join(home, ".claude/settings.json");
 	const disabled = {
-		...JSON.parse(readFileSync(claudeSettings, "utf8")),
+		...readJson(claudeSettings),
 		disableAllHooks: true,
 	};
-	writeFileSync(claudeSettings, JSON.stringify(disabled));
+	writeJson(claudeSettings, disabled);
 	expect(memoryHookStateForClient({ name: "claude-code" }, options)).toBe("absent");
 	const stale = configured.replace(active.codex, "f".repeat(64));
 	writeFileSync(settings, stale);
@@ -411,9 +413,7 @@ it("recognizes configured active reminders without asserting native trust, execu
 it("preserves daily feedback invitation metadata and exact record versions in the installed client", async () => {
 	configure({ enable: true, clients: ["codex"] });
 	vi.stubEnv("HOME", home);
-	const active = JSON.parse(
-		readFileSync(join(home, ".pharaoh/project-memory-client/active.json"), "utf8"),
-	);
+	const active = readJson(join(home, ".pharaoh/project-memory-client/active.json"));
 	const runtime = join(home, ".pharaoh/project-memory-client", active.codex);
 	const installed = await import(pathToFileURL(join(runtime, "memory-api.mjs")).href);
 	const recallId = randomUUID();
@@ -518,24 +518,28 @@ it("reports actual native identity and configured adoption without granting diag
 	}
 });
 
-function prompt(
-	settings: string,
-	cwd: string,
-	env: NodeJS.ProcessEnv = {},
-	event = "UserPromptSubmit",
-) {
-	return execFileSync("/bin/sh", ["-c", hookCommand(settings, "UserPromptSubmit")], {
+function runHook(settings: string, event: string, input: object, cwd = checkout, env = {}) {
+	return execFileSync("/bin/sh", ["-c", hookCommand(settings, event)], {
 		cwd,
 		env: { ...process.env, HOME: home, ...env },
 		encoding: "utf8",
-		input: JSON.stringify({
+		input: JSON.stringify({ hook_event_name: event, cwd, ...input }),
+	});
+}
+
+function prompt(settings: string, cwd: string, env = {}, event = "UserPromptSubmit") {
+	return runHook(
+		settings,
+		"UserPromptSubmit",
+		{
 			hook_event_name: event,
-			cwd,
 			prompt: "Investigate a real project issue",
 			session_id: "fixture-session",
 			turn_id: "fixture-turn",
-		}),
-	});
+		},
+		cwd,
+		env,
+	);
 }
 
 it("runs the worktree cue from the installed, activated bundle", async () => {
@@ -547,18 +551,17 @@ it("runs the worktree cue from the installed, activated bundle", async () => {
 	configure({ enable: true, clients: ["codex"], graphClients: ["codex"] });
 	const settings = join(home, ".codex/hooks.json");
 	const run = (command: string, env: NodeJS.ProcessEnv = {}) =>
-		execFileSync("/bin/sh", ["-c", hookCommand(settings, "PreToolUse")], {
-			cwd: checkout,
-			env: { ...process.env, HOME: home, ...env },
-			encoding: "utf8",
-			input: JSON.stringify({
-				hook_event_name: "PreToolUse",
-				cwd: checkout,
+		runHook(
+			settings,
+			"PreToolUse",
+			{
 				session_id: "graph-session",
 				tool_name: "Bash",
 				tool_input: { command },
-			}),
-		});
+			},
+			checkout,
+			env,
+		);
 	const trace = join(home, "git-started");
 	const probe = join(home, "probe.cjs");
 	writeFileSync(
@@ -612,20 +615,11 @@ it("runs the worktree cue from the installed, activated bundle", async () => {
 	});
 	for (const [index, choice] of [{ memory: true, graph: false }, { memory: true }].entries()) {
 		writeHookPreferences({ codex: choice }, home);
-		const edited = execFileSync("/bin/sh", ["-c", hookCommand(settings, "PostToolUse")], {
-			cwd: checkout,
-			env: { ...process.env, HOME: home },
-			encoding: "utf8",
-			input: JSON.stringify({
-				hook_event_name: "PostToolUse",
-				cwd: checkout,
-				session_id: `memory-${index}`,
-				tool_name: "apply_patch",
-				tool_input: {
-					command: "*** Begin Patch\n*** Update File: src/recovery.ts\n*** End Patch\n",
-				},
-				tool_response: "Success. Updated the following files:\nM src/recovery.ts",
-			}),
+		const edited = runHook(settings, "PostToolUse", {
+			session_id: `memory-${index}`,
+			tool_name: "apply_patch",
+			tool_input: { command: "*** Begin Patch\n*** Update File: src/recovery.ts\n*** End Patch\n" },
+			tool_response: "Success. Updated the following files:\nM src/recovery.ts",
 		});
 		expect(edited).toContain("Sessions restore only with membership proof.");
 	}
@@ -770,7 +764,7 @@ it("shows kept memory about an edited file once, with its reason, and nothing ot
 	expect(fetcher.mock.calls[0][1].body).toBe(JSON.stringify({ repo }));
 	const list = join(stateDirectory, kept()[0]);
 	expect(lstatSync(list).mode & 0o777).toBe(0o600);
-	expect(JSON.parse(readFileSync(list, "utf8")).records).toHaveLength(1);
+	expect(readJson(list).records).toHaveLength(1);
 	expect(edit("README.md")).toBeUndefined();
 	// Another sign-in never reads this one's list: it is replaced and refetched.
 	expect(edit("src/recovery.ts", { binding: "another sign-in" })).toBeUndefined();
@@ -825,21 +819,18 @@ function legacySettings() {
 	mkdirSync(join(checkout, ".codex"));
 	writeFileSync(join(checkout, ".git/info/exclude"), "/.codex/hooks.json\n");
 	const marker = createHash("sha256").update(`codex\0${checkout}`).digest("hex");
-	writeFileSync(
-		path,
-		JSON.stringify({
-			hooks: {
-				UserPromptSubmit: [
-					{
-						hooks: [
-							commandHook(`/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:${marker}`),
-							commandHook("keep-checkout-hook"),
-						],
-					},
-				],
-			},
-		}),
-	);
+	writeJson(path, {
+		hooks: {
+			UserPromptSubmit: [
+				{
+					hooks: [
+						commandHook(`/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:${marker}`),
+						commandHook("keep-checkout-hook"),
+					],
+				},
+			],
+		},
+	});
 	return path;
 }
 
@@ -867,7 +858,7 @@ it("enables memory by default and offers independent default-no worktree cues", 
 	expect(defaults).toEqual([false]);
 	expect(decision).toMatchObject({ accepted: ["codex"], declined: [], graphClients: [] });
 	applyChoice(decision);
-	const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
+	const { hooks } = readJson(join(home, ".codex/hooks.json"));
 	expect(hooks.UserPromptSubmit).toHaveLength(1);
 	expect(await choose()).toEqual(decision);
 	// Before the first background check (no hint, never checked) install still sets
@@ -877,26 +868,16 @@ it("enables memory by default and offers independent default-no worktree cues", 
 	rmSync(join(home, ".codex/hooks.json"));
 	// Memory is hands-off: a successful install prints nothing (only failures speak).
 	expect(applyChoice(await choose({ credentials: unchecked }), unchecked)).toEqual([]);
-	expect(
-		JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8")).hooks.UserPromptSubmit,
-	).toHaveLength(1);
+	expect(readJson(join(home, ".codex/hooks.json")).hooks.UserPromptSubmit).toHaveLength(1);
 	// An incomplete sign-in check doesn't hold setup back either.
 	rmSync(join(home, ".codex/hooks.json"));
 	const partial = { ...unchecked, project_memory_status: "unavailable" as const };
 	applyChoice(await choose({ credentials: partial }), partial);
-	expect(
-		JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8")).hooks.UserPromptSubmit,
-	).toHaveLength(1);
+	expect(readJson(join(home, ".codex/hooks.json")).hooks.UserPromptSubmit).toHaveLength(1);
 });
 
 function applyChoice(decision: Awaited<ReturnType<typeof choose>>, creds = credentials) {
-	return applyMemoryHookChoices(decision, {
-		home,
-		cwd: checkout,
-		env: {},
-		credentials: creds,
-		packageRoot,
-	});
+	return applyMemoryHookChoices(decision, { ...installOptions(), credentials: creds });
 }
 
 it("honors an opt-out saved after setup answers and re-offers cues only when requested", async () => {
@@ -907,13 +888,13 @@ it("honors an opt-out saved after setup answers and re-offers cues only when req
 	expect((await choose()).declined).toEqual(["codex"]);
 	applyChoice(await choose({ requested: true, ask: async () => true }));
 	const path = join(home, ".codex/hooks.json");
-	const config = JSON.parse(readFileSync(path, "utf8"));
+	const config = readJson(path);
 	expect(config.hooks.PreToolUse).toHaveLength(1);
 	const unrelated = [{ hooks: [commandHook("keep-unrelated-cue")] }];
 	config.hooks.PostToolUse = unrelated;
-	writeFileSync(path, JSON.stringify(config));
+	writeJson(path, config);
 	applyChoice(await choose({ ask: async () => null }));
-	const hooks = JSON.parse(readFileSync(path, "utf8")).hooks;
+	const hooks = readJson(path).hooks;
 	// Removing either structural hook turns those cues off until asked again; the memory
 	// cue is part of memory and comes back beside the user's own hook.
 	expect(hooks.PreToolUse).toBeUndefined();
@@ -938,7 +919,7 @@ it("preserves setup after a temporary eligibility failure and deactivates both c
 	applyChoice(await choose({ clients: ["claude-code"], credentials: noGrant }), noGrant);
 	expect(existsSync(activation)).toBe(false);
 	for (const path of [".codex/hooks.json", ".claude/settings.json"])
-		expect(JSON.parse(readFileSync(join(home, path), "utf8")).hooks).toEqual({});
+		expect(readJson(join(home, path)).hooks).toEqual({});
 	expect(readHookPreferences(home)).toEqual(before);
 });
 
@@ -957,7 +938,7 @@ it("restores missing memory hooks during setup and respects native disable", asy
 	const path = join(home, ".codex/hooks.json");
 	writeFileSync(path, '{"hooks":{"Notification":[]}}');
 	applyChoice(await choose());
-	expect(JSON.parse(readFileSync(path, "utf8")).hooks.UserPromptSubmit).toHaveLength(1);
+	expect(readJson(path).hooks.UserPromptSubmit).toHaveLength(1);
 	writeFileSync(join(home, ".claude/settings.json"), '{"disableAllHooks":true}');
 	expect((await choose({ clients: ["claude-code"], requested: true })).accepted).toEqual([]);
 });
@@ -965,7 +946,7 @@ it("restores missing memory hooks during setup and respects native disable", asy
 /** Breaks when: proxy start installs without a hint, over a decline, an edit or disableAllHooks, silently, or twice. */
 it("turns memory reminders on at proxy start once, visibly, and never over a decline, an edit or disableAllHooks", () => {
 	const ensure = (name: string, creds: Credentials = credentials) =>
-		ensureMemoryHooks({ name }, creds, { home, env: {}, cwd: checkout, packageRoot });
+		ensureMemoryHooks({ name }, creds, { ...installOptions() });
 	const claude = join(home, ".claude/settings.json");
 	const codex = join(home, ".codex/hooks.json");
 	const lost = {
@@ -988,9 +969,9 @@ it("turns memory reminders on at proxy start once, visibly, and never over a dec
 	]);
 	// An install from before the memory cue came with memory gains it once, without the
 	// structural cues; Codex is told to trust the new hook.
-	const reminderOnly = JSON.parse(readFileSync(codex, "utf8"));
+	const reminderOnly = readJson(codex);
 	delete reminderOnly.hooks.PostToolUse;
-	writeFileSync(codex, JSON.stringify(reminderOnly));
+	writeJson(codex, reminderOnly);
 	chmodSync(join(home, ".codex"), 0o500);
 	try {
 		expect(ensure("codex")).toEqual([]);
@@ -998,7 +979,7 @@ it("turns memory reminders on at proxy start once, visibly, and never over a dec
 		chmodSync(join(home, ".codex"), 0o700);
 	}
 	expect(ensure("codex")).toEqual([expect.stringContaining("/hooks or Settings > Hooks")]);
-	const upgraded = JSON.parse(readFileSync(codex, "utf8")).hooks;
+	const upgraded = readJson(codex).hooks;
 	// The edit cue and the capture recorder; no structural cues.
 	expect([upgraded.PostToolUse?.length, upgraded.PreToolUse]).toEqual([2, undefined]);
 	expect(ensure("codex")).toEqual([]);
@@ -1019,18 +1000,10 @@ it("turns memory reminders on at proxy start once, visibly, and never over a dec
 /** Breaks when: a saved diagnostics choice restores Stop handlers the user removed, on first install or an upgrade. */
 it("never puts back diagnostic handlers at proxy start, on first install or a bundle upgrade", () => {
 	const ensure = () =>
-		ensureMemoryHooks({ name: "claude-code" }, credentials, {
-			home,
-			env: {},
-			cwd: checkout,
-			packageRoot,
-		});
+		ensureMemoryHooks({ name: "claude-code" }, credentials, { ...installOptions() });
 	const claude = join(home, ".claude/settings.json");
 	// The capture hook also runs on Stop; this test is about the diagnostics handler.
-	const stop = () =>
-		JSON.stringify(JSON.parse(readFileSync(claude, "utf8")).hooks?.Stop ?? []).includes(
-			"--diagnostics",
-		);
+	const stop = () => JSON.stringify(readJson(claude).hooks?.Stop ?? []).includes("--diagnostics");
 	writeHookPreferences({ "claude-code": { memory: true, diagnostics: true } }, home);
 	expect(ensure()).toHaveLength(1);
 	expect(stop()).toBe(false);
@@ -1039,9 +1012,9 @@ it("never puts back diagnostic handlers at proxy start, on first install or a bu
 	writeHookPreferences({ "claude-code": { memory: true, diagnostics: true } }, home);
 	configure({ enable: true, clients: ["claude-code"] });
 	expect(stop()).toBe(true);
-	const settings = JSON.parse(readFileSync(claude, "utf8"));
+	const settings = readJson(claude);
 	delete settings.hooks.Stop;
-	writeFileSync(claude, JSON.stringify(settings));
+	writeJson(claude, settings);
 	const active = join(home, ".pharaoh/project-memory-client/active.json");
 	const before = readFileSync(active, "utf8");
 	appendFileSync(new URL("project-memory/local.mjs", packageRoot), "\n// next release\n");
@@ -1059,20 +1032,17 @@ it("removes owned pilot hooks during default setup without changing unrelated se
 	const old = commandHook("/old/pharaoh-memory-hook.mjs # pharaoh-project-memory:user-v1");
 	const keep = commandHook("/user/tool.mjs # pharaoh-project-memory:user-v1");
 	const notification = [{ hooks: [commandHook("keep-notification")] }];
-	writeFileSync(
-		codex,
-		JSON.stringify({
-			hooks: {
-				UserPromptSubmit: [{ hooks: [old, keep] }],
-				Stop: [{ hooks: [old] }],
-				Interrupt: [{ hooks: [old] }],
-				SessionEnd: [],
-				Notification: notification,
-				StopFailure: [],
-			},
-			otherSetting: true,
-		}),
-	);
+	writeJson(codex, {
+		hooks: {
+			UserPromptSubmit: [{ hooks: [old, keep] }],
+			Stop: [{ hooks: [old] }],
+			Interrupt: [{ hooks: [old] }],
+			SessionEnd: [],
+			Notification: notification,
+			StopFailure: [],
+		},
+		otherSetting: true,
+	});
 	const legacy = legacySettings();
 	const elsewhere = join(home, "other-checkout");
 	git("worktree", "add", "--quiet", "--detach", elsewhere);
@@ -1094,7 +1064,7 @@ it("removes owned pilot hooks during default setup without changing unrelated se
 	const credentialsFile = join(home, ".pharaoh/credentials.json");
 	const originalCredentials = readFileSync(credentialsFile, "utf8");
 	expect(configure({ credentials: undefined })).toEqual([]);
-	expect(JSON.parse(readFileSync(codex, "utf8"))).toEqual({
+	expect(readJson(codex)).toEqual({
 		hooks: {
 			UserPromptSubmit: [{ hooks: [keep] }],
 			SessionEnd: [],
@@ -1103,7 +1073,7 @@ it("removes owned pilot hooks during default setup without changing unrelated se
 		},
 		otherSetting: true,
 	});
-	expect(JSON.parse(readFileSync(legacy, "utf8"))).toEqual({
+	expect(readJson(legacy)).toEqual({
 		hooks: { UserPromptSubmit: [{ hooks: [commandHook("keep-checkout-hook")] }] },
 	});
 	expect(readFileSync(elsewhereSettings, "utf8")).toBe(elsewhereConfig);
@@ -1245,7 +1215,7 @@ it("opts in to one MCP reminder per client and scopes it to eligible worktrees",
 	const worktree = join(home, "worktree");
 	git("worktree", "add", "--quiet", "--detach", worktree);
 	for (const file of [claude, codex]) {
-		expect(Object.keys(JSON.parse(readFileSync(file, "utf8")).hooks)).toEqual(
+		expect(Object.keys(readJson(file).hooks)).toEqual(
 			file === claude
 				? ["UserPromptSubmit", "Stop", "PostToolUse", "PostToolUseFailure"]
 				: ["UserPromptSubmit", "Stop", "PostToolUse"],
@@ -1398,7 +1368,7 @@ it("offers diagnostics separately after policy eligibility and retains explicit 
 		diagnosticsGeneration: expect.any(String),
 	});
 	applyChoice(decision);
-	const settings = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
+	const settings = readJson(join(home, ".codex/hooks.json"));
 	expect(settings.hooks.Stop[0].hooks[0].command).toContain("--diagnostics");
 	expect(
 		settings.hooks.PostToolUse.some((group: { matcher: string }) =>
@@ -1428,9 +1398,7 @@ function diagnosticFixture() {
 		home,
 	);
 	configure({ clients: ["codex"], enable: true });
-	const digest = JSON.parse(
-		readFileSync(join(home, ".pharaoh/project-memory-client/active.json"), "utf8"),
-	).codex;
+	const digest = readJson(join(home, ".pharaoh/project-memory-client/active.json")).codex;
 	const runtime = join(home, ".pharaoh/project-memory-client", digest);
 	const directory = join(home, ".pharaoh/project-memory-client/diagnostics/codex");
 	const options = {
@@ -1443,7 +1411,18 @@ function diagnosticFixture() {
 		spawnSender: false,
 	};
 	const input = { session_id: "native-session", turn_id: "native-turn", cwd: checkout };
-	return { options, input, runtime, directory };
+	const collect = (event: object, overrides = {}) =>
+		collectDiagnosticEvent({ ...input, ...event }, { ...options, ...overrides });
+	return { options, input, runtime, directory, collect };
+}
+
+function diagnosticSender(fixture: ReturnType<typeof diagnosticFixture>) {
+	return {
+		home,
+		runtime: fixture.runtime,
+		readCredentials: async () => credentials,
+		policyRequest: async () => fixture.options.policy,
+	};
 }
 
 it("restores the reminder after cleanup without accepting piped input for optional hooks", async () => {
@@ -1463,7 +1442,7 @@ it("restores the reminder after cleanup without accepting piped input for option
 		ask: (question, defaultAnswer) => askYesNoInTerminal(question, defaultAnswer, input, output),
 	});
 	applyChoice(decision);
-	const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
+	const { hooks } = readJson(join(home, ".codex/hooks.json"));
 	expect(hooks.UserPromptSubmit).toHaveLength(1);
 	expect(hooks.PreToolUse).toBeUndefined();
 	expect(JSON.stringify(hooks.Stop)).not.toContain("--diagnostics");
@@ -1475,8 +1454,7 @@ it("restores the reminder after cleanup without accepting piped input for option
 
 it("links actual native recall results, bounds excerpts and excludes file/patch/shell bodies", async () => {
 	const fixture = diagnosticFixture();
-	const collect = (event: object) =>
-		collectDiagnosticEvent({ ...fixture.input, ...event }, fixture.options);
+	const collect = (event: object) => fixture.collect(event);
 	const prompt = collect({
 		hook_event_name: "UserPromptSubmit",
 		prompt: `Investigate the failing memory delivery. ${"x".repeat(1500)}`,
@@ -1527,10 +1505,7 @@ it("links actual native recall results, bounds excerpts and excludes file/patch/
 		expect(lstatSync(join(fixture.directory, name)).mode & 0o777).toBe(0o600);
 	const sent: Array<{ events: Array<{ eventId: string }> }> = [];
 	await flushDiagnosticQueue("codex", {
-		home,
-		runtime: fixture.runtime,
-		readCredentials: async () => credentials,
-		policyRequest: async () => fixture.options.policy,
+		...diagnosticSender(fixture),
 		request: async (_operation: string, payload: { events: Array<{ eventId: string }> }) => {
 			sent.push(payload);
 			return { acceptedEventIds: payload.events.map((event) => event.eventId) };
@@ -1544,10 +1519,7 @@ it("links actual native recall results, bounds excerpts and excludes file/patch/
 it("keeps first-prompt diagnostics content-free before the local scope hook runs", async () => {
 	const fixture = diagnosticFixture();
 	const secret = "PRIVATE_SAVED_SELECTOR";
-	const prompt = collectDiagnosticEvent(
-		{ ...fixture.input, hook_event_name: "UserPromptSubmit", prompt: secret },
-		fixture.options,
-	);
+	const prompt = fixture.collect({ hook_event_name: "UserPromptSubmit", prompt: secret });
 	const file = join(fixture.directory, `event-${prompt?.eventId}.json`);
 	const before = readFileSync(file, "utf8");
 	expect(before).not.toContain(secret);
@@ -1557,16 +1529,13 @@ it("keeps first-prompt diagnostics content-free before the local scope hook runs
 	// Simulate a queued prompt observation from the previous collector format.
 	const queued = JSON.parse(before);
 	queued.event.payload.taskSummary = secret;
-	writeFileSync(file, JSON.stringify(queued));
+	writeJson(file, queued);
 	const fetcher = vi.fn(async (_url: string, request: RequestInit) => {
 		const { events } = JSON.parse(request.body as string) as { events: Array<{ eventId: string }> };
 		return Response.json({ acceptedEventIds: events.map((event) => event.eventId) });
 	});
 	await flushDiagnosticQueue("codex", {
-		home,
-		runtime: fixture.runtime,
-		readCredentials: async () => credentials,
-		policyRequest: async () => fixture.options.policy,
+		...diagnosticSender(fixture),
 		request: (operation: string, payload: unknown, options: Record<string, unknown>) =>
 			requestMemory(operation, payload, { ...options, fetcher }),
 	});
@@ -1579,8 +1548,7 @@ it("keeps first-prompt diagnostics content-free before the local scope hook runs
 it("redacts shell action excerpts and fences finals after a local-capable CLI attempt", async () => {
 	const fixture = diagnosticFixture();
 	const privateName = "PRIVATE_SAVED_SELECTOR";
-	const collect = (session_id: string, event: object) =>
-		collectDiagnosticEvent({ ...fixture.input, session_id, ...event }, fixture.options);
+	const collect = (session_id: string, event: object) => fixture.collect({ session_id, ...event });
 	const shell = (session: string, cmd: string) =>
 		collect(session, {
 			hook_event_name: "PostToolUse",
@@ -1611,22 +1579,19 @@ it("redacts shell action excerpts and fences finals after a local-capable CLI at
 		"clear",
 	);
 	const file = join(fixture.directory, `event-${hosted?.eventId}.json`);
-	const queued = JSON.parse(readFileSync(file, "utf8"));
+	const queued = readJson(file);
 	// Earlier queues did not include command provenance with a shell excerpt.
 	delete queued.metadataOnly;
 	queued.root = checkout;
 	queued.event.payload.actionExcerpt = privateName;
-	writeFileSync(file, JSON.stringify(queued));
+	writeJson(file, queued);
 	collect(hostedSession, {
 		hook_event_name: "Stop",
 		last_assistant_message: "Hosted graph answer.",
 	});
 	const sent: Array<{ events: Array<{ eventId: string }> }> = [];
 	await flushDiagnosticQueue("codex", {
-		home,
-		runtime: fixture.runtime,
-		readCredentials: async () => credentials,
-		policyRequest: async () => fixture.options.policy,
+		...diagnosticSender(fixture),
 		request: async (_operation: string, payload: { events: Array<{ eventId: string }> }) => {
 			sent.push(payload);
 			return { acceptedEventIds: payload.events.map((event) => event.eventId) };
@@ -1643,8 +1608,7 @@ it("redacts one opted-in conversation across queued delivery, restart and resume
 	const binding = conversationMemoryBinding("codex", fixture.input.session_id);
 	expect(binding).toBeDefined();
 	const now = Date.now();
-	const collect = (event: object, at = now) =>
-		collectDiagnosticEvent({ ...fixture.input, ...event }, { ...fixture.options, now: at });
+	const collect = (event: object, at = now) => fixture.collect(event, { now: at });
 	expect(
 		collect({
 			hook_event_name: "Stop",
@@ -1663,10 +1627,8 @@ it("redacts one opted-in conversation across queued delivery, restart and resume
 		return Response.json({ acceptedEventIds: events.map((event) => event.eventId) });
 	});
 	const sender = {
-		home,
-		runtime: fixture.runtime,
+		...diagnosticSender(fixture),
 		now: () => now,
-		readCredentials: async () => credentials,
 		policyRequest: async () => {
 			// A local claim races an already-awaiting sender.
 			expect(markSessionLocal(binding, { home })).toBe(true);
@@ -1811,8 +1773,7 @@ it("rechecks legacy shell turns and HTTP memory egress after asynchronous sign-i
 
 it("records observed heuristic skips, suppresses opted-out turns and rechecks consent before sending", async () => {
 	const fixture = diagnosticFixture();
-	const collect = (event: object) =>
-		collectDiagnosticEvent({ ...fixture.input, ...event }, fixture.options);
+	const collect = (event: object) => fixture.collect(event);
 	const skipped = collect({ hook_event_name: "UserPromptSubmit", prompt: "/help" });
 	expect(skipped?.payload.coverage.eligibility).toBe("heuristic_skip");
 	collect({ hook_event_name: "UserPromptSubmit", prompt: "skip project memory" });
@@ -1827,9 +1788,7 @@ it("records observed heuristic skips, suppresses opted-out turns and rechecks co
 	});
 	const request = vi.fn();
 	await flushDiagnosticQueue("codex", {
-		home,
-		runtime: fixture.runtime,
-		readCredentials: async () => credentials,
+		...diagnosticSender(fixture),
 		policyRequest: async () => {
 			writeHookPreferences({ codex: { memory: true, diagnostics: false } }, home);
 			return fixture.options.policy;
@@ -1923,16 +1882,12 @@ it("recovers dead sender leases and flushes final native events after the silent
 it("bounds the spool and turn, reports expiry gaps, and retries stable event IDs until acknowledgement", async () => {
 	const fixture = diagnosticFixture();
 	for (let index = 0; index < 130; index++)
-		collectDiagnosticEvent(
-			{
-				...fixture.input,
-				hook_event_name: "PostToolUse",
-				tool_name: "Bash",
-				tool_input: { description: `Check expected behavior ${"x".repeat(1800)}` },
-				tool_response: { exit_code: 0 },
-			},
-			fixture.options,
-		);
+		fixture.collect({
+			hook_event_name: "PostToolUse",
+			tool_name: "Bash",
+			tool_input: { description: `Check expected behavior ${"x".repeat(1800)}` },
+			tool_response: { exit_code: 0 },
+		});
 	const files = readdirSync(fixture.directory).filter((name) => name.startsWith("event-"));
 	expect(files.length).toBeLessThanOrEqual(100);
 	expect(
@@ -1946,31 +1901,22 @@ it("bounds the spool and turn, reports expiry gaps, and retries stable event IDs
 	).toBeLessThanOrEqual(1024 * 1024);
 	const expired = new Date(Date.now() - 25 * 60 * 60 * 1000);
 	for (const name of files) utimesSync(join(fixture.directory, name), expired, expired);
-	collectDiagnosticEvent(
-		{
-			...fixture.input,
-			turn_id: "next-native-turn",
-			hook_event_name: "UserPromptSubmit",
-			prompt: "Verify delivery after the connection returns",
-		},
-		fixture.options,
-	);
+	fixture.collect({
+		turn_id: "next-native-turn",
+		hook_event_name: "UserPromptSubmit",
+		prompt: "Verify delivery after the connection returns",
+	});
 	const queued = () =>
 		readdirSync(fixture.directory)
 			.filter((name) => name.startsWith("event-"))
-			.map((name) => JSON.parse(readFileSync(join(fixture.directory, name), "utf8")));
+			.map((name) => readJson(join(fixture.directory, name)));
 	expect(
 		queued().find((item) => item.event.kind === "collector_gap")?.event.payload.count,
 	).toBeGreaterThan(0);
 	const before = queued()
 		.map((item) => item.event.eventId)
 		.sort();
-	const options = {
-		home,
-		runtime: fixture.runtime,
-		readCredentials: async () => credentials,
-		policyRequest: async () => fixture.options.policy,
-	};
+	const options = { ...diagnosticSender(fixture) };
 	await flushDiagnosticQueue("codex", {
 		...options,
 		request: async () => {
@@ -2080,14 +2026,10 @@ it.each([
 	"superseded_runtime",
 ])("preserves bounded evidence during %s", async (failure) => {
 	const fixture = diagnosticFixture();
-	collectDiagnosticEvent(
-		{
-			...fixture.input,
-			hook_event_name: "UserPromptSubmit",
-			prompt: "Inspect the retryable delivery failure",
-		},
-		fixture.options,
-	);
+	fixture.collect({
+		hook_event_name: "UserPromptSubmit",
+		prompt: "Inspect the retryable delivery failure",
+	});
 	const queued = () =>
 		readdirSync(fixture.directory)
 			.filter((name) => name.startsWith("event-"))
@@ -2119,17 +2061,11 @@ it.each([
 
 it("removes only a confirmed revoked repo/auth/generation scope and still delivers its valid peer", async () => {
 	const fixture = diagnosticFixture();
-	const first = collectDiagnosticEvent(
-		{
-			...fixture.input,
-			hook_event_name: "UserPromptSubmit",
-			prompt: "Inspect the first repository",
-		},
-		fixture.options,
-	);
-	const source = JSON.parse(
-		readFileSync(join(fixture.directory, `event-${first?.eventId}.json`), "utf8"),
-	);
+	const first = fixture.collect({
+		hook_event_name: "UserPromptSubmit",
+		prompt: "Inspect the first repository",
+	});
+	const source = readJson(join(fixture.directory, `event-${first?.eventId}.json`));
 	const retained = [
 		{ ...source, binding: randomUUID(), event: { ...source.event, eventId: randomUUID() } },
 		{
@@ -2156,21 +2092,18 @@ it("removes only a confirmed revoked repo/auth/generation scope and still delive
 		`https://github.com/${otherRepo}.git`,
 	]);
 	credentials.project_memory?.push({ repo: otherRepo, revision: git("rev-parse", "HEAD") });
-	collectDiagnosticEvent(
+	fixture.collect(
 		{
-			...fixture.input,
 			cwd: otherRoot,
 			session_id: "second-session",
 			hook_event_name: "UserPromptSubmit",
 			prompt: "Inspect the other enrolled repository",
 		},
-		{ ...fixture.options, target: { root: otherRoot, repo: otherRepo } },
+		{ target: { root: otherRoot, repo: otherRepo } },
 	);
 	const sent: Array<{ repo: string }> = [];
 	await flushDiagnosticQueue("codex", {
-		home,
-		runtime: fixture.runtime,
-		readCredentials: async () => credentials,
+		...diagnosticSender(fixture),
 		policyRequest: async (requestedRepo: string) =>
 			requestedRepo === repo
 				? {
@@ -2193,15 +2126,14 @@ it("removes only a confirmed revoked repo/auth/generation scope and still delive
 	expect(sent).toEqual([expect.objectContaining({ repo: otherRepo })]);
 	const remaining = readdirSync(fixture.directory)
 		.filter((name) => name.startsWith("event-"))
-		.map((name) => JSON.parse(readFileSync(join(fixture.directory, name), "utf8")).event.eventId)
+		.map((name) => readJson(join(fixture.directory, name)).event.eventId)
 		.sort();
 	expect(remaining).toEqual(retained.map((item) => item.event.eventId).sort());
 });
 
 it("retains a live sender lease and acknowledges permanent rejections without poisoning valid peers", async () => {
 	const fixture = diagnosticFixture();
-	const collect = (event: object) =>
-		collectDiagnosticEvent({ ...fixture.input, ...event }, fixture.options);
+	const collect = (event: object) => fixture.collect(event);
 	const prompt = collect({
 		hook_event_name: "UserPromptSubmit",
 		prompt: "Inspect the rejected event",
@@ -2221,18 +2153,213 @@ it("retains a live sender lease and acknowledges permanent rejections without po
 		rejectedEventIds: [prompt?.eventId],
 		gaps: [{ eventId: prompt?.eventId, reason: "event_conflict" }],
 	}));
-	const options = {
-		home,
-		runtime: fixture.runtime,
-		readCredentials: async () => credentials,
-		policyRequest: async () => fixture.options.policy,
-		request,
-	};
+	const options = { ...diagnosticSender(fixture), request };
 	await flushDiagnosticQueue("codex", options);
 	expect(request).not.toHaveBeenCalled();
 	rmSync(live);
 	await flushDiagnosticQueue("codex", options);
 	expect(request).toHaveBeenCalledTimes(1);
 	expect(readdirSync(fixture.directory).filter((name) => name.startsWith("event-"))).toEqual([]);
-	expect(JSON.parse(readFileSync(join(fixture.directory, "gaps.json"), "utf8")).count).toBe(1);
+	expect(readJson(join(fixture.directory, "gaps.json")).count).toBe(1);
+});
+
+const reviewChoice = { memory: true, graph: true, capture: false };
+function configureClaude(
+	choice: typeof reviewChoice & { diagnostics?: boolean } = reviewChoice,
+	session = false,
+) {
+	writeHookPreferences({ "claude-code": choice }, home);
+	if (session) {
+		credentials.project_memory_session = SESSION;
+		writeCredentials(credentials, join(home, ".pharaoh/credentials.json"));
+	}
+	configure({
+		enable: true,
+		clients: ["claude-code"],
+		graphClients: choice.graph ? ["claude-code"] : [],
+	});
+	return join(home, ".claude/settings.json");
+}
+
+it("opts one existing Claude installation into review with capture off and preserves that choice on reinstall", () => {
+	const settings = configureClaude();
+	const options = { ...installOptions() };
+	expect(changeReviewEnabled(home)).toBe(false);
+	expect(readJson(settings).hooks.Stop).toBeUndefined();
+	expect(configureChangeReview(true, options)).toEqual([]);
+	expect(changeReviewEnabled(home)).toBe(true);
+	const hooks = readJson(settings).hooks;
+	expect(hooks.Stop).toHaveLength(1);
+	expect(hooks.Stop[0].hooks[0].command).toContain("--capture");
+	expect(
+		hooks.PostToolUse.some(
+			(group: { matcher?: string; hooks: Array<{ command: string }> }) =>
+				group.hooks.some((hook) => hook.command.includes("--review")) &&
+				group.matcher?.includes("pharaoh_recon"),
+		),
+	).toBe(true);
+	expect(readHookPreferences(home)["claude-code"]).toEqual(reviewChoice);
+	configure({ enable: true, graphClients: ["claude-code"] });
+	expect(readJson(settings).hooks.Stop).toHaveLength(1);
+	expect(configureChangeReview(false, options)).toEqual([]);
+	expect(readJson(settings).hooks.Stop).toBeUndefined();
+});
+
+it("requires an active mapped Claude installation and never changes independent declines", () => {
+	const options = { ...installOptions() };
+	expect(() => configureChangeReview(true, options)).toThrow(/active, signed-in/);
+	expect(changeReviewEnabled(home)).toBe(false);
+	configure({ enable: true });
+	for (const choice of [{ memory: false }, { graph: false }]) {
+		writeHookPreferences({ "claude-code": choice }, home);
+		expect(() => configureChangeReview(true, options)).toThrow(/active, signed-in/);
+		expect(readHookPreferences(home)["claude-code"]).toEqual(choice);
+		expect(changeReviewEnabled(home)).toBe(false);
+	}
+});
+
+it("keeps review opt-in scoped and clears it on broad sign-out", () => {
+	const scope = { kind: "local" as const, root: checkout };
+	setChangeReview(true, home, scope);
+	expect(changeReviewEnabled(home, scope)).toBe(true);
+	expect(changeReviewEnabled(home, { kind: "global" })).toBe(false);
+	expect(changeReviewEnabled(home, { kind: "local", root: join(home, "other") })).toBe(false);
+	const reviewDirectory = join(memoryClientRoot(home), "change-review");
+	mkdirSync(reviewDirectory, { mode: 0o700 });
+	writeFileSync(join(reviewDirectory, "private-proof.json"), "{}");
+	resetHookPreferences(false, home);
+	expect(changeReviewEnabled(home, scope)).toBe(false);
+	expect(existsSync(reviewDirectory)).toBe(false);
+});
+
+it("loads the real credential reader from the installed bundle, including its native sign-in dependency", async () => {
+	const ts = require("typescript") as typeof import("typescript");
+	for (const name of ["credentials", "refresh"]) {
+		const source = readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8");
+		const compiled = ts.transpileModule(source, {
+			compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+		}).outputText;
+		writeFileSync(new URL(`dist/${name}.js`, packageRoot), compiled);
+	}
+	const directory = installMemoryBundle(
+		memoryClientRoot(home),
+		checkout,
+		packagedMemoryBundle(packageRoot),
+	);
+	const installed = await import(pathToFileURL(join(directory, "runtime/credentials.js")).href);
+	// This loads the shipped module closure, rather than a test substitute that hid missing imports.
+	expect(installed.readCredentials(join(home, ".pharaoh/credentials.json"))?.repos).toEqual([repo]);
+});
+
+it("retains a bounded bundle size after adding the verifier and credential dependency closure", () => {
+	appendFileSync(new URL("project-memory/local.mjs", packageRoot), `\n${" ".repeat(150_000)}`);
+	expect(() => packagedMemoryBundle(packageRoot)).toThrow("bundle is oversized");
+});
+
+it("review toggles preserve removed diagnostic and structural handlers", () => {
+	const settings = configureClaude({ ...reviewChoice, diagnostics: true });
+	const initial = readJson(settings);
+	delete initial.hooks.PreToolUse;
+	initial.hooks.Stop = initial.hooks.Stop.filter(
+		(group: { hooks: Array<{ command: string }> }) =>
+			!group.hooks.some((hook) => hook.command.includes("--diagnostics")),
+	);
+	for (const group of initial.hooks.PostToolUse) {
+		if (group.hooks.some((hook: { command: string }) => hook.command.includes("--graph")))
+			group.matcher = "^(?:Edit|Write|MultiEdit)$";
+	}
+	writeJson(settings, initial);
+	const options = { ...installOptions() };
+	for (const enabled of [true, false]) {
+		expect(configureChangeReview(enabled, options)).toEqual([]);
+		const next = readJson(settings);
+		expect(next.hooks.PreToolUse).toBeUndefined();
+		expect(JSON.stringify(next.hooks.Stop ?? [])).not.toContain("--diagnostics");
+		expect(
+			next.hooks.PostToolUse.some(
+				(group: { matcher?: string; hooks: Array<{ command: string }> }) =>
+					group.matcher?.includes("mcp__pharaoh__get_codebase_map") &&
+					group.hooks.some((hook) => hook.command.includes("--graph")),
+			),
+		).toBe(false);
+		// Existing diagnostic observations stay present; only the removed handler remains absent.
+		expect(JSON.stringify(next.hooks.PostToolUse)).toContain("--diagnostics");
+	}
+});
+
+it("a malformed review preference disables only review and explicit disable recovers it", async () => {
+	const settings = configureClaude(reviewChoice, true);
+	const reviewPreference = join(memoryClientRoot(home), "change-review-global.json");
+	writeFileSync(reviewPreference, "{broken", { mode: 0o600 });
+	expect(changeReviewEnabled(home)).toBe(false);
+	await retrieval(SESSION);
+	expect(prompt(settings, checkout)).toContain("pharaoh_memory_recall");
+	expect(configureChangeReview(false, { ...installOptions() })).toEqual([]);
+	expect(existsSync(reviewPreference)).toBe(false);
+	expect(readHookPreferences(home)["claude-code"]).toEqual(reviewChoice);
+});
+
+it("startup does not resync a declined graph installation merely because a review flag remains", () => {
+	const settings = configureClaude({ ...reviewChoice, graph: false });
+	setChangeReview(true, home);
+	const before = readFileSync(settings, "utf8");
+	for (let i = 0; i < 2; i++) {
+		expect(
+			ensureMemoryHooks({ name: "claude-code" }, credentials, { ...installOptions() }),
+		).toEqual([]);
+		expect(readFileSync(settings, "utf8")).toBe(before);
+	}
+});
+
+it("keeps the memory reminder when the optional review uses its bounded scan budget", async () => {
+	setChangeReview(true, home);
+	const trace = join(home, "review-deadline.json");
+	writeFileSync(
+		new URL("project-memory/change-review.mjs", packageRoot),
+		`
+		import { writeFileSync } from "node:fs";
+		export const changeReviewDirectory = root => root + "/change-review";
+		export function beginReviewTurn(input, options) {
+			const left = options.deadline - performance.now();
+			writeFileSync(${JSON.stringify(trace)}, JSON.stringify({ left }));
+			while (performance.now() <= options.deadline) {}
+			throw new Error("review scan timed out");
+		}
+	`,
+	);
+	const settings = configureClaude({ ...reviewChoice, capture: true }, true);
+	await retrieval(SESSION);
+	const output = prompt(settings, checkout);
+	expect(output).toContain("pharaoh_memory_recall");
+	const { left } = readJson(trace);
+	expect(left).toBeGreaterThan(0);
+	expect(left).toBeLessThanOrEqual(350);
+});
+
+it("emits the verified review receipt even when optional memory capture throws", () => {
+	setChangeReview(true, home);
+	writeFileSync(
+		new URL("project-memory/change-review.mjs", packageRoot),
+		`
+		export const changeReviewDirectory = root => root + "/change-review";
+		export const reviewTurnInput = input => input;
+		export const reviewStop = () => undefined;
+		export const consumeReviewReceipt = () => ({ message: "Pharaoh review verified receipt", finalCheck: {} });
+	`,
+	);
+	writeFileSync(
+		new URL("project-memory/capture.mjs", packageRoot),
+		`
+		export const captureDirectory = root => root + "/capture";
+		export const recordToolEvent = () => undefined;
+		export const deferCaptureForReview = () => undefined;
+		export const stopDecision = () => { throw new Error("private outbox is unavailable"); };
+	`,
+	);
+	const output = runHook(configureClaude({ ...reviewChoice, capture: true }, true), "Stop", {
+		session_id: "receipt-capture-failure",
+		prompt_id: "turn",
+		stop_hook_active: true,
+	});
+	expect(JSON.parse(output)).toEqual({ systemMessage: "Pharaoh review verified receipt" });
 });

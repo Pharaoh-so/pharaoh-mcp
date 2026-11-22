@@ -1,13 +1,17 @@
 /** Verify the local blast-radius claim can never become an upstream route on failure. */
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import { selectBlastRoute } from "../src/local/dispatch.js";
-import { installedLocalAnalyzer, localAnalyzerInstallStatus } from "../src/local/worker-host.js";
+import {
+	installedLocalAnalyzer,
+	localAnalyzerInstallStatus,
+	runLocalExportInventory,
+} from "../src/local/worker-host.js";
 import { ProxyServer } from "../src/proxy-server.js";
 
 const checkout = {
@@ -56,12 +60,69 @@ describe("saved-worktree routing", () => {
 			report.mockReturnValue({ header: { glibcVersionRuntime: "2.34" } });
 			expect(localAnalyzerInstallStatus(proxy)).toBe("ready");
 			expect(installedLocalAnalyzer(proxy)?.reader).toBe(reader);
+			expect(installedLocalAnalyzer(proxy)?.savedExportInventoryV1).toBeUndefined();
+			writeFileSync(
+				join(analyzer, "package.json"),
+				JSON.stringify({
+					name: "@pharaoh-so/local-analyzer",
+					version: "1.2.3",
+					pharaohCapabilities: { savedExportInventoryV1: true },
+				}),
+			);
+			expect(installedLocalAnalyzer(proxy)?.savedExportInventoryV1).toBe(true);
 			rmSync(reader);
 			expect(localAnalyzerInstallStatus(proxy)).toBe("repair-needed");
 		} finally {
 			report.mockRestore();
 			Object.defineProperty(process, "platform", platform);
 			Object.defineProperty(process, "arch", arch);
+			rmSync(scratch, { recursive: true, force: true });
+		}
+	});
+
+	it("forks only capable export workers and rejects malformed or expired replies", async () => {
+		const scratch = realpathSync(mkdtempSync(join(tmpdir(), "pharaoh-export-worker-")));
+		try {
+			const entry = join(scratch, "fixture.mjs");
+			const marker = join(scratch, "started");
+			writeFileSync(
+				entry,
+				`import { writeFileSync } from "node:fs";
+writeFileSync("started", "yes");
+process.once("message", ({ operation, files }) => {
+	const file = files[0];
+	if (file.path === "src/slow.ts") return setTimeout(() => {}, 10_000);
+	process.send({ operation, files: [{
+		path: file.path,
+		sha256: file.path === "src/bad.ts" ? "b".repeat(64) : file.sha256,
+		status: "complete",
+		exports: [{ name: "entryPoint", kind: "function" }],
+	}] }, () => process.disconnect());
+});`,
+			);
+			const analyzer = { root: scratch, entry, reader: entry };
+			const signal = new AbortController().signal;
+			const files = (path: string) => [{ path, sha256: "a".repeat(64), bytes: new Uint8Array() }];
+			await expect(
+				runLocalExportInventory(analyzer, files("src/ok.ts"), signal),
+			).resolves.toBeUndefined();
+			expect(existsSync(marker)).toBe(false);
+			const verified = { ...analyzer, savedExportInventoryV1: true as const };
+			await expect(runLocalExportInventory(verified, files("src/ok.ts"), signal)).resolves.toEqual([
+				{
+					path: "src/ok.ts",
+					sha256: "a".repeat(64),
+					status: "complete",
+					exports: [{ name: "entryPoint", kind: "function" }],
+				},
+			]);
+			await expect(
+				runLocalExportInventory(verified, files("src/bad.ts"), signal),
+			).resolves.toBeUndefined();
+			await expect(
+				runLocalExportInventory(verified, files("src/slow.ts"), AbortSignal.timeout(250)),
+			).resolves.toBeUndefined();
+		} finally {
 			rmSync(scratch, { recursive: true, force: true });
 		}
 	});

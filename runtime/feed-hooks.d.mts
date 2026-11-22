@@ -22,6 +22,12 @@ export function syncNativeFeedHooks(
 		scope?: NativeFeedHookScope;
 	},
 ): void;
+/** Read-only proof of an unchanged managed registration with enabled hook handlers. */
+export function nativeFeedHooksReady(
+	client: "claude-code" | "codex",
+	hookPath: string,
+	options: NonNullable<Parameters<typeof syncNativeFeedHooks>[2]>,
+): boolean;
 /** Read the independent native context opt-out without changing it. */
 export function nativeFeedEnabled(
 	client: "claude-code" | "codex",
@@ -33,6 +39,13 @@ export function setNativeFeedEnabled(
 	enabled: boolean,
 	options?: { home?: string },
 ): void;
+/** Persist the per-client preview choice independently of base feed and hook trust. */
+export function setNativeFeedPreviewEnabled(
+	client: "claude-code" | "codex",
+	enabled: boolean,
+	options?: { home?: string },
+): void;
+
 /** Resolve the native hook settings file in the configured client home. */
 export function nativeFeedSettingsPath(
 	client: "claude-code" | "codex",

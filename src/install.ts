@@ -1,11 +1,12 @@
 /** One-command developer setup. Registration is separate from an answered tool call. */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { syncNativeFeedHooks } from "../runtime/feed-hooks.mjs";
+import { nativeFeedHooksReady, syncNativeFeedHooks } from "../runtime/feed-hooks.mjs";
+import { TESTED_FEED_PROFILES } from "../runtime/feed-profiles.mjs";
 import {
 	automaticRuntimeIntent,
 	disableRuntime,
@@ -82,6 +83,25 @@ const PROBLEMS: Partial<Record<ClientOutcome["status"], string>> = {
 	ambiguous: "needs attention",
 	failed: "setup failed",
 };
+
+function codexHooksAllowed(path: string): boolean {
+	try {
+		const file = lstatSync(path);
+		if (!file.isFile() || file.size > 262_144) return false;
+		const config = parseToml(readFileSync(path, "utf8"));
+		const features = config.features;
+		return (
+			features === undefined ||
+			(features !== null &&
+				typeof features === "object" &&
+				!Array.isArray(features) &&
+				(features as Record<string, unknown>).hooks !== false &&
+				(features as Record<string, unknown>).codex_hooks !== false)
+		);
+	} catch {
+		return false;
+	}
+}
 
 /** Statuses whose client has an enabled `pharaoh` entry the setup prompt can reach. */
 const CONNECTED: ReadonlySet<ClientOutcome["status"]> = new Set([
@@ -261,10 +281,16 @@ export function validateInstallArguments(args: readonly string[]): string | null
 			if (!args.includes("--scope") || args[args.indexOf("--scope") + 1] !== "local")
 				return "--path requires --scope local.";
 			i++;
-		} else if (!["--migrate-legacy", "--memory-hooks", "--skip-runtime"].includes(args[i])) {
+		} else if (
+			!["--migrate-legacy", "--memory-hooks", "--skip-runtime", "--native-delegation"].includes(
+				args[i],
+			)
+		) {
 			return "Unknown install option. Run pharaoh-mcp install --help.";
 		}
 	}
+	if (args.includes("--native-delegation") && args[args.indexOf("--scope") + 1] !== "global")
+		return "--native-delegation requires --scope global.";
 	return null;
 }
 
@@ -439,6 +465,12 @@ export interface InstallOptions {
 		note: (...lines: string[]) => void,
 		scope: InstallScope,
 	) => Promise<void>;
+	/** Optional, separately consented guidance for a managed Global pilot connection. */
+	offerNativeDelegation?: (
+		client: "codex" | "claude-code",
+		version: string,
+		eligible: () => boolean,
+	) => Promise<string | null>;
 	/** Isolated process/filesystem fixtures use the same orchestration without real user writes. */
 	dependencies?: Partial<InstallDependencies>;
 }
@@ -745,6 +777,11 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 			rejectProjectOverrides: true,
 		});
 		const bootstrapped = new Set<string>();
+		const delegationTargets: Array<{
+			client: "codex" | "claude-code";
+			version: string;
+			eligible: () => boolean;
+		}> = [];
 		for (const outcome of outcomes) {
 			const feed = outcome.nativeFeed;
 			if (
@@ -760,23 +797,60 @@ export async function runInstall(options: InstallOptions): Promise<number> {
 					await dependencies.bootstrapFeed(credentials, options.server, credentialsPath);
 					bootstrapped.add(credentialsPath);
 				}
-				dependencies.nativeFeedHooks(
-					outcome.client,
-					launcher ?? join(managedProxyRoot, "runtime", "native-feed-hook.mjs"),
-					{
-						node: configuredLaunch.command,
-						viaLauncher: launcher !== null,
-						home: feed.home,
-						settingsPath: feed.settingsPath,
-						registration: feed.registration,
-						serverArgv: feed.serverArgv,
-						scope,
-					},
-				);
+				const client = outcome.client;
+				const hookPath = launcher ?? join(managedProxyRoot, "runtime", "native-feed-hook.mjs");
+				const hookOptions = {
+					node: configuredLaunch.command,
+					viaLauncher: launcher !== null,
+					home: feed.home,
+					settingsPath: feed.settingsPath,
+					registration: feed.registration,
+					serverArgv: feed.serverArgv,
+					scope,
+				};
+				dependencies.nativeFeedHooks(client, hookPath, hookOptions);
+				if (options.offerNativeDelegation && scope.kind === "global") {
+					const target = targets.find((target) => target.client === outcome.client && target.cli);
+					if (
+						target?.version &&
+						TESTED_FEED_PROFILES.some(
+							(profile) => profile.client === outcome.client && profile.version === target.version,
+						)
+					) {
+						const eligible = () =>
+							dependencies
+								.verifiedRuntimeClients({
+									scope,
+									runningLaunch: configuredLaunch,
+									requiredFeedRegistration: feed.registration,
+									rejectProjectOverrides: true,
+								})
+								.includes(client) &&
+							(client !== "codex" || codexHooksAllowed(target.path)) &&
+							nativeFeedHooksReady(client, hookPath, hookOptions);
+						if (eligible()) delegationTargets.push({ client, version: target.version, eligible });
+					}
+				}
 			} catch {
 				write(
 					`${CLIENT_LABELS[outcome.client]}: native context hooks could not be configured. Hosted queries remain available.`,
 				);
+			}
+		}
+		if (options.offerNativeDelegation) {
+			if (delegationTargets.length === 0)
+				notes.push(
+					"Pilot native delegation guidance requires an eligible managed Global CLI setup.",
+				);
+			for (const { client, version, eligible } of delegationTargets) {
+				try {
+					if (!eligible()) continue;
+					const note = await options.offerNativeDelegation(client, version, eligible);
+					if (note) notes.push(note);
+				} catch {
+					// ALLOWED-CATCH: pilot consent cannot interrupt hosted or native feed setup.
+					notes.push(`${CLIENT_LABELS[client]}: could not offer pilot native delegation guidance.`);
+				}
 			}
 		}
 		// Existing setup decides Claude tool permissions before runtime hooks can create settings.json.

@@ -304,7 +304,7 @@ export function fingerprintLocalSources(
 	reader: string,
 	paths: readonly string[],
 	deadline: number,
-	visit?: (path: string, bytes: Buffer) => void,
+	visit?: (path: string, bytes: Buffer, sha256: string) => void,
 ): Map<string, string | null> | undefined {
 	if (paths.length > 4 || performance.now() >= deadline) return;
 	const entries = confinedMetadata(
@@ -320,8 +320,9 @@ export function fingerprintLocalSources(
 	const fingerprints = new Map<string, string | null>();
 	for (const [path, { status, bytes }] of entries) {
 		if (status === 0) {
-			fingerprints.set(path, createHash("sha256").update(bytes).digest("hex"));
-			visit?.(path, bytes);
+			const sha256 = createHash("sha256").update(bytes).digest("hex");
+			fingerprints.set(path, sha256);
+			visit?.(path, bytes, sha256);
 		} else if (status === 1) fingerprints.set(path, null);
 		// Other native statuses are individually uncertain, not evidence of absence.
 	}
@@ -384,12 +385,8 @@ function parseRepoSettings(output: string): RepoSettings | undefined {
 	return repoSlug === undefined ? undefined : { repoSlug, ignoreCase, objectFormat };
 }
 
-function resolveWindowsCheckout(
-	cwd: string,
-	reader: string,
-	timeout = SCOPE_TIMEOUT_MS,
-): CheckoutEvidence {
-	const deadline = performance.now() + timeout;
+function resolveWindowsCheckout(cwd: string, reader: string, deadline: number): CheckoutEvidence {
+	if (performance.now() >= deadline) return unavailable;
 	const layout = windowsLayout(cwd, reader, deadline);
 	if (layout === null) return hostedOnly;
 	if (!layout) return unavailable;
@@ -519,17 +516,22 @@ function posixRepoSettings(
  * Identify the worktree and its single GitHub origin without invoking repository commands.
  * @param cwd - The directory provided by the native host, or the CLI's own process cwd
  * @param reader - Verified packed reader supplied by the snapshot coordinator or CI fixture
+ * @param until - Optional same-process monotonic deadline for background work
  * @returns Verified checkout, confirmed non-repository, or unverified scope
  */
-export function resolveLocalCheckout(cwd: string, reader?: string): CheckoutEvidence {
-	if (!isAbsolute(cwd)) return unavailable;
+export function resolveLocalCheckout(
+	cwd: string,
+	reader?: string,
+	until = Infinity,
+): CheckoutEvidence {
+	if (!isAbsolute(cwd) || performance.now() >= until) return unavailable;
 	const packaged = reader ?? installedLocalAnalyzer()?.reader;
 	if (!packaged) return unavailable;
-	if (process.platform === "win32") return resolveWindowsCheckout(cwd, packaged);
+	const deadline = Math.min(until, performance.now() + SCOPE_TIMEOUT_MS);
+	if (process.platform === "win32") return resolveWindowsCheckout(cwd, packaged, deadline);
 	const executable = GIT_LOCATIONS.find(existsSync);
 	if (!executable) return unavailable;
 	try {
-		const deadline = performance.now() + SCOPE_TIMEOUT_MS;
 		const layout = posixLayout(cwd, packaged, deadline);
 		if (layout === null) return hostedOnly;
 		if (!layout) return unavailable;
@@ -570,7 +572,11 @@ export function sameLocalCheckout(checkout: VerifiedCheckout, reader?: string): 
 	// Snapshot rechecks can wait longer than a native hook for Windows Git startup.
 	const current =
 		process.platform === "win32" && reader
-			? resolveWindowsCheckout(checkout.root, reader, WINDOWS_SNAPSHOT_SCOPE_TIMEOUT_MS)
+			? resolveWindowsCheckout(
+					checkout.root,
+					reader,
+					performance.now() + WINDOWS_SNAPSHOT_SCOPE_TIMEOUT_MS,
+				)
 			: resolveLocalCheckout(checkout.root, reader);
 	return (
 		current.kind === "checkout" &&

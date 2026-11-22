@@ -16,11 +16,11 @@ import {
 	MEMORY_HOOK_CLIENTS,
 	memoryClientRoot,
 	readActiveMemoryClients,
-	readHookSettings,
 	readHookPreferences,
+	readHookSettings,
 } from "./client-settings.mjs";
 import { hasUserHooks } from "./hook-config.mjs";
-import { memoryInstallScope, memorySettingsPath } from "./install-scope.mjs";
+import { memoryInstallScope, memoryScopeKey, memorySettingsPath } from "./install-scope.mjs";
 import { ANCHORED_MEMORY_FILE, atomicWrite, shellWord } from "./local.mjs";
 
 export { MEMORY_HOOK_CLIENTS, readHookPreferences };
@@ -40,6 +40,35 @@ export function writeHookPreferences(clients, home = homedir(), expected) {
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	privateMemoryPath(root, true);
 	atomicWrite(path, `${JSON.stringify({ version: 1, clients })}\n`);
+}
+
+/** Read the separate opt-in for the selected installation; other hook choices grant no review authority. */
+export function changeReviewEnabled(home = homedir(), scope = memoryInstallScope()) {
+	const root = memoryClientRoot(home);
+	const path = join(root, `change-review-${memoryScopeKey(scope) ?? "global"}.json`);
+	try {
+		privateMemoryPath(root, true);
+		if (privateMemoryPath(path, false).size > 128)
+			throw new Error("Change review choice is invalid.");
+		const choice = JSON.parse(readFileSync(path, "utf8"));
+		if (choice.version !== 1 || typeof choice.enabled !== "boolean")
+			throw new Error("Change review choice is invalid.");
+		return choice.enabled;
+	} catch {
+		// A malformed optional review choice disables review, never the established memory hooks.
+		return false;
+	}
+}
+
+/** Enable or disable review only for the chosen installation, without changing memory or diagnostics. */
+export function setChangeReview(enabled, home = homedir(), scope = memoryInstallScope()) {
+	const root = memoryClientRoot(home);
+	const path = join(root, `change-review-${memoryScopeKey(scope) ?? "global"}.json`);
+	mkdirSync(root, { recursive: true, mode: 0o700 });
+	privateMemoryPath(root, true);
+	if (existsSync(path)) privateMemoryPath(path, false);
+	if (enabled) atomicWrite(path, `${JSON.stringify({ version: 1, enabled: true })}\n`);
+	else rmSync(path, { force: true });
 }
 
 /** Turn automatic capture on or off for every client; the hooks read it at each event. */
@@ -70,7 +99,16 @@ export function resetHookPreferences(disable, home = homedir()) {
 	clearCaptureState(home, true);
 	const root = memoryClientRoot(home);
 	for (const name of existsSync(root) ? readdirSync(root) : [])
-		if (ANCHORED_MEMORY_FILE.test(name)) rmSync(join(root, name), { force: true });
+		if (
+			ANCHORED_MEMORY_FILE.test(name) ||
+			/^change-review-(?:global|[a-f0-9]{64})\.json$/.test(name)
+		)
+			rmSync(join(root, name), { force: true });
+	const reviewDirectory = join(root, "change-review");
+	if (existsSync(reviewDirectory)) {
+		privateMemoryPath(reviewDirectory, true);
+		rmSync(reviewDirectory, { recursive: true, force: true });
+	}
 	const choices = readHookPreferences(home);
 	for (const client of MEMORY_HOOK_CLIENTS) {
 		const choice = choices[client];

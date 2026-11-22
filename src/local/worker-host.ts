@@ -5,6 +5,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { release } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { safeFeedText } from "../../runtime/feed-store.mjs";
 import { setWindowsPrivatePathHelper } from "../../runtime/runtime-storage.mjs";
 import type { BlastRoute } from "./dispatch.js";
 import type { LocalSnapshot } from "./snapshot.js";
@@ -14,6 +15,16 @@ const WORKER_DEADLINE_MS = 30_000;
 const MAX_ROWS = 2_048;
 const MAX_TEXT = 1_024;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[a-z\d.-]+)?$/i;
+const EXPORT_OPERATION = "savedExportInventoryV1";
+const SHA256 = /^[a-f0-9]{64}$/;
+
+/** One bounded pilot batch uses the same limits as the published worker. */
+export const LOCAL_EXPORT_LIMITS = {
+	files: 4,
+	fileBytes: 128 * 1024,
+	batchBytes: 256 * 1024,
+	runMs: 750,
+} as const;
 
 type Query = Extract<BlastRoute, { kind: "local" }>["query"];
 
@@ -25,6 +36,34 @@ export interface LocalAnalyzer {
 	readonly entry: string;
 	/** Shipped reader for the current platform and CPU. */
 	readonly reader: string;
+	/** Advertised by the installed package only after exact pin and asset verification. */
+	readonly savedExportInventoryV1?: true;
+}
+
+/** Transient confined bytes and the digest computed from those same bytes. */
+export interface LocalExportInput {
+	/** Normalized eligible checkout-relative file path. */
+	path: string;
+	/** SHA-256 of the captured bytes. */
+	sha256: string;
+	/** Source bytes passed only to the credential-free worker. */
+	bytes: Uint8Array;
+}
+
+/** Finite data-only export metadata. */
+export interface LocalExportSymbol {
+	/** Plain identifier; excludes credential shapes. */
+	name: string;
+	/** AST-proven direct declaration kind. */
+	kind: "function" | "interface";
+}
+
+/** Worker coverage for one verified saved-file capture. */
+export interface LocalExportResult extends Omit<LocalExportInput, "bytes"> {
+	/** Only complete results may be compared, including a complete empty set. */
+	status: "complete" | "incomplete" | "unsupported";
+	/** Empty for incomplete or unsupported results. */
+	exports: LocalExportSymbol[];
 }
 
 interface Location {
@@ -55,6 +94,47 @@ function regular(path: string): boolean {
 
 function object(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactRecord(value: unknown, keys: string[]): value is Record<string, unknown> {
+	return (
+		object(value) &&
+		Object.keys(value).length === keys.length &&
+		keys.every((key) => Object.hasOwn(value, key))
+	);
+}
+
+/** Validate output names and kinds again before retaining any analyzer output. */
+function validLocalExportSymbols(value: unknown): value is LocalExportSymbol[] {
+	if (!Array.isArray(value) || value.length > 16) return false;
+	const names = new Set<string>();
+	for (const row of value) {
+		if (
+			!exactRecord(row, ["name", "kind"]) ||
+			!safeFeedText(row.name) ||
+			!/^[A-Za-z_$][\w$]{0,63}$/.test(row.name) ||
+			(row.kind !== "function" && row.kind !== "interface") ||
+			names.has(row.name)
+		)
+			return false;
+		names.add(row.name);
+	}
+	return true;
+}
+
+/** Validate one export receipt without retaining a malformed worker frame. */
+export function validLocalExportResult(value: unknown): value is LocalExportResult {
+	return (
+		exactRecord(value, ["path", "sha256", "status", "exports"]) &&
+		typeof value.path === "string" &&
+		typeof value.sha256 === "string" &&
+		SHA256.test(value.sha256) &&
+		(value.status === "complete" ||
+			value.status === "incomplete" ||
+			value.status === "unsupported") &&
+		validLocalExportSymbols(value.exports) &&
+		(value.status === "complete" || value.exports.length === 0)
+	);
 }
 
 function location(value: unknown): value is Location & Record<string, unknown> {
@@ -157,7 +237,14 @@ function findInstalledAnalyzer(proxyRoot: string, version: string): LocalAnalyze
 				continue;
 			const installed = JSON.parse(readFileSync(manifest, "utf8"));
 			if (installed.name === ANALYZER && installed.version === version)
-				return { root, entry, reader };
+				return {
+					root,
+					entry,
+					reader,
+					...(installed.pharaohCapabilities?.savedExportInventoryV1 === true
+						? { savedExportInventoryV1: true as const }
+						: {}),
+				};
 		}
 	} catch {
 		// Missing, broken and mismatched packages are all unavailable.
@@ -258,4 +345,87 @@ export async function runLocalAnalyzer(
 			},
 		);
 	});
+}
+
+/** Run one bounded analyzer batch. A missing, timed-out or malformed reply carries no evidence. */
+export async function runLocalExportInventory(
+	analyzer: LocalAnalyzer,
+	files: LocalExportInput[],
+	signal: AbortSignal,
+): Promise<LocalExportResult[] | undefined> {
+	if (
+		analyzer.savedExportInventoryV1 !== true ||
+		signal.aborted ||
+		files.length === 0 ||
+		files.length > LOCAL_EXPORT_LIMITS.files ||
+		files.reduce((bytes, file) => bytes + file.bytes.byteLength, 0) > LOCAL_EXPORT_LIMITS.batchBytes
+	)
+		return;
+	const expected = new Map(files.map(({ path, sha256 }) => [path, sha256]));
+	if (
+		expected.size !== files.length ||
+		files.some(
+			({ path, sha256, bytes }) =>
+				!safeFeedText(path) ||
+				Buffer.byteLength(path, "utf8") > 240 ||
+				/[\\:\p{Cc}]/u.test(path) ||
+				path.split("/").some((part) => !part || part === "." || part === "..") ||
+				!SHA256.test(sha256) ||
+				bytes.byteLength > LOCAL_EXPORT_LIMITS.fileBytes,
+		)
+	)
+		return;
+	return await new Promise<LocalExportResult[] | undefined>((resolve) => {
+		const child = fork(analyzer.entry, [], {
+			cwd: analyzer.root,
+			env: {},
+			execArgv: ["--max-old-space-size=128"],
+			serialization: "advanced",
+			stdio: ["ignore", "ignore", "ignore", "ipc"],
+		});
+		let result: LocalExportResult[] | undefined;
+		let failed = false;
+		const cancel = () => {
+			failed = true;
+			child.kill("SIGKILL");
+		};
+		const timer = setTimeout(cancel, LOCAL_EXPORT_LIMITS.runMs);
+		signal.addEventListener("abort", cancel, { once: true });
+		child.once("error", cancel);
+		child.on("message", (packet: unknown) => {
+			if (
+				result ||
+				!exactRecord(packet, ["operation", "files"]) ||
+				packet.operation !== EXPORT_OPERATION ||
+				!Array.isArray(packet.files) ||
+				packet.files.length !== expected.size
+			) {
+				cancel();
+				return;
+			}
+			const unique = new Set<string>();
+			for (const row of packet.files) {
+				if (
+					!validLocalExportResult(row) ||
+					expected.get(row.path) !== row.sha256 ||
+					unique.has(row.path)
+				) {
+					cancel();
+					return;
+				}
+				unique.add(row.path);
+			}
+			result = packet.files;
+		});
+		child.once("close", (code) => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", cancel);
+			resolve(!failed && code === 0 && !signal.aborted ? result : undefined);
+		});
+		if (signal.aborted) cancel();
+		else
+			child.send({ operation: EXPORT_OPERATION, files }, (error) => {
+				if (error) cancel();
+			});
+	}).catch(() => undefined);
 }
