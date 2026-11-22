@@ -395,6 +395,28 @@ test("the change review completion mod and installer must ship together from ver
 		() => verifyPackPaths([...complete, "hooks/unlisted.js"], [], complete),
 		/Unexpected npm file/,
 	);
+	const item = fixture(complete);
+	const verified = {
+		repository: "Pharaoh-so/pharaoh",
+		commit: sourceCommit,
+		payloadSha256: item.manifest.sourcePayloadSha256,
+		files: assets.map((path) => ({ path, sha256: hash(`public ${path}`) })),
+	};
+	try {
+		const manifestHash = item.save();
+		assert.equal(validateArtifact(item.directory, commit, manifestHash, verified).version, version);
+		for (const path of assets) {
+			const files = verified.files.map((file) =>
+				file.path === path ? { ...file, sha256: hash("different source bytes") } : file,
+			);
+			assert.throws(
+				() => validateArtifact(item.directory, commit, manifestHash, { ...verified, files }),
+				{ message: `Native runtime source hash mismatch: ${path}` },
+			);
+		}
+	} finally {
+		item.clean();
+	}
 });
 
 test("change review is optional until introduced, then requires its complete source-bound runtime", () => {

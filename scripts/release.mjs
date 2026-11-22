@@ -403,6 +403,7 @@ export function validateArtifact(directory, expectedCommit, expectedManifestHash
 		...LOCAL_WORKTREE_RAW_PATHS,
 		...INSTALL_SCOPE_PACK_PATHS,
 		...CHANGE_REVIEW_PACK_PATHS,
+		...CHANGE_REVIEW_COMPLETION_PATHS,
 	]) {
 		if (!names.includes(`package/${path}`)) continue;
 		const archived = execFileSync("tar", ["-xOzf", tarball, `package/${path}`], {
