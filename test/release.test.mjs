@@ -380,19 +380,18 @@ test("memory client settings ship only once the verified source declares them", 
 	);
 });
 
-test("the change review completion mod and installer must ship together from verified source", () => {
-	const assets = ["hooks/change-review-completion.js", "project-memory/change-review-plugin.mjs"];
+function assertSourceBoundAssets(assets, missingAssetsMessage, unlistedPath) {
 	const complete = [...paths, ...assets];
 	verifyPackPaths(paths, [], paths);
 	verifyPackPaths(complete, [], complete);
 	for (const missing of assets) {
 		const partial = complete.filter((path) => path !== missing);
-		assert.throws(() => verifyPackPaths(partial, [], complete), /Missing Change review completion/);
+		assert.throws(() => verifyPackPaths(partial, [], complete), missingAssetsMessage);
 		assert.throws(() => verifyPackPaths(complete, [], partial), /incomplete in the verified source/);
 	}
 	assert.throws(() => verifyPackPaths(complete), /verified source/);
 	assert.throws(
-		() => verifyPackPaths([...complete, "hooks/unlisted.js"], [], complete),
+		() => verifyPackPaths([...complete, unlistedPath], [], complete),
 		/Unexpected npm file/,
 	);
 	const item = fixture(complete);
@@ -417,6 +416,22 @@ test("the change review completion mod and installer must ship together from ver
 	} finally {
 		item.clean();
 	}
+}
+
+test("the change review completion mod and installer must ship together from verified source", () => {
+	assertSourceBoundAssets(
+		["hooks/change-review-completion.js", "project-memory/change-review-plugin.mjs"],
+		/Missing Change review completion/,
+		"hooks/unlisted.js",
+	);
+});
+
+test("the design contract and ESLint runtime must ship together from verified source", () => {
+	assertSourceBoundAssets(
+		["runtime/design-contract.d.mts", "runtime/design-contract.mjs", "runtime/design-eslint.mjs"],
+		/Missing Design runtime/,
+		"runtime/design-unlisted.mjs",
+	);
 });
 
 test("change review is optional until introduced, then requires its complete source-bound runtime", () => {
