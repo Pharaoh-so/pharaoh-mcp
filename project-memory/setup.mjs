@@ -434,7 +434,7 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 					env,
 					scope,
 					node: options.node ?? process.execPath,
-					hook: bundledHook(join(memoryClientRoot(home), digest)),
+					digest,
 					target: checkout(scope?.kind === "local" ? scope.root : (options.cwd ?? process.cwd())),
 					packageRoot: options.packageRoot,
 				});
@@ -501,15 +501,18 @@ export function ensureMemoryHooks(info, credentials, options = {}) {
 }
 
 /** Keep an optional receipt display failure separate from the installed review and capture hooks. */
-function syncReceiptDisplay(options) {
+function syncReceiptDisplay({ digest, ...options }) {
 	try {
-		syncChangeReviewPlugin(options);
+		// Use the same physical bundle root as installMemoryBundle. Rewriting register.js
+		// through a different spelling of HOME makes Claude reload the worker mid-turn.
+		const hook = digest
+			? bundledHook(join(realpathSync(memoryClientRoot(options.home)), digest))
+			: undefined;
+		syncChangeReviewPlugin({ ...options, hook });
 		return [];
 	} catch (error) {
 		const scope = options.scope?.kind === "local" ? "this checkout" : "your Claude Code profile";
-		const operation = options.hook
-			? "install verified receipts"
-			: "finish removing verified receipts";
+		const operation = digest ? "install verified receipts" : "finish removing verified receipts";
 		return [`Pharaoh: could not ${operation} for ${scope}. ${error.message}`];
 	}
 }
@@ -582,7 +585,7 @@ function syncHookInstallation(
 						env,
 						scope,
 						node,
-						hook: enable && review ? installed : undefined,
+						digest: enable && review ? digest : undefined,
 						target,
 						packageRoot,
 					}),

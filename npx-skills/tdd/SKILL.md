@@ -15,6 +15,8 @@ Write the test first. Watch it fail. Write minimal code to pass. Refactor.
 
 **If you didn't watch the test fail, you don't know if it tests the right thing.**
 
+Before changing a UI file, call `design_context` with the repository-relative target when it appears in the installed tool list. From a shell in the checkout, run `pharaoh-mcp design context --target <file>`. Use its declarations, callers, and tokens with the reported coverage and approval status.
+
 ## When to Use
 
 Always — for new features, bug fixes, refactoring, and behavior changes. Exceptions require explicit user permission (throwaway prototypes, generated code, config files).

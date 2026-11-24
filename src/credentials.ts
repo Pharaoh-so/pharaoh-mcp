@@ -49,6 +49,8 @@ const SCHEMA_VERSION = 2;
 
 /** Stored credential shape. */
 export interface Credentials {
+	/** Only set on the separate origin-bound design credential. */
+	designScope?: "design:read" | "design:draft";
 	version: typeof SCHEMA_VERSION;
 	access_token: string;
 	/** Refresh token used by refreshIfNeeded() to renew the access token. */

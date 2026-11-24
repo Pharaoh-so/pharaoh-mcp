@@ -399,7 +399,7 @@
     {
       "name": "pharaoh_setup",
       "title": "Setup",
-      "description": "Pharaoh's connection and setup status for the repo you're working in. Writes no files.\n\nCALL THIS WHEN:\n• The user asks to set up Pharaoh, or to check its setup\n• Pharaoh was just connected and the user asks what to try first\n\nRETURNS: Connection, mapped-repo and access status, a Codebase Health link, optional first-use choices, and the Pharaoh-first instructions line only when needed.",
+      "description": "Pharaoh's connection and setup status for the repo you're working in. Writes no files.\n\nCALL THIS WHEN:\n• The user asks to set up Pharaoh, or to check its setup\n• Pharaoh was just connected and the user asks what to try first\n\nFor a UI edit in a checkout with the Pharaoh CLI installed, run pharaoh-mcp design context --target <file> there to find reusable components and styles.\n\nRETURNS: Connection, mapped-repo and access status, a Codebase Health link, optional first-use choices, and the Pharaoh-first instructions line only when needed.",
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",

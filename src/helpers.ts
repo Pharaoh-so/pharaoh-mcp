@@ -402,6 +402,7 @@ export function parseArgs(argv: string[] = process.argv.slice(2)): {
 export function printUsage(): void {
 	printLines(
 		"Usage: pharaoh-mcp [options]",
+		"       pharaoh-mcp design [context|login|lint|propose|bootstrap|upgrade|uninstall|logout] --help",
 		"       pharaoh-mcp install [--scope global|local] [--path <repository>] [options]",
 		"       pharaoh-mcp cleanup --client <name> --scope global|local [--path <repository>]",
 		"       pharaoh-mcp update   Verify the newest release and stage it for your next session",

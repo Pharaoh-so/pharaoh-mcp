@@ -306,8 +306,13 @@ async function main(): Promise<void> {
 	return runProxy(args, { server, serverArgv, feedClient, feedRegistration });
 }
 
-/** `update`, `cleanup`, or a question tool's name (the shell CLI). False when the arguments start with none of them. */
+/** Dispatch a named CLI command before interpreting flags for the interactive installer. */
 async function runSubcommand(args: string[]): Promise<boolean> {
+	if (args[0] === "design") {
+		const { runDesignCommand } = await import("./design-cli.js");
+		process.exitCode = await runDesignCommand(args.slice(1));
+		return true;
+	}
 	if (args[0] === "update") {
 		const { runUpdateCommand } = await import("./update.js");
 		process.exitCode = await runUpdateCommand(args.slice(1));

@@ -11,6 +11,8 @@ metadata: {"openclaw": {"always": true}, "tags": ["code-intelligence", "architec
 
 Pharaoh maps codebases into queryable knowledge graphs — functions, dependencies, modules, connections. No source code stored. For questions about how code connects, one Pharaoh call answers what grep and file reads take many turns to piece together.
 
+Before changing a UI file, call `design_context` with the repository-relative target when it appears in the installed tool list. From a shell in the checkout, run `pharaoh-mcp design context --target <file>`. Use its declarations, callers, and tokens with the reported coverage and approval status.
+
 ## When to Use
 
 This skill loads automatically in sessions where Pharaoh MCP tools are available. It is not manually invoked — it activates when the `pharaoh` MCP server is connected and tools like `get_codebase_map` are present.

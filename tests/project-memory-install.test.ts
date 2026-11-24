@@ -2223,6 +2223,54 @@ it("opts one existing Claude installation into review with capture off and prese
 	expect(readJson(settings).hooks.Stop).toBeUndefined();
 });
 
+it.each([
+	"global",
+	"local",
+])("leaves the %s receipt worker in place when HOME has a linked ancestor", (kind) => {
+	const profiles = join(home, "profiles");
+	const canonicalHome = join(profiles, "user");
+	mkdirSync(canonicalHome, { recursive: true });
+	const linkedProfiles = join(home, "linked-profiles");
+	symlinkSync(profiles, linkedProfiles, "dir");
+	const linkedHome = join(linkedProfiles, "user");
+	const scope = kind === "local" ? { kind: "local" as const, root: checkout } : undefined;
+	const options = { ...installOptions(), home: linkedHome, scope };
+	writeCredentials(credentials, join(linkedHome, ".pharaoh/credentials.json"));
+	writeHookPreferences({ "claude-code": reviewChoice }, linkedHome);
+	expect(
+		configure({
+			...options,
+			enable: true,
+			clients: ["claude-code"],
+			graphClients: ["claude-code"],
+		}),
+	).toEqual([]);
+	expect(configureChangeReview(true, options)).toEqual([]);
+
+	const state = memoryClientRoot(canonicalHome);
+	const pin = join(state, packagedMemoryBundle(packageRoot).sha256, "pharaoh-memory-hook.mjs");
+	const plugin = scope
+		? join(checkout, ".claude/skills/pharaoh-change-review-local")
+		: join(canonicalHome, ".claude/skills/pharaoh-change-review");
+	const module = join(plugin, "hooks/register.js");
+	expect(readFileSync(module, "utf8")).toContain(JSON.stringify(realpathSync(pin)));
+	const ledgers = readdirSync(state).filter((name) => name.startsWith("receipt-plugin-"));
+	expect(ledgers).toHaveLength(1);
+	const files = [module, join(state, ledgers[0])];
+	const snapshot = () =>
+		files.map((file) => {
+			const { ino, mtimeNs } = lstatSync(file, { bigint: true });
+			return { ino, mtimeNs, contents: readFileSync(file, "utf8") };
+		});
+	const installed = snapshot();
+	for (const startupHome of [linkedHome, canonicalHome]) {
+		expect(
+			ensureMemoryHooks({ name: "claude-code" }, credentials, { ...options, home: startupHome }),
+		).toEqual([]);
+		expect(snapshot()).toEqual(installed);
+	}
+});
+
 it("keeps the Local receipt plugin private and preserves an edited file and disabled choice", () => {
 	const scope = { kind: "local" as const, root: checkout };
 	const options = { ...installOptions(), scope };

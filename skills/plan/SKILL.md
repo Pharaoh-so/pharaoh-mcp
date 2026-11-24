@@ -13,6 +13,13 @@ Architecture-aware plan review before implementation.<!-- only: npx --> Adapted 
 
 **This is a review: make no code changes during it. Think, evaluate, and present decisions.**
 
+<!-- only: npx -->
+Before changing a UI file, call `design_context` with the repository-relative target when it appears in the installed tool list. From a shell in the checkout, run `pharaoh-mcp design context --target <file>`. Use its declarations, callers, and tokens with the reported coverage and approval status.
+<!-- /only -->
+<!-- only: connector, plugin -->
+For a UI change in a checkout with the Pharaoh CLI installed, run `pharaoh-mcp design context --target <file>` there to find reusable components and styles. Use the reported coverage and approval status.
+<!-- /only -->
+
 ## When to Use
 
 Before any multi-step implementation or architectural change. When given a PRD, spec, or plan document to evaluate before writing code.

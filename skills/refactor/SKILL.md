@@ -11,6 +11,13 @@ metadata: {"tags": ["refactoring", "blast-radius", "architecture", "pharaoh", "s
 
 Step-by-step workflow to safely refactor a function or module with full blast radius awareness. Six steps map the detected callers, find the affected tests, flag unreachable code, and warn about high-risk downstream paths before a single line changes.
 
+<!-- only: npx -->
+Before changing a UI file, call `design_context` with the repository-relative target when it appears in the installed tool list. From a shell in the checkout, run `pharaoh-mcp design context --target <file>`. Use its declarations, callers, and tokens with the reported coverage and approval status.
+<!-- /only -->
+<!-- only: connector, plugin -->
+For a UI change in a checkout with the Pharaoh CLI installed, run `pharaoh-mcp design context --target <file>` there to find reusable components and styles. Use the reported coverage and approval status.
+<!-- /only -->
+
 ## When to Use
 
 Invoke before refactoring a function, module, or file in a repo Pharaoh maps — especially shared utilities, exports used across multiple modules, or anything with an unclear caller graph. Use it whenever the blast radius of a change is unknown.

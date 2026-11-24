@@ -330,6 +330,7 @@ export function fingerprintLocalSources(
 }
 
 interface RepoSettings {
+	worktreeConfig: boolean;
 	repoSlug: string | null;
 	ignoreCase: boolean;
 	objectFormat: "sha1" | "sha256";
@@ -354,6 +355,7 @@ function windowsRepoSettings(
 function parseRepoSettings(output: string): RepoSettings | undefined {
 	if (output && !output.endsWith("\0")) return;
 	const urls: string[] = [];
+	let worktreeConfig = false;
 	let ignoreCase = false;
 	let objectFormat: RepoSettings["objectFormat"] = "sha1";
 	for (const entry of output.slice(0, -1).split("\0")) {
@@ -365,10 +367,14 @@ function parseRepoSettings(output: string): RepoSettings | undefined {
 		if (
 			/^include(?:if)?\./.test(key) ||
 			key === "core.excludesfile" ||
-			key === "core.attributesfile" ||
-			key === "extensions.worktreeconfig"
+			key === "core.attributesfile"
 		)
 			return;
+		if (key === "extensions.worktreeconfig") {
+			if (separator < 0 || /^(?:true|yes|on|1)$/i.test(value)) worktreeConfig = true;
+			else if (/^(?:false|no|off|0)?$/i.test(value)) worktreeConfig = false;
+			else return;
+		}
 		if (key === "remote.origin.url") urls.push(value);
 		if (key === "core.ignorecase") {
 			if (separator < 0 || /^(?:true|yes|on|1)$/i.test(value)) ignoreCase = true;
@@ -382,7 +388,34 @@ function parseRepoSettings(output: string): RepoSettings | undefined {
 	}
 	const repoSlug =
 		urls.length === 0 ? null : urls.length === 1 ? classifyOrigin(urls[0]) : undefined;
-	return repoSlug === undefined ? undefined : { repoSlug, ignoreCase, objectFormat };
+	return repoSlug === undefined
+		? undefined
+		: { repoSlug, ignoreCase, objectFormat, worktreeConfig };
+}
+
+/** Codex stores an inert launch preference alongside the Git worktree. Git overrides stay unsupported. */
+function supportedWorktreeConfig(
+	settings: RepoSettings,
+	layout: GitLayout,
+	reader: string,
+	deadline: number,
+) {
+	if (!settings.worktreeConfig) return true;
+	const local = confinedMetadata(
+		reader,
+		layout.gitDir,
+		layout.gitIdentity,
+		["config.worktree"],
+		deadline,
+		MAX_GIT_CONFIG + 5,
+	)?.get("config.worktree");
+	if (local?.status === 1) return true;
+	if (local?.status !== 0) return false;
+	const text = local.bytes.toString("utf8").trim();
+	return (
+		!text ||
+		/^\[codex\][\t ]*\r?\n[\t ]*localEnvironmentConfigPath[\t ]*=[\t ]*[^\r\n\\;#]+$/i.test(text)
+	);
 }
 
 function resolveWindowsCheckout(cwd: string, reader: string, deadline: number): CheckoutEvidence {
@@ -401,7 +434,7 @@ function resolveWindowsCheckout(cwd: string, reader: string, deadline: number): 
 		MAX_GIT_CONFIG + 5,
 	);
 	const settings = windowsRepoSettings(windows, metadata?.get("config"), deadline);
-	if (!settings) return unavailable;
+	if (!settings || !supportedWorktreeConfig(settings, layout, reader, deadline)) return unavailable;
 	if (settings.repoSlug === null) return hostedOnly;
 	const [device, inode] = layout.rootIdentity.split(" ");
 	return {
@@ -544,7 +577,8 @@ export function resolveLocalCheckout(
 			MAX_GIT_CONFIG + 5,
 		);
 		const settings = posixRepoSettings(executable, config?.get("config"), deadline);
-		if (!settings) return unavailable;
+		if (!settings || !supportedWorktreeConfig(settings, layout, packaged, deadline))
+			return unavailable;
 		if (settings.repoSlug === null) return hostedOnly;
 		const [device, inode] = layout.rootIdentity.split(" ");
 		return {
@@ -678,6 +712,7 @@ function windowsInventory(
 	const settings = windowsRepoSettings(windows, common?.get("config"), deadline);
 	if (
 		!settings ||
+		!supportedWorktreeConfig(settings, layout, reader, deadline) ||
 		settings.repoSlug !== checkout.repoSlug ||
 		!index ||
 		index.status > 1 ||
@@ -879,6 +914,7 @@ function posixInventory(
 		const settings = posixRepoSettings(executable, common?.get("config"), deadline);
 		if (
 			!settings ||
+			!supportedWorktreeConfig(settings, layout, reader, deadline) ||
 			settings.repoSlug !== checkout.repoSlug ||
 			!index ||
 			index.status > 1 ||

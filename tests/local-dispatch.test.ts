@@ -1,6 +1,15 @@
 /** Verify the local blast-radius claim can never become an upstream route on failure. */
 
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	cpSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -70,6 +79,25 @@ describe("saved-worktree routing", () => {
 				}),
 			);
 			expect(installedLocalAnalyzer(proxy)?.savedExportInventoryV1).toBe(true);
+			const store = join(scratch, "node_modules", ".pnpm");
+			const pnpmProxy = join(store, "@pharaoh-so+mcp@4.0.0", "node_modules", "@pharaoh-so", "mcp");
+			const pnpmAnalyzer = join(
+				store,
+				"@pharaoh-so+local-analyzer@1.2.3",
+				"node_modules",
+				"@pharaoh-so",
+				"local-analyzer",
+			);
+			mkdirSync(dirname(pnpmProxy), { recursive: true });
+			mkdirSync(dirname(pnpmAnalyzer), { recursive: true });
+			cpSync(proxy, pnpmProxy, { recursive: true });
+			cpSync(analyzer, pnpmAnalyzer, { recursive: true });
+			const link = join(dirname(pnpmProxy), "local-analyzer");
+			symlinkSync(pnpmAnalyzer, link, "junction");
+			expect(installedLocalAnalyzer(pnpmProxy)?.root).toBe(pnpmAnalyzer);
+			rmSync(link);
+			symlinkSync(analyzer, link, "junction");
+			expect(installedLocalAnalyzer(pnpmProxy)).toBeUndefined();
 			rmSync(reader);
 			expect(localAnalyzerInstallStatus(proxy)).toBe("repair-needed");
 		} finally {

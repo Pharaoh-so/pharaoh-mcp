@@ -11,6 +11,8 @@ A review always reaches a verdict. When a phase needs something your client does
 
 Final verdict: **SHIP** / **SHIP WITH CHANGES** / **BLOCK**
 
+For a UI change in a checkout with the Pharaoh CLI installed, run `pharaoh-mcp design context --target <file>` there to find reusable components and styles. Use the reported coverage and approval status.
+
 ## When to Use
 
 Before merging any branch. Before opening any PR. When reviewing changes that touch shared modules, export new functions, modify core data flows, or claim to implement a spec.
