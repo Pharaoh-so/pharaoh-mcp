@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude Code can discover Pharaoh’s tools on the first edit even when the hosted tool list is slow. The proxy supplies the catalog shipped with the package, then asks Claude to reload the live descriptions when they become available.
+
 - In an interactive Claude Code chat, an enabled change review now shows its verified catch after the final reply, even when another Stop hook keeps Claude working. The receipt needs Claude Code to load the completion plugin. Older clients and sessions where the plugin is disabled or blocked keep the local proof without showing a receipt. For a Local installation, start Claude Code at the repository root.
 
 - After you agree to restart Claude Desktop, `install` no longer waits out 30 seconds when you then say no to Desktop's own quit question. It can't see that answer, so from 2 seconds in the line reads `Waiting for Claude Desktop to quit · Enter skips`, and Enter ends the wait. A Desktop left open gets one line saying what it's missing (`No Pharaoh until you quit it and run the install again.`, or `Stays on an older Pharaoh until…` when it had Pharaoh already) and no "restart it and ask" after it. When the check for a running Desktop fails, `install` no longer takes that to mean Desktop is closed.

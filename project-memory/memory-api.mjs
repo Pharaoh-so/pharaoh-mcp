@@ -6,6 +6,27 @@ const REQUEST_TIMEOUT_MS = 12_000;
 const BUILD = new URL("runtime/refresh.js", import.meta.url);
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const STATUS = new Set(["candidate", "approved", "superseded", "retracted", "archived"]);
+const UNCONFIRMED_CAPTURE =
+	"Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying.";
+const UNAVAILABLE = "Pharaoh project memory is temporarily unavailable.";
+const PAYLOAD_REJECTED =
+	"Pharaoh rejected the memory payload. Check its shape, size, and sensitive content.";
+/** Refusals by HTTP status: the message, and the status a caller can act on. All are rejections. */
+const REFUSALS = new Map([
+	// The shared credential file can now name a different OAuth session. Do
+	// not reuse an already prepared operation under newly loaded credentials.
+	[401, ["Pharaoh rejected this sign-in. Reconnect before trying again.", 401]],
+	[404, ["Project memory is unavailable for this repository or account.", 404]],
+	[400, [PAYLOAD_REJECTED]],
+	[413, [PAYLOAD_REJECTED]],
+	[
+		409,
+		[
+			"Pharaoh could not save this candidate because the operation conflicts or the project log is full.",
+		],
+	],
+	[429, ["Pharaoh project memory reached its request limit.", 429]],
+]);
 
 export class PilotError extends Error {
 	constructor(message, rejected = false, status = undefined) {
@@ -111,6 +132,7 @@ export function requireMemoryEgress(binding, operation, options) {
 	}
 }
 
+/** Send one project memory operation and return Pharaoh's answer once it has the operation's shape. */
 export async function requestMemory(
 	operation,
 	payload,
@@ -139,6 +161,22 @@ export async function requestMemory(
 		throw new PilotError("Unknown memory request.");
 	const privacy = { home };
 	requireMemoryEgress(binding, operation, privacy);
+	const session = await signedIn(credentials, helper);
+	payload = await withClientDiagnostics(operation, payload, client, home);
+	requireMemoryEgress(binding, operation, privacy);
+	if (operation === "diagnostics") {
+		payload = diagnosticsForEgress(payload, privacy);
+		if (!payload) return { acceptedEventIds: [], rejectedEventIds: [] };
+	}
+	const response = await send(fetcher, operation, payload, session, timeoutMs);
+	if (!response.ok) throw await refusal(response, operation);
+	const result = await answer(response, operation);
+	return checkedAnswer(operation, payload, result, () =>
+		memoryEgressDecision(binding, operation, privacy),
+	);
+}
+
+async function signedIn(credentials, helper) {
 	// Capture supplies its session snapshot so dispatch cannot adopt a different sign-in.
 	if (!credentials) {
 		const { originBoundRefresh } = helper ?? (await refreshHelper());
@@ -149,31 +187,35 @@ export async function requestMemory(
 		throw new PilotError(
 			"Connect to Pharaoh with its device sign-in, or retry if sign-in is temporarily unavailable.",
 		);
-	if (["recall", "expand", "capture"].includes(operation) && (client || payload.client)) {
-		const { memoryDiagnosticsForClient } = await import("./preferences.mjs");
-		const diagnostic = memoryDiagnosticsForClient({ name: client ?? payload.client }, home);
-		if (diagnostic || payload.diagnostics) {
-			const claimed = payload.diagnostics;
-			const baseline = Object.fromEntries(
-				["taskSummary", "intendedNextAction", "turnRef", "sessionRef", "recallId"].flatMap((key) =>
-					claimed?.[key] === undefined ? [] : [[key, claimed[key]]],
-				),
-			);
-			payload = { ...payload, diagnostics: { ...baseline, ...diagnostic } };
-		}
-	}
-	requireMemoryEgress(binding, operation, privacy);
-	if (operation === "diagnostics") {
-		const events = (Array.isArray(payload.events) ? payload.events : []).flatMap((event) => {
-			const safe = diagnosticEventForEgress(payload.client, event, privacy);
-			return safe ? [safe] : [];
-		});
-		if (!events.length) return { acceptedEventIds: [], rejectedEventIds: [] };
-		payload = { ...payload, events };
-	}
-	let response;
+	return credentials;
+}
+
+async function withClientDiagnostics(operation, payload, client, home) {
+	if (!["recall", "expand", "capture"].includes(operation) || !(client || payload.client))
+		return payload;
+	const { memoryDiagnosticsForClient } = await import("./preferences.mjs");
+	const diagnostic = memoryDiagnosticsForClient({ name: client ?? payload.client }, home);
+	if (!diagnostic && !payload.diagnostics) return payload;
+	const claimed = payload.diagnostics;
+	const baseline = Object.fromEntries(
+		["taskSummary", "intendedNextAction", "turnRef", "sessionRef", "recallId"].flatMap((key) =>
+			claimed?.[key] === undefined ? [] : [[key, claimed[key]]],
+		),
+	);
+	return { ...payload, diagnostics: { ...baseline, ...diagnostic } };
+}
+
+function diagnosticsForEgress(payload, privacy) {
+	const events = (Array.isArray(payload.events) ? payload.events : []).flatMap((event) => {
+		const safe = diagnosticEventForEgress(payload.client, event, privacy);
+		return safe ? [safe] : [];
+	});
+	return events.length ? { ...payload, events } : null;
+}
+
+async function send(fetcher, operation, payload, credentials, timeoutMs) {
 	try {
-		response = await fetcher(`${PROJECT_MEMORY_ORIGIN}/api/project-memory/${operation}`, {
+		return await fetcher(`${PROJECT_MEMORY_ORIGIN}/api/project-memory/${operation}`, {
 			method: "POST",
 			redirect: "error",
 			headers: {
@@ -186,140 +228,120 @@ export async function requestMemory(
 	} catch {
 		throw new PilotError(
 			operation === "capture"
-				? "Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying."
+				? UNCONFIRMED_CAPTURE
 				: "Pharaoh project memory could not respond before the request ended.",
 		);
 	}
-	if (!response.ok) {
-		if (response.status === 403) {
-			// The repo's plan keeps memories without giving them back: show Pharaoh's one line.
-			const body = await responseJson(response).catch(() => null);
-			const locked = body?.error === "locked" && typeof body.message === "string";
-			throw new PilotError(
-				locked ? body.message.slice(0, 500) : "Pharaoh project memory is temporarily unavailable.",
-				true,
-				locked ? 403 : undefined,
-			);
-		}
-		await response.body?.cancel();
-		// The shared credential file can now name a different OAuth session. Do
-		// not reuse an already prepared operation under newly loaded credentials.
-		if (response.status === 401)
-			throw new PilotError(
-				"Pharaoh rejected this sign-in. Reconnect before trying again.",
-				true,
-				401,
-			);
-		if (response.status === 404)
-			throw new PilotError(
-				"Project memory is unavailable for this repository or account.",
-				true,
-				404,
-			);
-		if (response.status === 400 || response.status === 413)
-			throw new PilotError(
-				"Pharaoh rejected the memory payload. Check its shape, size, and sensitive content.",
-				true,
-			);
-		if (response.status === 409)
-			throw new PilotError(
-				"Pharaoh could not save this candidate because the operation conflicts or the project log is full.",
-				true,
-			);
-		if (response.status === 429)
-			throw new PilotError("Pharaoh project memory reached its request limit.", true, 429);
-		if (operation === "capture" && response.status >= 500) {
-			throw new PilotError(
-				"Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying.",
-			);
-		}
-		throw new PilotError(
-			"Pharaoh project memory is temporarily unavailable.",
-			response.status >= 400 && response.status < 500,
-		);
+}
+
+async function refusal(response, operation) {
+	if (response.status === 403) {
+		// The repo's plan keeps memories without giving them back: show Pharaoh's one line.
+		const body = await responseJson(response).catch(() => null);
+		const locked = body?.error === "locked" && typeof body.message === "string";
+		return locked
+			? new PilotError(body.message.slice(0, 500), true, 403)
+			: new PilotError(UNAVAILABLE, true);
 	}
-	let result;
+	await response.body?.cancel();
+	const known = REFUSALS.get(response.status);
+	if (known) return new PilotError(known[0], true, known[1]);
+	if (operation === "capture" && response.status >= 500) return new PilotError(UNCONFIRMED_CAPTURE);
+	return new PilotError(UNAVAILABLE, response.status >= 400 && response.status < 500);
+}
+
+async function answer(response, operation) {
 	try {
-		result = await responseJson(response);
+		return await responseJson(response);
 	} catch (error) {
-		if (operation === "capture")
-			throw new PilotError(
-				"Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying.",
-			);
+		if (operation === "capture") throw new PilotError(UNCONFIRMED_CAPTURE);
 		throw error;
 	}
+}
+
+/** `egress` is asked only once an answer may carry a feedback request. */
+function checkedAnswer(operation, payload, result, egress) {
 	if (["diagnostics", "diagnostics/control", "feedback"].includes(operation)) return result;
 	if (operation === "forget") return { forgotten: result?.forgotten === true };
 	if (operation === "anchored" && Array.isArray(result?.records))
 		return { records: result.records.filter((record) => UUID.test(record?.id ?? "")) };
+	if (result && typeof result === "object" && egress() === "blocked") delete result.feedbackRequest;
+	const shaped = shapedAnswer(operation, payload, result);
+	if (shaped) return shaped;
+	throw new PilotError(
+		operation === "capture" ? UNCONFIRMED_CAPTURE : "Pharaoh returned an incomplete response.",
+	);
+}
+
+function shapedAnswer(operation, payload, result) {
+	if (operation === "recall" && isRecall(result)) return recallAnswer(payload, result);
+	if (operation === "expand" && isExpansion(payload, result)) return expansionAnswer(result);
 	if (
-		result &&
-		typeof result === "object" &&
-		memoryEgressDecision(binding, operation, privacy) === "blocked"
-	) {
-		delete result.feedbackRequest;
-	}
-	if (
-		operation === "recall" &&
+		operation === "capture" &&
+		typeof result?.record?.id === "string" &&
+		UUID.test(result.record.id)
+	)
+		return captureAnswer(result);
+}
+
+function isRecall(result) {
+	return (
 		Array.isArray(result?.records) &&
 		result.records.length <= 5 &&
 		result.records.every((record) => typeof record?.id === "string" && UUID.test(record.id))
-	) {
-		if (payload.format === "compact-v1") {
-			if (
-				result.format === "compact-v1" &&
-				typeof result.repo === "string" &&
-				result.repo.toLowerCase() === payload.repo.toLowerCase() &&
-				typeof result.moreMatches === "boolean" &&
-				Number.isInteger(result.omittedRecords) &&
-				result.omittedRecords >= 0 &&
-				result.records.every(
-					(record) =>
-						Number.isInteger(record.version) &&
-						record.version >= 1 &&
-						record.version <= 1_000_000 &&
-						STATUS.has(record.status),
-				)
-			)
-				return result;
-			throw new PilotError("Pharaoh returned an incomplete compact recall packet.");
-		}
+	);
+}
+
+function recallAnswer(payload, result) {
+	if (payload.format !== "compact-v1")
 		return { records: result.records, graph: result.graph, ...diagnosticResponseFields(result) };
-	}
 	if (
-		operation === "expand" &&
+		result.format === "compact-v1" &&
+		typeof result.repo === "string" &&
+		result.repo.toLowerCase() === payload.repo.toLowerCase() &&
+		typeof result.moreMatches === "boolean" &&
+		Number.isInteger(result.omittedRecords) &&
+		result.omittedRecords >= 0 &&
+		result.records.every(
+			(record) =>
+				Number.isInteger(record.version) &&
+				record.version >= 1 &&
+				record.version <= 1_000_000 &&
+				STATUS.has(record.status),
+		)
+	)
+		return result;
+	throw new PilotError("Pharaoh returned an incomplete compact recall packet.");
+}
+
+function isExpansion(payload, result) {
+	return (
 		result?.record?.id === payload.id &&
 		result.record.version === payload.version &&
 		STATUS.has(result.record.status) &&
 		Number.isInteger(result.current?.version) &&
 		result.current.version >= payload.version &&
 		STATUS.has(result.current.status)
-	) {
-		const omitted = result.omittedHistoricalEvidence;
-		return {
-			record: result.record,
-			current: result.current,
-			...diagnosticResponseFields(result),
-			...(Number.isInteger(omitted) && omitted >= 0 && { omittedHistoricalEvidence: omitted }),
-		};
-	}
-	if (
-		operation === "capture" &&
-		typeof result?.record?.id === "string" &&
-		UUID.test(result.record.id)
-	) {
-		return {
-			record: {
-				id: result.record.id,
-				status: result.record.status,
-				...(Number.isInteger(result.record.version) && { version: result.record.version }),
-			},
-			...diagnosticResponseFields(result),
-		};
-	}
-	if (operation === "capture")
-		throw new PilotError(
-			"Pharaoh did not confirm whether this capture was saved. Check the project memory inspector before retrying.",
-		);
-	throw new PilotError("Pharaoh returned an incomplete response.");
+	);
+}
+
+function expansionAnswer(result) {
+	const omitted = result.omittedHistoricalEvidence;
+	return {
+		record: result.record,
+		current: result.current,
+		...diagnosticResponseFields(result),
+		...(Number.isInteger(omitted) && omitted >= 0 && { omittedHistoricalEvidence: omitted }),
+	};
+}
+
+function captureAnswer(result) {
+	return {
+		record: {
+			id: result.record.id,
+			status: result.record.status,
+			...(Number.isInteger(result.record.version) && { version: result.record.version }),
+		},
+		...diagnosticResponseFields(result),
+	};
 }

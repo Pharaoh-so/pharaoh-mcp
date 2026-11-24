@@ -35,6 +35,8 @@ vi.mock("../src/auth.js", async () => {
 });
 
 import type { DeviceFlowGateway, ToolAuthResponse } from "../src/gateway.js";
+import type { LocalBlastRuntime } from "../src/local/contracts.js";
+import { NATIVE_SHARE_TOOL, NativeFeedRuntime } from "../src/native-feed.js";
 import { TenantSuspendedError, TokenExpiredError } from "../src/proxy.js";
 import { ProxyServer } from "../src/proxy-server.js";
 
@@ -86,7 +88,7 @@ class StubBackend implements Backend {
 
 /** Wire a ProxyServer to an in-memory Client. Returns both for test assertions. */
 async function wireClientAndServer(
-	initial: Backend,
+	initial: Backend | ProxyServer,
 	capabilities: ClientCapabilities = {},
 ): Promise<{
 	client: Client;
@@ -94,7 +96,7 @@ async function wireClientAndServer(
 	closeAll: () => Promise<void>;
 }> {
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-	const proxy = new ProxyServer(initial);
+	const proxy = initial instanceof ProxyServer ? initial : new ProxyServer(initial);
 	// biome-ignore lint/suspicious/noExplicitAny: InMemoryTransport doesn't match StdioServerTransport nominally but implements Transport
 	await proxy.startWithTransport(serverTransport as any);
 	const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities });
@@ -214,6 +216,293 @@ describe("ProxyServer with AuthRequiredBackend", () => {
 		const res = await harness.client.callTool({ name: "search_functions", arguments: {} });
 		expect(res.isError).toBe(true);
 		expect(gatewayCalls()).toBe(1);
+	});
+});
+
+describe("hosted tool discovery over MCP", () => {
+	type DiscoveryOptions = Parameters<Backend["listTools"]>[0];
+	const tools: Tool[] = [
+		{
+			name: "live_lookup",
+			description: "Live deployment schema",
+			inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+			_meta: { "pharaoh/deployment": "live" },
+		},
+	];
+	const answer: CallToolResult = { content: [{ type: "text", text: "Hosted answer" }] };
+	let harness: Awaited<ReturnType<typeof wireClientAndServer>> | undefined;
+
+	function gate() {
+		let open!: () => void;
+		const waits = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		return { waits, open };
+	}
+
+	// Protocol messages and the post-reply refresh run normally; only deadlines use fake time.
+	const nextLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+	const local: LocalBlastRuntime = {
+		invocation: { kind: "hosted-only" },
+		canDeferHostedStartup: () => true,
+		consume: () => undefined,
+		answer: async () => {
+			throw new Error("Expected hosted dispatch");
+		},
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+	});
+	afterEach(async () => {
+		await harness?.closeAll();
+		harness = undefined;
+		vi.useRealTimers();
+	});
+
+	it("hands the notified client the fetched live schemas when every upstream list takes eight seconds", async () => {
+		const listTools = vi.fn(async (options?: DiscoveryOptions) => {
+			await new Promise<void>((resolve) => setTimeout(resolve, 8000));
+			options?.signal?.throwIfAborted();
+			return tools;
+		});
+		const backend = { name: "sse" as const, listTools, callTool: vi.fn(async () => answer) };
+		let visible = false;
+		const feed = new NativeFeedRuntime({
+			client: "claude-code",
+			registration: "fixture",
+			server: "https://example.test",
+			serverArgv: [],
+			cwd: tmpdir(),
+		});
+		vi.spyOn(feed, "available").mockImplementation(() => visible);
+		vi.spyOn(feed, "close").mockImplementation(() => {});
+		const proxy = new ProxyServer(
+			backend,
+			undefined,
+			{ ...local, canCheckReadiness: () => visible },
+			undefined,
+			undefined,
+			feed,
+		);
+		harness = await wireClientAndServer(proxy);
+		const { client } = harness;
+		const relist = vi.fn(() => client.listTools());
+		client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+			await relist();
+		});
+
+		const first = client.listTools();
+		const second = client.listTools();
+		await nextLoop();
+		await vi.advanceTimersByTimeAsync(4999);
+		visible = true;
+		await vi.advanceTimersByTimeAsync(1);
+		const expected = [
+			...loadBundledCatalog().tools,
+			NATIVE_SHARE_TOOL,
+			expect.objectContaining({ name: "pharaoh_local_worktree_status" }),
+		];
+		expect((await first).tools).toEqual(expected);
+		expect((await second).tools).toEqual(expected);
+		await nextLoop();
+		expect(listTools).toHaveBeenCalledTimes(3);
+		expect(listTools.mock.calls.map(([options]) => options?.signal?.aborted)).toEqual([
+			true,
+			true,
+			false,
+		]);
+		await vi.advanceTimersByTimeAsync(7000);
+		expect(relist).not.toHaveBeenCalled();
+
+		visible = false;
+		await vi.advanceTimersByTimeAsync(1000);
+		await nextLoop();
+		expect(relist).toHaveBeenCalledTimes(1);
+		expect(listTools).toHaveBeenCalledTimes(3);
+		expect((await relist.mock.results[0].value).tools).toEqual(tools);
+		expect(await client.callTool({ name: "live_lookup", arguments: { path: "entry.ts" } })).toEqual(
+			answer,
+		);
+		expect(backend.callTool).toHaveBeenCalledTimes(1);
+
+		const later = client.listTools();
+		await nextLoop();
+		expect(listTools).toHaveBeenCalledTimes(4);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect((await later).tools).toEqual(loadBundledCatalog().tools);
+		await nextLoop();
+		expect(listTools).toHaveBeenCalledTimes(5);
+	});
+
+	it.each([
+		"direct",
+		"deferred",
+	])("retries a fifteen-second %s readiness failure and automatically delivers live schemas", async (mode) => {
+		let attempts = 0;
+		const listTools = vi.fn(async (options?: DiscoveryOptions) => {
+			if (++attempts <= 2) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 15_000));
+				options?.signal?.throwIfAborted();
+				throw new Error("Pharaoh connection is still recovering");
+			}
+			return tools;
+		});
+		const backend = { name: "sse" as const, listTools, callTool: vi.fn(async () => answer) };
+		harness = await wireClientAndServer(
+			mode === "deferred" ? new ProxyServer(backend, undefined, local) : backend,
+		);
+		const { client } = harness;
+		const relist = vi.fn(() => client.listTools());
+		client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+			await relist();
+		});
+		const first = client.listTools();
+		await nextLoop();
+		await vi.advanceTimersByTimeAsync(5000);
+		expect((await first).tools).toEqual(loadBundledCatalog().tools);
+		await nextLoop();
+		await vi.advanceTimersByTimeAsync(14_999);
+		expect(relist).not.toHaveBeenCalled();
+		// Only the proxy retries. The client sends a single relist when it is notified.
+		await vi.advanceTimersByTimeAsync(2000);
+		// Some Node versions keep the imported timers/promises backoff on the real clock.
+		await vi.waitFor(() => expect(relist).toHaveBeenCalledTimes(1), { timeout: 2500 });
+		expect(listTools).toHaveBeenCalledTimes(3);
+		expect((await relist.mock.results[0].value).tools).toEqual(tools);
+		expect(await client.callTool({ name: "live_lookup", arguments: { path: "entry.ts" } })).toEqual(
+			answer,
+		);
+		expect(backend.callTool).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		"cancel",
+		"deadline",
+	])("waits for shared deferred startup and handles a foreground %s", async (end) => {
+		const startup = gate();
+		const backend = {
+			name: "sse" as const,
+			start: vi.fn(() => startup.waits),
+			listTools: vi.fn(async () => tools),
+			callTool: async () => answer,
+		};
+		harness = await wireClientAndServer(new ProxyServer(backend, undefined, local));
+		const { client } = harness;
+		const noticed = vi.fn();
+		client.setNotificationHandler(ToolListChangedNotificationSchema, noticed);
+		const cancel = new AbortController();
+		const first = client.listTools(undefined, { signal: cancel.signal });
+		await nextLoop();
+		if (end === "cancel") {
+			const rejection = expect(first).rejects.toThrow();
+			cancel.abort(new Error("Caller canceled discovery"));
+			await rejection;
+		}
+		await vi.advanceTimersByTimeAsync(5000);
+		if (end === "deadline") expect((await first).tools).toEqual(loadBundledCatalog().tools);
+		await nextLoop();
+		expect(backend.start).toHaveBeenCalledTimes(1);
+		expect(backend.listTools).not.toHaveBeenCalled();
+		startup.open();
+		await nextLoop();
+		// The expired/canceled foreground request never dispatches. A deadline starts one refresh.
+		expect(backend.listTools).toHaveBeenCalledTimes(end === "deadline" ? 1 : 0);
+		expect(noticed).toHaveBeenCalledTimes(end === "deadline" ? 1 : 0);
+	});
+
+	it("bounds capability negotiation and leaves discovery of its replacement to the swap notification", async () => {
+		const negotiation = gate();
+		const replacement = {
+			name: "sse" as const,
+			start: () => negotiation.waits,
+			listTools: vi.fn(async () => tools),
+			callTool: async () => answer,
+		};
+		const original = {
+			name: "sse" as const,
+			withClientCapabilities: () => replacement,
+			listTools: vi.fn(async () => []),
+			callTool: async () => answer,
+		};
+		harness = await wireClientAndServer(original);
+		const { client } = harness;
+		const changed = vi.fn();
+		client.setNotificationHandler(ToolListChangedNotificationSchema, changed);
+		const first = client.listTools();
+		await nextLoop();
+		await vi.advanceTimersByTimeAsync(5000);
+		expect((await first).tools).toEqual(loadBundledCatalog().tools);
+		await nextLoop();
+		negotiation.open();
+		await nextLoop();
+		expect(changed).toHaveBeenCalledTimes(1);
+		expect(original.listTools).not.toHaveBeenCalled();
+		expect(replacement.listTools).not.toHaveBeenCalled();
+		expect((await client.listTools()).tools).toEqual(tools);
+	});
+
+	it.each([
+		"swap",
+		"shutdown",
+		"transport close",
+		"refresh deadline",
+	])("discards a late hosted refresh after %s", async (end) => {
+		const upstream = gate();
+		const listTools = vi.fn(async (_options?: DiscoveryOptions) => {
+			await upstream.waits;
+			return tools; // A backend may finish even after its signal was aborted.
+		});
+		harness = await wireClientAndServer({ name: "sse", listTools, callTool: async () => answer });
+		const { client, proxy } = harness;
+		const noticed = vi.fn();
+		client.setNotificationHandler(ToolListChangedNotificationSchema, noticed);
+		const first = client.listTools();
+		await nextLoop();
+		await vi.advanceTimersByTimeAsync(5000);
+		expect((await first).tools).toEqual(loadBundledCatalog().tools);
+		await nextLoop();
+		const refresh = listTools.mock.calls[1][0]?.signal;
+		expect(refresh?.aborted).toBe(false);
+		if (end === "swap") await proxy.setBackend(new StubBackend([], answer));
+		else if (end === "shutdown") await proxy.stop();
+		else if (end === "transport close") await client.close();
+		else await vi.advanceTimersByTimeAsync(90_000);
+		expect(refresh?.aborted).toBe(true);
+		upstream.open();
+		await nextLoop();
+		expect(noticed).toHaveBeenCalledTimes(end === "swap" ? 1 : 0);
+	});
+
+	it.each([
+		new TokenExpiredError(),
+		new TenantSuspendedError("Tenant suspended"),
+	])("keeps the deferred catalog fallback and reports %s to the supervisor", async (failure) => {
+		const startup = gate();
+		const backend = {
+			name: "sse" as const,
+			start: async () => {
+				await startup.waits;
+				throw failure;
+			},
+			listTools: vi.fn(async () => tools),
+			callTool: async () => answer,
+		};
+		harness = await wireClientAndServer(new ProxyServer(backend, undefined, local));
+		const { client, proxy } = harness;
+		const changed = vi.fn();
+		client.setNotificationHandler(ToolListChangedNotificationSchema, changed);
+		const recovered = expect(proxy.waitForLifetime()).rejects.toBe(failure);
+		const first = client.listTools();
+		await nextLoop();
+		await vi.advanceTimersByTimeAsync(5000);
+		expect((await first).tools).toEqual(loadBundledCatalog().tools);
+		await nextLoop();
+		startup.open();
+		await recovered;
+		await nextLoop();
+		expect(backend.listTools).not.toHaveBeenCalled();
+		expect(changed).not.toHaveBeenCalled();
 	});
 });
 

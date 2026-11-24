@@ -144,12 +144,13 @@ describe("Claude CLI detection for optional plugin installation", () => {
 	// uninstallClaudePlugin removes the CLAUDE.md line; on --logout it must not stand between the user and a credential wipe.
 	it("--clean and --logout remove the CLAUDE.md line, and --logout deletes credentials first", () => {
 		const main = readFileSync(join(PKG_ROOT, "src", "index.ts"), "utf-8");
-		const branch = (opening: string) => {
+		const body = (opening: string) => {
 			const start = main.indexOf(opening);
-			return main.slice(start, main.indexOf("process.exit(0)", start));
+			expect(start, opening).toBeGreaterThan(-1);
+			return main.slice(start, main.indexOf("\n}\n", start));
 		};
-		expect(branch('if (args.includes("--clean")) {')).toContain("uninstallClaudePlugin();");
-		const logout = branch("if (logout) {");
+		expect(body("async function runClean(")).toContain("uninstallClaudePlugin();");
+		const logout = body("async function signOut(");
 		expect(logout).toContain("uninstallClaudePlugin();");
 		expect(logout).toContain("await takeCredentialsForLogout();");
 		expect(logout.indexOf("await takeCredentialsForLogout();")).toBeLessThan(
