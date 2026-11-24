@@ -180,11 +180,20 @@ describe("NPX developer install", () => {
 	}
 
 	function runCli(...args: string[]) {
+		return runCliWith({}, ...args);
+	}
+
+	function runCliWith(env: Record<string, string>, ...args: string[]) {
 		const tsx = createRequire(import.meta.url).resolve("tsx/cli");
 		return spawnSync(process.execPath, [tsx, join(__dirname, "../src/index.ts"), ...args], {
 			encoding: "utf8",
 			timeout: 20_000,
-			env: { HOME: home, PATH: dirname(process.execPath), PHARAOH_MCP_DISABLE_BROWSER: "1" },
+			env: {
+				HOME: home,
+				PATH: dirname(process.execPath),
+				PHARAOH_MCP_DISABLE_BROWSER: "1",
+				...env,
+			},
 		});
 	}
 
@@ -1460,6 +1469,45 @@ printActivationPrompt({ user_code: 'ABCD-1234', verification_uri: 'https://mcp.p
 		expect(result.stderr.indexOf("BROWSER_REQUESTED")).toBeGreaterThan(
 			result.stderr.indexOf(result.url),
 		);
+	});
+
+	/**
+	 * Breaks when: the scoped cleanup command acts on arguments it can't use (an
+	 * option without its value, a Global scope with a path, Claude Desktop in a
+	 * Local scope, even of a real checkout) instead of refusing before any
+	 * filesystem work.
+	 */
+	it.each([
+		[
+			"an option without its value",
+			["cleanup", "--client", "codex", "--scope", "global", "--path"],
+			"Use cleanup --client",
+		],
+		[
+			"a Global scope with a path",
+			["cleanup", "--client", "codex", "--scope", "global", "--path", "/repo"],
+			"Use cleanup --client",
+		],
+		[
+			"Claude Desktop in a Local checkout",
+			[
+				"cleanup",
+				"--client",
+				"claude-desktop",
+				"--scope",
+				"local",
+				"--path",
+				join(__dirname, ".."),
+			],
+			"Local cleanup needs a supported coding client and Git checkout.",
+		],
+	])("refuses a scoped cleanup with %s", (_label, args, message) => {
+		// Git on the path, so the checkout resolves and only the client is refused.
+		const path = `${dirname(process.execPath)}:/usr/bin:/bin`;
+		const result = runCliWith({ PHARAOH_DEBUG: "1", PATH: path }, ...args);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain(message);
+		expect(result.stderr).not.toContain("selected installation removed");
 	});
 
 	it("routes install --help before the question-tool CLI without starting sign-in", () => {

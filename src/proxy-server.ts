@@ -22,6 +22,7 @@
  *   swaps happen internally via callbacks; the main loop does NOT re-await.
  */
 
+import { setTimeout as delay } from "node:timers/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
@@ -121,6 +122,9 @@ function withoutMemoryFeedback(result: CallToolResult): CallToolResult {
 }
 
 const deferredBackends = new WeakSet<Backend>();
+// Native clients can abandon discovery after 30s and keep an empty tool picker.
+const CATALOG_DISCOVERY_MS = 5_000;
+const CATALOG_REFRESH_MS = 90_000;
 
 /** Only a hosted operation starts SSE; its availability cannot block local dispatch. */
 function deferHostedBackend(backend: Backend): Backend {
@@ -161,6 +165,7 @@ function deferHostedBackend(backend: Backend): Backend {
 		async listTools(options) {
 			try {
 				await ensureStarted();
+				options?.signal?.throwIfAborted();
 				return await backend.listTools(options);
 			} catch {
 				options?.signal?.throwIfAborted();
@@ -191,6 +196,141 @@ function deferHostedBackend(backend: Backend): Backend {
 	return deferred;
 }
 
+/** Bound the entire request, including a shared handshake which outlives its callers. */
+async function listWithinDeadline(
+	list: (signal: AbortSignal) => Promise<Tool[]>,
+	caller: AbortSignal,
+	budget: number,
+): Promise<Tool[] | undefined> {
+	caller.throwIfAborted();
+	const controller = new AbortController();
+	const timeout = new Error("Catalog discovery deadline");
+	const cancel = () => controller.abort(caller.reason);
+	let rejectWait!: (reason: unknown) => void;
+	const interrupted = new Promise<never>((_, reject) => {
+		rejectWait = reject;
+	});
+	const interrupt = () => rejectWait(controller.signal.reason);
+	controller.signal.addEventListener("abort", interrupt, { once: true });
+	caller.addEventListener("abort", cancel, { once: true });
+	const timer = setTimeout(() => controller.abort(timeout), budget);
+	try {
+		return await Promise.race([list(controller.signal), interrupted]);
+	} catch (error) {
+		caller.throwIfAborted();
+		if (controller.signal.reason === timeout) return undefined;
+		throw error;
+	} finally {
+		clearTimeout(timer);
+		caller.removeEventListener("abort", cancel);
+		controller.signal.removeEventListener("abort", interrupt);
+	}
+}
+
+/** Own the bounded discovery and single recovery attempt for the current hosted backend. */
+function createCatalogDiscovery(
+	list: (signal: AbortSignal) => Promise<Tool[]>,
+	notify: () => Promise<void>,
+) {
+	let generation = 0;
+	let sequence = 0;
+	let refresh: AbortController | undefined;
+	let recovered: { tools: Tool[]; id: number; expires: number } | undefined;
+
+	async function discoverTools(signal: AbortSignal): Promise<Tool[]> {
+		signal.throwIfAborted();
+		const handoff = recovered;
+		recovered = undefined;
+		if (handoff && handoff.expires > Date.now()) {
+			process.stderr.write(
+				`Pharaoh: catalog ${handoff.id} relist returned recovered live tools.\n`,
+			);
+			return handoff.tools;
+		}
+
+		const owner = generation;
+		const tools = await listWithinDeadline(list, signal, CATALOG_DISCOVERY_MS);
+		signal.throwIfAborted();
+		const bundled = loadBundledCatalog().tools;
+		if (tools && tools !== bundled) return tools;
+		if (!refresh && !recovered && owner === generation) {
+			const id = ++sequence;
+			process.stderr.write(
+				`Pharaoh: catalog ${id} returned bundled tools while the hosted list was unavailable.\n`,
+			);
+			void refreshCatalog(id);
+		}
+		return bundled;
+	}
+
+	async function refreshCatalog(id: number): Promise<void> {
+		const controller = new AbortController();
+		refresh = controller;
+		try {
+			// Give the SDK a chance to send the bundled response before notifying it.
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const tools = await listWithinDeadline(
+				async (signal) => {
+					let backoff = 1000;
+					for (;;) {
+						signal.throwIfAborted();
+						try {
+							const result = await list(signal);
+							if (result !== loadBundledCatalog().tools) return result;
+						} catch (error) {
+							signal.throwIfAborted();
+							if (error instanceof TokenExpiredError || error instanceof TenantSuspendedError)
+								throw error;
+						}
+						if (backoff === 1000)
+							process.stderr.write(
+								`Pharaoh: catalog ${id} refresh is retrying hosted discovery.\n`,
+							);
+						await delay(backoff, undefined, { signal });
+						backoff = Math.min(backoff * 2, 15_000);
+					}
+				},
+				controller.signal,
+				CATALOG_REFRESH_MS,
+			);
+			if (controller.signal.aborted) return;
+			if (!tools) {
+				process.stderr.write(`Pharaoh: catalog ${id} refresh deadline elapsed.\n`);
+				return;
+			}
+			// The client's relist may have the same slow upstream. Hand it these exact schemas once.
+			recovered = { tools, id, expires: Date.now() + CATALOG_REFRESH_MS };
+			try {
+				await notify();
+				if (!controller.signal.aborted)
+					process.stderr.write(
+						`Pharaoh: catalog ${id} recovered live tools and requested a relist.\n`,
+					);
+			} catch {
+				if (!controller.signal.aborted)
+					process.stderr.write(
+						`Pharaoh: catalog ${id} could not notify the client of live tools.\n`,
+					);
+			}
+		} catch {
+			if (!controller.signal.aborted)
+				process.stderr.write(`Pharaoh: catalog ${id} could not refresh the hosted list.\n`);
+		} finally {
+			if (refresh === controller) refresh = undefined;
+		}
+	}
+
+	return {
+		discoverTools,
+		reset() {
+			generation++;
+			recovered = undefined;
+			refresh?.abort();
+			refresh = undefined;
+		},
+	};
+}
+
 /**
  * Stdio MCP server with a swappable backend. The Server instance is
  * long-lived across backend swaps; only the Backend reference moves.
@@ -210,6 +350,14 @@ export class ProxyServer {
 	private memoryNotice: string[] = [];
 	private memoryMigrationNoticed = false;
 	private capabilityUpdate: Promise<void> = Promise.resolve();
+	private readonly catalogDiscovery = createCatalogDiscovery(
+		async (signal) => {
+			await this.capabilityUpdate;
+			signal.throwIfAborted();
+			return this.backend.listTools({ signal });
+		},
+		() => this.server.sendToolListChanged(),
+	);
 	private localDeliveries = new Map<RequestId, { settle: LocalDelivery; detach: () => void }>();
 	private deliverySettlements = new Set<Promise<void>>();
 	private transportClosed: Promise<void>;
@@ -296,9 +444,12 @@ export class ProxyServer {
 	 */
 	private registerHandlers(): void {
 		this.server.setRequestHandler(ListToolsRequestSchema, async (_req, extra) => {
-			await this.capabilityUpdate;
 			extra.signal.throwIfAborted();
-			const tools = [...(await this.backend.listTools({ signal: extra.signal }))];
+			const catalog =
+				this.backend.name === "auth-required"
+					? await this.backend.listTools({ signal: extra.signal })
+					: await this.catalogDiscovery.discoverTools(extra.signal);
+			const tools = [...catalog];
 			if (this.nativeFeed?.available()) tools.push(NATIVE_SHARE_TOOL);
 			return {
 				tools: this.localBlast?.canCheckReadiness?.() ? [...tools, LOCAL_READINESS] : tools,
@@ -532,6 +683,7 @@ export class ProxyServer {
 	private watchTransport(): void {
 		// Use the protocol-level hook so the SDK transport chain remains intact.
 		this.server.onclose = () => {
+			this.catalogDiscovery.reset();
 			this.nativeFeed?.close();
 			this.localBlast?.disconnect?.();
 			for (const id of this.localDeliveries.keys()) void this.takeLocalDelivery(id)?.(false);
@@ -627,6 +779,7 @@ export class ProxyServer {
 			await next.stop?.();
 			return;
 		}
+		if (this.backend !== next) this.catalogDiscovery.reset();
 		this.backend = next;
 		// Read the client after start: it may have initialized during the await.
 		if (this.downstream) next.identifyClient?.(this.downstream);
@@ -651,6 +804,7 @@ export class ProxyServer {
 
 	async stop(): Promise<void> {
 		this.stopping = true;
+		this.catalogDiscovery.reset();
 		this.nativeFeed?.close();
 		this.localBlast?.disconnect?.();
 		if (this.backend.stop) {

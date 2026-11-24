@@ -455,6 +455,24 @@ describe("observed native payload contracts", () => {
 				),
 			),
 		).toContain(PRIVATE_DELTA);
+		// A patch counts once Codex confirms it, as an edit of the files it names.
+		const observed = () =>
+			ctx.store
+				.readObservations({ cohort: ctx.cohort })
+				.map((entry: { kind: string; paths: string[] }) => [entry.kind, entry.paths]);
+		const earlier = observed();
+		const patch = {
+			...ctx.checkpoint,
+			tool_name: "apply_patch",
+			tool_input: { command: `*** Begin Patch\n*** Update File: ${PATH}\n*** End Patch\n` },
+		};
+		deliver({ ...patch, tool_response: "Failed to apply patch" }, ctx.options);
+		expect(observed()).toEqual(earlier);
+		deliver(
+			{ ...patch, tool_response: `Success. Updated the following files:\nM ${PATH}` },
+			ctx.options,
+		);
+		expect(observed()).toEqual([...earlier, ["edit", [PATH]]]);
 	});
 
 	it("uses a verified repo's exact file search to deliver the base feed without preview", async () => {
