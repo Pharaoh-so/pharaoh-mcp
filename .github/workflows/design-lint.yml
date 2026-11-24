@@ -1,0 +1,119 @@
+name: Pharaoh Design Lint
+on:
+  workflow_call:
+    inputs:
+      eslint:
+        description: Include the project's npm ESLint flat config
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      id-token: write
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.policy.outputs.version }}
+    steps:
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        id: policy
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const token = await core.getIDToken('pharaoh-design-ci');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            if (!/^[a-f0-9]{40}$/.test(claims.job_workflow_sha)) throw Error('Unpinned design workflow');
+            const exchange = await fetch('https://mcp.pharaoh.so/api/design/ci/exchange', {
+              method:'POST', redirect:'error', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body:'{}'
+            });
+            if (!exchange.ok) throw Error('Design CI access unavailable (HTTP '+exchange.status+')');
+            const {bundle} = await exchange.json();
+            if (typeof bundle !== 'string' || bundle.length > 524288) throw Error('Invalid signed policy');
+            const metadata = await fetch('https://raw.githubusercontent.com/Pharaoh-so/pharaoh-mcp/'+claims.job_workflow_sha+'/package.json',{redirect:'error'});
+            if (!metadata.ok) throw Error('The pinned workflow has no published proxy metadata');
+            const pkg = await metadata.json();
+            if (pkg.name !== '@pharaoh-so/mcp' || !/^\d+\.\d+\.\d+$/.test(pkg.version)) throw Error('Invalid pinned CLI release');
+            core.setOutput('version',pkg.version);
+            await fs.writeFile(path.join(process.env.RUNNER_TEMP,'policy.json'),JSON.stringify({bundle}),{mode:0o600,flag:'wx'});
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: design-policy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/policy.json
+          if-no-files-found: error
+          retention-days: 1
+  evaluate:
+    needs: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install the trusted evaluator outside the customer checkout
+        working-directory: ${{ runner.temp }}
+        env:
+          PROXY_VERSION: ${{ needs.policy.outputs.version }}
+        run: npm install --prefix "$RUNNER_TEMP/design-tool" --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org "@pharaoh-so/mcp@$PROXY_VERSION"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.policy.outputs.artifact }}
+          path: ${{ runner.temp }}/design-policy
+          merge-multiple: true
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the signed binding and exact checkout
+        run: '"$RUNNER_TEMP/design-tool/node_modules/.bin/pharaoh-mcp" design verify-ci --bundle "$RUNNER_TEMP/design-policy/policy.json"'
+      - name: Prepare native ESLint dependencies
+        if: inputs.eslint
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Evaluate the approved revision
+        id: lint
+        env:
+          USE_ESLINT: ${{ inputs.eslint }}
+        run: |
+          extra=()
+          if [[ "$USE_ESLINT" == true ]]; then extra+=(--eslint); fi
+          report="$RUNNER_TEMP/design-report.json"
+          code=0
+          "$RUNNER_TEMP/design-tool/node_modules/.bin/pharaoh-mcp" design lint --json --bundle "$RUNNER_TEMP/design-policy/policy.json" "${extra[@]}" > "$report" 2>"$RUNNER_TEMP/design-diagnostics" || code=$?
+          if ! jq -e '.kind=="lint" and .completed==true and (.revision|type=="number")' "$report" >/dev/null; then
+            echo "Design evaluation did not complete (exit $code)."
+            exit 2
+          fi
+          jq -r '"Design revision \(.revision) · \(.evaluated|length) rules evaluated · \(.findings|length) findings · \(.unknown|length) unknown", (.reviewUrl // empty)' "$report"
+          if [[ "$code" != 0 ]]; then exit "$code"; fi
+          echo 'completed=true' >> "$GITHUB_OUTPUT"
+    outputs:
+      completed: ${{ steps.lint.outputs.completed }}
+  result:
+    needs: [policy, evaluate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: write
+    steps:
+      - name: Delete the signed artifact
+        if: needs.policy.outputs.artifact != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          ARTIFACT_ID: ${{ needs.policy.outputs.artifact }}
+        with:
+          script: |
+            if (!/^\d+$/.test(process.env.ARTIFACT_ID)) throw Error('Invalid run artifact');
+            await github.rest.actions.deleteArtifact({...context.repo,artifact_id:Number(process.env.ARTIFACT_ID)});
+      - name: Require an executed and successful evaluation
+        if: always()
+        env:
+          PROJECTION: ${{ needs.policy.result }}
+          EVALUATION: ${{ needs.evaluate.result }}
+          COMPLETED: ${{ needs.evaluate.outputs.completed }}
+        run: test "$PROJECTION" = success && test "$EVALUATION" = success && test "$COMPLETED" = true
