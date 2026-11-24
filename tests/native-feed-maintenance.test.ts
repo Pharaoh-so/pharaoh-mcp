@@ -228,6 +228,7 @@ afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 it.each([
 	{ outcome: "revoked", revoked: true },
+	{ outcome: "unpaid", revoked: true },
 	{ outcome: "replacement owner", revoked: true },
 	{ outcome: "new epoch", revoked: true },
 	{ outcome: "publication conflict", revoked: false },
@@ -254,6 +255,7 @@ it.each([
 		if (String(url).endsWith("/feed-access")) return response();
 		setNativeFeedPreviewEnabled("codex", false, { home });
 		if (outcome === "revoked") return new Response(null, { status: 403 });
+		if (outcome === "unpaid") return new Response(null, { status: 402 });
 		if (outcome === "publication conflict") return new Response(null, { status: 409 });
 		return Response.json({
 			version: 1,
@@ -868,6 +870,23 @@ it("withdraws old context on a branch switch or a commit during a fingerprint ba
 	});
 	expect(store.readAccessProof({ cohort })).toBeNull();
 	expect(store.drainRecipient(scope("worker-b"))).toBeNull();
+});
+
+it("sends only saved TypeScript sources to the export analyzer", async () => {
+	authorize();
+	const sample = exportSamples();
+	sample.save("export interface Current {}", [{ name: "Current", kind: "interface" }]);
+	sample.files.set("src/legacy.js", {
+		source: "export function legacy() {}",
+		status: "complete",
+		exports: [{ name: "legacy", kind: "function" }],
+	});
+	observe(sample.path, "worker-b", "read");
+	observe("src/legacy.js", "worker-b", "read");
+	await sample.run();
+	expect(
+		sample.exportInventory.mock.calls.flatMap(([inputs]) => inputs.map(({ path }) => path)),
+	).toEqual([sample.path]);
 });
 
 it("silently seeds saved exports, retains metadata only across processes, and reports verified changes", async () => {

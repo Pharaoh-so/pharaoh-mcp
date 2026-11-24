@@ -3,8 +3,14 @@
 import { fork } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { release } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	type DesignQuery,
+	type DesignResult,
+	validDesignQuery,
+	validDesignResult,
+} from "../../runtime/design-contract.mjs";
 import { safeFeedText } from "../../runtime/feed-store.mjs";
 import { setWindowsPrivatePathHelper } from "../../runtime/runtime-storage.mjs";
 import type { BlastRoute } from "./dispatch.js";
@@ -38,6 +44,8 @@ export interface LocalAnalyzer {
 	readonly reader: string;
 	/** Advertised by the installed package only after exact pin and asset verification. */
 	readonly savedExportInventoryV1?: true;
+	/** Deterministic design discovery and evaluation over captured bytes. */
+	readonly designAnalysisV1?: true;
 }
 
 /** Transient confined bytes and the digest computed from those same bytes. */
@@ -215,15 +223,41 @@ export function localAnalyzerExpected(): boolean {
 	return expectedAnalyzer() !== undefined;
 }
 
+/** pnpm links dependencies between exact package entries within the same virtual store. */
+function analyzerPackageRoot(candidate: string, proxyRoot: string, version: string) {
+	const stat = lstatSync(candidate, { throwIfNoEntry: false });
+	if (!stat) return;
+	const root = realpathSync(candidate);
+	if (stat.isDirectory() && root === candidate) return root;
+	if (!stat.isSymbolicLink() || candidate !== join(dirname(proxyRoot), "local-analyzer")) return;
+	const proxyRecord = dirname(dirname(dirname(proxyRoot))),
+		store = dirname(proxyRecord);
+	if (
+		basename(store) !== ".pnpm" ||
+		basename(dirname(store)) !== "node_modules" ||
+		!basename(proxyRecord).startsWith("@pharaoh-so+mcp@") ||
+		proxyRoot !== join(proxyRecord, "node_modules", "@pharaoh-so", "mcp")
+	)
+		return;
+	const expected = join(
+		store,
+		`@pharaoh-so+local-analyzer@${version}`,
+		"node_modules",
+		"@pharaoh-so",
+		"local-analyzer",
+	);
+	if (root === expected && lstatSync(root).isDirectory()) return root;
+}
+
 function findInstalledAnalyzer(proxyRoot: string, version: string): LocalAnalyzer | undefined {
 	try {
 		// npm installs the pinned dependency next to the scoped proxy or below it.
-		for (const root of [
+		for (const candidate of [
 			join(dirname(proxyRoot), "local-analyzer"),
 			join(proxyRoot, "node_modules", "@pharaoh-so", "local-analyzer"),
 		]) {
-			if (!lstatSync(root, { throwIfNoEntry: false })?.isDirectory() || realpathSync(root) !== root)
-				continue;
+			const root = analyzerPackageRoot(candidate, proxyRoot, version);
+			if (!root) continue;
 			const manifest = join(root, "package.json");
 			const entry = join(root, "dist", "analyzer.mjs");
 			const reader = join(
@@ -241,6 +275,9 @@ function findInstalledAnalyzer(proxyRoot: string, version: string): LocalAnalyze
 					root,
 					entry,
 					reader,
+					...(installed.pharaohCapabilities?.designAnalysisV1 === true
+						? { designAnalysisV1: true as const }
+						: {}),
 					...(installed.pharaohCapabilities?.savedExportInventoryV1 === true
 						? { savedExportInventoryV1: true as const }
 						: {}),
@@ -294,8 +331,50 @@ export async function runLocalAnalyzer(
 	query: Query,
 	signal: AbortSignal,
 ): Promise<LocalAnalysisResult> {
+	return runBoundedWorker(
+		analyzer,
+		{ input: savedInput(snapshot, repoName), query },
+		validResult,
+		signal,
+	);
+}
+
+function savedInput(snapshot: LocalSnapshot, repoName: string) {
+	return {
+		repoName,
+		sources: snapshot.sources,
+		configFiles: snapshot.configFiles,
+		incomplete: snapshot.incomplete,
+	};
+}
+
+/** Dispatch the same worker operation used by CLI lint, CI, and the installed MCP context tool. */
+export async function runDesignAnalysis<Q extends DesignQuery>(
+	analyzer: LocalAnalyzer,
+	snapshot: LocalSnapshot,
+	query: Q,
+	signal: AbortSignal,
+): Promise<Extract<DesignResult, { kind: Q["kind"] }>> {
+	if (!analyzer.designAnalysisV1 || !validDesignQuery(query))
+		throw new Error("Local design analysis unavailable");
+	const validator = (v: unknown): v is Extract<DesignResult, { kind: Q["kind"] }> =>
+		validDesignResult(v) && v.kind === query.kind;
+	return runBoundedWorker(
+		analyzer,
+		{ operation: "designAnalysisV1", input: savedInput(snapshot, "local/design"), query },
+		validator,
+		signal,
+	);
+}
+
+async function runBoundedWorker<T>(
+	analyzer: LocalAnalyzer,
+	request: Record<string, unknown>,
+	valid: (v: unknown) => v is T,
+	signal: AbortSignal,
+): Promise<T> {
 	signal.throwIfAborted();
-	return await new Promise<LocalAnalysisResult>((resolve, reject) => {
+	return await new Promise<T>((resolve, reject) => {
 		const child = fork(analyzer.entry, [], {
 			cwd: analyzer.root,
 			env: {},
@@ -305,7 +384,7 @@ export async function runLocalAnalyzer(
 			signal,
 			killSignal: "SIGKILL",
 		});
-		let result: LocalAnalysisResult | undefined;
+		let result: T | undefined;
 		let failed = false;
 		const deadline = setTimeout(() => {
 			failed = true;
@@ -315,7 +394,7 @@ export async function runLocalAnalyzer(
 			failed = true;
 		});
 		child.on("message", (packet: unknown) => {
-			if (result || !object(packet) || !validResult(packet.result)) {
+			if (result || !object(packet) || !exactRecord(packet, ["result"]) || !valid(packet.result)) {
 				failed = true;
 				child.kill("SIGKILL");
 				return;
@@ -327,23 +406,12 @@ export async function runLocalAnalyzer(
 			if (!failed && code === 0 && result && !signal.aborted) resolve(result);
 			else reject(new Error("Local analysis unavailable"));
 		});
-		child.send(
-			{
-				input: {
-					repoName,
-					sources: snapshot.sources,
-					configFiles: snapshot.configFiles,
-					incomplete: snapshot.incomplete,
-				},
-				query,
-			},
-			(error) => {
-				if (error) {
-					failed = true;
-					child.kill("SIGKILL");
-				}
-			},
-		);
+		child.send(request, (error) => {
+			if (error) {
+				failed = true;
+				child.kill("SIGKILL");
+			}
+		});
 	});
 }
 

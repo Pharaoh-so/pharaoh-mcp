@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude Code keeps its verified receipt on the first edit when the home directory is reached through a symlink. Startup now uses the same installed hook path as setup, so the receipt plugin stays loaded through the final reply.
+
 - Claude Code can discover Pharaoh’s tools on the first edit even when the hosted tool list is slow. The proxy supplies the catalog shipped with the package, then asks Claude to reload the live descriptions when they become available.
 
 - In an interactive Claude Code chat, an enabled change review now shows its verified catch after the final reply, even when another Stop hook keeps Claude working. The receipt needs Claude Code to load the completion plugin. Older clients and sessions where the plugin is disabled or blocked keep the local proof without showing a receipt. For a Local installation, start Claude Code at the repository root.

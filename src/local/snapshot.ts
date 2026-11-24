@@ -82,13 +82,14 @@ export function isLocalSourcePath(path: string): boolean {
 	return Boolean(name && !CONFIG_NAME.test(name) && isSourceName(name));
 }
 
-function candidates(paths: readonly string[]): Candidate[] {
+function candidates(paths: readonly string[], design: boolean): Candidate[] {
 	const selected: Candidate[] = [];
 	for (const path of paths) {
 		const name = eligibleName(path);
 		if (!name) continue;
 		if (CONFIG_NAME.test(name)) selected.push({ path, kind: "config" });
-		else if (isSourceName(name)) selected.push({ path, kind: "source" });
+		else if (isSourceName(name) || (design && name.endsWith(".css") && !name.endsWith(".min.css")))
+			selected.push({ path, kind: "source" });
 	}
 	return selected;
 }
@@ -304,11 +305,12 @@ export async function captureLocalSnapshot(
 	checkout: VerifiedCheckout,
 	reader: string,
 	signal: AbortSignal,
+	mode?: "design",
 ): Promise<LocalSnapshot> {
 	if (!sameLocalCheckout(checkout, reader)) throw new Error("Worktree identity changed");
 	const inventory = listLocalCheckoutPaths(checkout, reader);
 	if (!inventory) throw new Error("Worktree inventory unavailable");
-	const files = candidates(inventory);
+	const files = candidates(inventory, mode === "design");
 	if (files.length > MAX_FILES) throw new Error("Worktree exceeds the local file limit");
 	const output = await readConfined(reader, checkout, files, signal);
 	const snapshot = await captureInheritedConfigs(
@@ -320,4 +322,36 @@ export async function captureLocalSnapshot(
 	);
 	if (!sameLocalCheckout(checkout, reader)) throw new Error("Worktree identity changed");
 	return snapshot;
+}
+
+/** Read the root vision through the same identity-bound no-follow handle as source capture. */
+export async function readDesignVision(
+	checkout: VerifiedCheckout,
+	reader: string,
+	signal: AbortSignal,
+): Promise<
+	| { status: "present"; bytes: Uint8Array }
+	| { status: "absent" | "oversized" | "unreadable" | "invalid-utf8" }
+> {
+	if (!sameLocalCheckout(checkout, reader)) return { status: "unreadable" };
+	const frame = await readConfined(
+		reader,
+		checkout,
+		[{ path: "VISION.md", kind: "source" }],
+		signal,
+	);
+	if (frame.length < FRAME_BYTES || !sameLocalCheckout(checkout, reader))
+		return { status: "unreadable" };
+	const size = frame.readUInt32BE(1);
+	if (size !== frame.length - FRAME_BYTES) return { status: "unreadable" };
+	if (frame[0] === 1 && size === 0) return { status: "absent" };
+	if (frame[0] === 3 || size > 64 * 1024) return { status: "oversized" };
+	if (frame[0] !== 0) return { status: "unreadable" };
+	const bytes = frame.subarray(FRAME_BYTES);
+	try {
+		new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+	} catch {
+		return { status: "invalid-utf8" };
+	}
+	return { status: "present", bytes };
 }

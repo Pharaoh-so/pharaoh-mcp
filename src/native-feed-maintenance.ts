@@ -1,5 +1,5 @@
 /** Bounded background preparation for native context; no source bytes leave this process. */
-import { spawnSync } from "node:child_process";
+import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -202,15 +202,21 @@ function validJob(value: FeedMaintenanceJob): boolean {
 			JSON.stringify(value).length <= MAX_JOB_BYTES &&
 			["codex", "claude-code"].includes(value.client) &&
 			typeof value.registration === "string" &&
-			/^[a-f0-9-]{36}$/.test(value.signIn ?? "") &&
-			/^[a-f0-9]{64}$/.test(value.cohort ?? "") &&
+			validScopeIds(value) &&
 			typeof value.checkout === "string" &&
-			typeof value.rootId === "string" &&
-			value.rootId.length > 0 &&
-			value.rootId.length <= 256 &&
-			!hasControl(value.rootId) &&
+			validRootId(value.rootId) &&
 			feedServerOrigin(value.server) &&
 			Array.isArray(value.serverArgv),
+	);
+}
+
+function validScopeIds(value: FeedMaintenanceJob): boolean {
+	return /^[a-f0-9-]{36}$/.test(value.signIn ?? "") && /^[a-f0-9]{64}$/.test(value.cohort ?? "");
+}
+
+function validRootId(rootId: unknown): boolean {
+	return (
+		typeof rootId === "string" && rootId.length > 0 && rootId.length <= 256 && !hasControl(rootId)
 	);
 }
 
@@ -406,23 +412,28 @@ function publicationResponse(
 	proof: FeedAccessProof,
 	modules: string[],
 ): HostedFeedPublication | "scope-changed" | null | undefined {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	if (!isRecord(value) || !Object.hasOwn(value, "publication")) return undefined;
 	const { publication, ...scope } = value as Record<string, unknown> & {
 		publication?: HostedFeedPublication | null;
 	};
-	if (!Object.hasOwn(value, "publication")) return undefined;
 	const access = parseAccess(scope, proof.repo);
 	if (!access || access.actor !== proof.actor || access.repo !== proof.repo) return undefined;
 	if (access.owner !== proof.owner || access.epoch !== proof.epoch) return "scope-changed";
 	if (publication === null) return null;
+	return coversModules(publication, modules) ? publication : undefined;
+}
+
+function coversModules(publication: HostedFeedPublication | undefined, modules: string[]): boolean {
 	const rows = publication?.modules;
-	if (
-		!Array.isArray(rows) ||
-		rows.length !== modules.length ||
-		!modules.every((module) => rows.some((row) => row?.module === module))
-	)
-		return undefined;
-	return publication;
+	return (
+		Array.isArray(rows) &&
+		rows.length === modules.length &&
+		modules.every((module) => rows.some((row) => row?.module === module))
+	);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 interface PublicationRefresh {
@@ -438,83 +449,103 @@ interface PublicationRefresh {
 	options: FeedMaintenanceOptions;
 }
 
-async function refreshWatchedPublication({
-	job,
-	root,
-	credentialsPath,
-	proof,
-	authorizationIdentity,
-	store,
-	deadline,
-	current,
-	now,
-	options,
-}: PublicationRefresh) {
-	const scope = { cohort: job.cohort, authorizationIdentity };
+async function refreshWatchedPublication(refresh: PublicationRefresh) {
+	const { job, credentialsPath, proof, store, deadline, current, now, options } = refresh;
+	const scope = { cohort: job.cohort, authorizationIdentity: refresh.authorizationIdentity };
 	const eligible = () =>
 		current() &&
 		nativeFeedPreviewEnabled(job.client, job) &&
 		resolveFeedProfile({ ...job, credentialsPath, event: "PostToolUse", now: now() }).admit;
 	let disposeRequest: (() => void) | undefined;
 	try {
-		if (!nativeFeedPreviewEnabled(job.client, job) || !current()) return;
-		const modules = store.readHostedModuleWatches(scope);
-		if (!modules.length || !eligible()) return;
-		const credentials = readCredentials(credentialsPath);
-		if (
-			!credentials ||
-			deadline - performance.now() < 150 ||
-			!reservePublicationAttempt(root, proof, job.cohort, now()) ||
-			!eligible()
-		)
-			return;
-		const timeout = Math.min(2_000, Math.floor(deadline - performance.now() - 50));
-		if (timeout < 100) return;
-		const request = requestSignal(options.signal, timeout);
+		const ready = publicationPreflight(refresh, scope, eligible);
+		if (!ready) return;
+		const request = requestSignal(options.signal, ready.timeout);
 		disposeRequest = request.dispose;
 		const response = await (options.fetch ?? fetch)(
 			new URL("/api/local/v1/feed-publication", proof.issuer),
 			{
 				method: "POST",
 				headers: {
-					Authorization: `Bearer ${credentials.access_token}`,
+					Authorization: `Bearer ${ready.credentials.access_token}`,
 					"Content-Type": "application/json",
 				},
-				body: JSON.stringify({ version: 1, repoSlug: proof.repo, modules }),
+				body: JSON.stringify({ version: 1, repoSlug: proof.repo, modules: ready.modules }),
 				redirect: "error",
 				cache: "no-store",
 				signal: request.signal,
 			},
 		);
-		if (request.signal.aborted || performance.now() >= deadline || !current()) {
+		const stale = () => request.signal.aborted || performance.now() >= deadline || !current();
+		if (stale()) {
 			void response.body?.cancel().catch(() => {});
 			return;
 		}
 		if (response.status !== 200) {
-			void response.body?.cancel().catch(() => {});
-			if ([401, 402, 403].includes(response.status)) store.clearFeedScope(scope);
-			else if (response.status === 409 && eligible()) store.retireHostedModuleNotices(scope);
+			refusePublication(response, store, scope, eligible);
 			return;
 		}
 		const publication = publicationResponse(
 			await boundedResponse(response, PUBLICATION_BYTES),
 			proof,
-			modules,
+			ready.modules,
 		);
-		if (request.signal.aborted || performance.now() >= deadline || !current()) return;
-		if (publication === "scope-changed") {
-			store.clearFeedScope(scope);
-			return;
-		}
-		if (!eligible()) return;
-		if (publication === null) store.retireHostedModuleNotices(scope);
-		else if (publication) store.applyHostedModulePublication({ ...scope, publication });
+		if (stale()) return;
+		settlePublication(publication, store, scope, eligible);
 	} catch {
 		// Optional publication requests leave ordinary worktree handling operational.
 		return;
 	} finally {
 		disposeRequest?.();
 	}
+}
+
+/** The watched modules, credentials and request timeout once a publication request may go out. */
+function publicationPreflight(
+	{ job, root, credentialsPath, proof, store, deadline, current, now }: PublicationRefresh,
+	scope: { cohort: string; authorizationIdentity: string },
+	eligible: () => boolean,
+) {
+	if (!nativeFeedPreviewEnabled(job.client, job) || !current()) return;
+	const modules = store.readHostedModuleWatches(scope);
+	if (!modules.length || !eligible()) return;
+	const credentials = readCredentials(credentialsPath);
+	if (
+		!credentials ||
+		deadline - performance.now() < 150 ||
+		!reservePublicationAttempt(root, proof, job.cohort, now()) ||
+		!eligible()
+	)
+		return;
+	const timeout = Math.min(2_000, Math.floor(deadline - performance.now() - 50));
+	if (timeout < 100) return;
+	return { modules, credentials, timeout };
+}
+
+function refusePublication(
+	response: Response,
+	store: ReturnType<typeof createFeedStore>,
+	scope: { cohort: string; authorizationIdentity: string },
+	eligible: () => boolean,
+) {
+	void response.body?.cancel().catch(() => {});
+	if ([401, 402, 403].includes(response.status)) store.clearFeedScope(scope);
+	else if (response.status === 409 && eligible()) store.retireHostedModuleNotices(scope);
+}
+
+function settlePublication(
+	publication: ReturnType<typeof publicationResponse>,
+	store: ReturnType<typeof createFeedStore>,
+	scope: { cohort: string; authorizationIdentity: string },
+	eligible: () => boolean,
+) {
+	if (publication === "scope-changed") {
+		store.clearFeedScope(scope);
+		return;
+	}
+	if (!eligible()) return;
+	if (publication === null) store.retireHostedModuleNotices(scope);
+	else if (publication) store.applyHostedModulePublication({ ...scope, publication });
 }
 
 function requestSignal(parent: AbortSignal | undefined, timeoutMs: number) {
@@ -538,21 +569,15 @@ function parseAccess(
 	value: unknown,
 	repo: string,
 ): Pick<FeedAccessProof, "actor" | "owner" | "repo" | "epoch"> | null {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-	const row = value as Record<string, unknown>;
+	if (!isRecord(value)) return null;
+	const row = value;
 	if (
 		Object.keys(row).sort().join() !== "accessEpoch,githubUserId,repoSlug,tenantId,version" ||
 		row.version !== 1 ||
-		!Number.isSafeInteger(row.githubUserId) ||
-		Number(row.githubUserId) < 1 ||
-		typeof row.tenantId !== "string" ||
-		!row.tenantId ||
-		row.tenantId.length > 128 ||
-		typeof row.repoSlug !== "string" ||
-		!SLUG.test(row.repoSlug) ||
-		row.repoSlug.toLowerCase() !== repo.toLowerCase() ||
-		!Number.isSafeInteger(row.accessEpoch) ||
-		Number(row.accessEpoch) < 1
+		!isPositiveInteger(row.githubUserId) ||
+		!isTenantId(row.tenantId) ||
+		!isRepoSlugFor(row.repoSlug, repo) ||
+		!isPositiveInteger(row.accessEpoch)
 	)
 		return null;
 	return {
@@ -561,6 +586,20 @@ function parseAccess(
 		repo: row.repoSlug,
 		epoch: Number(row.accessEpoch),
 	};
+}
+
+function isPositiveInteger(value: unknown): boolean {
+	return Number.isSafeInteger(value) && Number(value) >= 1;
+}
+
+function isTenantId(value: unknown): value is string {
+	return typeof value === "string" && Boolean(value) && value.length <= 128;
+}
+
+function isRepoSlugFor(value: unknown, repo: string): value is string {
+	return (
+		typeof value === "string" && SLUG.test(value) && value.toLowerCase() === repo.toLowerCase()
+	);
 }
 
 function watchers(value: unknown): WatchedPath[] {
@@ -604,15 +643,21 @@ function exportReceipt(
 		value.version !== 1 ||
 		value.authorizationIdentity !== authorizationIdentity ||
 		value.head !== head ||
-		!Number.isFinite(value.capturedAt) ||
-		value.capturedAt > now ||
-		value.capturedAt <= now - INVENTORY_TTL_MS ||
-		!validLocalExportResult(value.result) ||
-		value.result.sha256 !== entry.hash ||
-		value.result.path !== entry.path
+		staleCapture(value.capturedAt, now) ||
+		!matchesWatch(value.result, entry)
 	)
 		return;
 	return value;
+}
+
+function staleCapture(capturedAt: number, now: number): boolean {
+	return !Number.isFinite(capturedAt) || capturedAt > now || capturedAt <= now - INVENTORY_TTL_MS;
+}
+
+function matchesWatch(result: unknown, entry: WatchedPath): boolean {
+	return (
+		validLocalExportResult(result) && result.sha256 === entry.hash && result.path === entry.path
+	);
 }
 
 /** The receipt cap must never displace an existing fingerprint-only watch. */
@@ -691,53 +736,76 @@ async function captureWatchedExportInventories(input: WatchedCapture): Promise<
 	  }
 	| undefined
 > {
-	const {
-		checkout,
-		paths,
-		watches,
-		fingerprint,
-		exportInventory,
-		current,
-		previewCurrent,
-		deadline,
-		signal,
-	} = input;
+	const { exportInventory, current, previewCurrent, deadline } = input;
 	const inventories = new Map<string, LocalExportResult>();
 	const raced = new Set<string>();
 	const files: LocalExportInput[] = [];
-	let bytesHeld = 0;
 	const provenanceDeadline = deadline - PERSIST_RESERVE_MS;
 	const rehashDeadline = provenanceDeadline - PROVENANCE_RESERVE_MS;
 	const latestWorkerStart = rehashDeadline - REHASH_RESERVE_MS - LOCAL_EXPORT_LIMITS.runMs;
-	const visit =
-		exportInventory && performance.now() < latestWorkerStart && previewCurrent()
-			? (path: string, bytes: Buffer, sha256: string) => {
-					if (
-						!isLocalSourcePath(path) ||
-						!/\.(?:ts|tsx|mts)$/.test(path) ||
-						Buffer.byteLength(path) > 240 ||
-						/[:\p{Cc}]/u.test(path) ||
-						!safeFeedText(path) ||
-						!watches.some(
-							(watch) => watch.path === path && watch.inventory?.result.sha256 !== sha256,
-						) ||
-						bytes.byteLength > LOCAL_EXPORT_LIMITS.fileBytes ||
-						bytesHeld + bytes.byteLength > LOCAL_EXPORT_LIMITS.batchBytes
-					)
-						return;
-					// Do not serialize a Buffer view whose backing allocation also held other captured files.
-					files.push({ path, sha256, bytes: Uint8Array.from(bytes) });
-					bytesHeld += bytes.byteLength;
-				}
-			: undefined;
-	const hashes = paths.length
-		? fingerprint(checkout, paths, deadline, visit)
-		: new Map<string, string | null>();
+	const hashes = sampledHashes(input, captureVisitor(input, latestWorkerStart, files));
 	if (!hashes || !current() || performance.now() >= deadline) return;
 	const due = files.filter((file) => hashes.get(file.path) === file.sha256);
 	const started = performance.now();
 	if (!exportInventory || !due.length || started >= latestWorkerStart || !previewCurrent())
 		return { hashes, inventories, raced };
+	await collectInventories(input, exportInventory, due, started, inventories);
+	if (!current() || performance.now() >= deadline) return;
+	dropRacedHashes(input, rehashDeadline, hashes, inventories, raced);
+	return { hashes, inventories, raced, provenanceDeadline };
+}
+
+function sampledHashes(
+	{ checkout, paths, fingerprint, deadline }: WatchedCapture,
+	visit: ((path: string, bytes: Buffer, sha256: string) => void) | undefined,
+) {
+	return paths.length
+		? fingerprint(checkout, paths, deadline, visit)
+		: new Map<string, string | null>();
+}
+
+/** Keep the exact bytes of a selected TypeScript source while it is hashed, within the batch caps. */
+function captureVisitor(
+	{ exportInventory, previewCurrent, watches }: WatchedCapture,
+	latestWorkerStart: number,
+	files: LocalExportInput[],
+) {
+	if (!(exportInventory && performance.now() < latestWorkerStart && previewCurrent())) return;
+	let bytesHeld = 0;
+	return (path: string, bytes: Buffer, sha256: string) => {
+		if (skipCapture(path, bytes, sha256, watches, bytesHeld)) return;
+		// Do not serialize a Buffer view whose backing allocation also held other captured files.
+		files.push({ path, sha256, bytes: Uint8Array.from(bytes) });
+		bytesHeld += bytes.byteLength;
+	};
+}
+
+function skipCapture(
+	path: string,
+	bytes: Buffer,
+	sha256: string,
+	watches: WatchedPath[],
+	bytesHeld: number,
+): boolean {
+	return (
+		!isLocalSourcePath(path) ||
+		!/\.(?:ts|tsx|mts)$/.test(path) ||
+		Buffer.byteLength(path) > 240 ||
+		/[:\p{Cc}]/u.test(path) ||
+		!safeFeedText(path) ||
+		!watches.some((watch) => watch.path === path && watch.inventory?.result.sha256 !== sha256) ||
+		bytes.byteLength > LOCAL_EXPORT_LIMITS.fileBytes ||
+		bytesHeld + bytes.byteLength > LOCAL_EXPORT_LIMITS.batchBytes
+	);
+}
+
+async function collectInventories(
+	{ signal, current, previewCurrent }: WatchedCapture,
+	exportInventory: NonNullable<WatchedCapture["exportInventory"]>,
+	due: LocalExportInput[],
+	started: number,
+	inventories: Map<string, LocalExportResult>,
+) {
 	const workerDeadline = started + LOCAL_EXPORT_LIMITS.runMs;
 	const request = requestSignal(signal, LOCAL_EXPORT_LIMITS.runMs);
 	const consentTimer = setInterval(() => {
@@ -755,22 +823,38 @@ async function captureWatchedExportInventories(input: WatchedCapture): Promise<
 			performance.now() < workerDeadline &&
 			previewCurrent() &&
 			current()
-		) {
-			for (const item of result ?? []) {
-				if (
-					validLocalExportResult(item) &&
-					due.some((file) => file.path === item.path && file.sha256 === item.sha256)
-				)
-					inventories.set(item.path, item);
-			}
-		}
+		)
+			keepVerified(result, due, inventories);
 	} catch {
 		// Analyzer failure has no semantic evidence; a verified hash can still invalidate.
 	} finally {
 		clearInterval(consentTimer);
 		request.dispose();
 	}
-	if (!current() || performance.now() >= deadline) return;
+}
+
+function keepVerified(
+	result: LocalExportResult[] | undefined,
+	due: LocalExportInput[],
+	inventories: Map<string, LocalExportResult>,
+) {
+	for (const item of result ?? []) {
+		if (
+			validLocalExportResult(item) &&
+			due.some((file) => file.path === item.path && file.sha256 === item.sha256)
+		)
+			inventories.set(item.path, item);
+	}
+}
+
+/** Rehash the sample; a path whose bytes changed during the parse is raced and keeps no evidence. */
+function dropRacedHashes(
+	{ checkout, paths, fingerprint }: WatchedCapture,
+	rehashDeadline: number,
+	hashes: Map<string, string | null>,
+	inventories: Map<string, LocalExportResult>,
+	raced: Set<string>,
+) {
 	const sampled =
 		performance.now() < rehashDeadline ? fingerprint(checkout, paths, rehashDeadline) : undefined;
 	const checked = performance.now() < rehashDeadline ? sampled : undefined;
@@ -781,7 +865,6 @@ async function captureWatchedExportInventories(input: WatchedCapture): Promise<
 			raced.add(path);
 		}
 	}
-	return { hashes, inventories, raced, provenanceDeadline };
 }
 
 function readProvenance(checkout: VerifiedCheckout, deadline: number): FeedProvenance | undefined {
@@ -817,11 +900,17 @@ function readProvenance(checkout: VerifiedCheckout, deadline: number): FeedProve
 		!/^(?:[a-f0-9]{40}|[a-f0-9]{64})\n$/.test(head.stdout)
 	)
 		return;
-	const branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+	const branch = branchName(git(["symbolic-ref", "--quiet", "--short", "HEAD"]));
+	if (branch === undefined) return;
+	return { head: head.stdout.trim(), branch };
+}
+
+/** The checked-out branch, null for a detached HEAD, or undefined when Git's answer is unusable. */
+function branchName(branch: SpawnSyncReturns<string> | undefined): string | null | undefined {
 	if (!branch || branch.error || ![0, 1].includes(branch.status ?? -1)) return;
 	const name = branch.status === 1 ? null : branch.stdout.trim();
 	if (name !== null && (!name || name.length > 256 || hasControl(name))) return;
-	return { head: head.stdout.trim(), branch: name };
+	return name;
 }
 
 function deriveOverlapNotices(
@@ -832,28 +921,67 @@ function deriveOverlapNotices(
 	observations: readonly FeedObservation[],
 	publish: (read: FeedObservation, path: string, hash: string) => boolean,
 ) {
-	let attempts = 0;
+	const sample = {
+		active: new Set(watched.map(({ rootId, path }) => `${rootId}\0${path}`)),
+		paths,
+		hashes,
+		raced,
+		publish,
+		attempts: 0,
+	};
 	const settled = new Set<string>();
-	const active = new Set(watched.map(({ rootId, path }) => `${rootId}\0${path}`));
-	for (const read of observations) {
-		if (read.kind !== "read") continue;
-		let complete = true;
-		for (const path of read.paths) {
-			// Ineligible or evicted paths cannot be covered by this bounded producer.
-			if (!active.has(`${read.rootId}\0${path}`) || !isLocalSourcePath(path)) continue;
-			// A failed rehash invalidates this sample, but is not evidence that the path is ineligible.
-			if (!paths.includes(path) || raced.has(path)) {
-				complete = false;
-				continue;
-			}
-			const hash = hashes.get(path);
-			if (typeof hash !== "string") continue;
-			if (attempts >= BATCH_SIZE || !publish(read, path, hash)) complete = false;
-			attempts++;
-		}
-		if (complete) settled.add(read.id);
-	}
+	for (const read of observations)
+		if (read.kind === "read" && readCovered(read, sample)) settled.add(read.id);
 	return settled;
+}
+
+/** Whether every eligible path of one read reached a terminal overlap outcome. */
+function readCovered(
+	read: FeedObservation,
+	sample: {
+		active: Set<string>;
+		paths: readonly string[];
+		hashes: ReadonlyMap<string, string | null>;
+		raced: ReadonlySet<string>;
+		publish: (read: FeedObservation, path: string, hash: string) => boolean;
+		attempts: number;
+	},
+): boolean {
+	let complete = true;
+	for (const path of read.paths) {
+		// Ineligible or evicted paths cannot be covered by this bounded producer.
+		if (!sample.active.has(`${read.rootId}\0${path}`) || !isLocalSourcePath(path)) continue;
+		// A failed rehash invalidates this sample, but is not evidence that the path is ineligible.
+		if (!sample.paths.includes(path) || sample.raced.has(path)) {
+			complete = false;
+			continue;
+		}
+		const hash = sample.hashes.get(path);
+		if (typeof hash !== "string") continue;
+		if (sample.attempts >= BATCH_SIZE || !sample.publish(read, path, hash)) complete = false;
+		sample.attempts++;
+	}
+	return complete;
+}
+
+/** One producer pass over a checkout's watches, shared by its steps. */
+interface ProducerPass {
+	cohort: string;
+	signIn: string;
+	authorizationIdentity: string;
+	store: ReturnType<typeof createFeedStore>;
+	revision: FeedProvenance;
+	current: () => boolean;
+	previewCurrent: () => boolean;
+	deadline: number;
+	selected: WatchedPath[];
+	pending: PendingTransition[];
+	observations: FeedObservation[];
+	pendingEdit: (entry: WatchedPath) => FeedObservation | undefined;
+	paths: string[];
+	cursor: number;
+	sampledAt: number;
+	gap: boolean;
 }
 
 async function prepareUpdates(
@@ -874,84 +1002,20 @@ async function prepareUpdates(
 	const before = store.readProducerState({ cohort });
 	const revision = provenance(checkout, deadline);
 	if (!revision) return;
-	if (Object.hasOwn(before ?? {}, "branch") && before?.branch !== revision.branch) {
+	if (branchMoved(before, revision)) {
 		store.clearFeedScope({ cohort, authorizationIdentity });
 		return;
 	}
-	const watched = watchers(before?.watched);
-	const baselineTime = now();
-	for (const entry of watched) {
-		if (
-			!analysis.exportInventory ||
-			!exportReceipt(entry, authorizationIdentity, revision.head, baselineTime)
-		)
-			delete entry.inventory;
-	}
+	const watched = restoredWatches(before, analysis, authorizationIdentity, revision.head, now);
 	let gap = before?.publicationGap === true;
-	let pending: PendingTransition[] = [];
-	if (Array.isArray(before?.pendingTransitions)) {
-		pending = before.pendingTransitions
-			.filter((entry): entry is PendingTransition =>
-				Boolean(
-					entry &&
-						/^[a-f0-9-]{36}$/.test(entry.id) &&
-						(entry.hash === null ||
-							(typeof entry.hash === "string" && /^[a-f0-9]{64}$/.test(entry.hash))) &&
-						watchers([{ path: entry.path, rootId: entry.rootId, hash: entry.hash, sampledAt: 0 }])
-							.length === 1 &&
-						typeof entry.agentId === "string" &&
-						entry.agentId.length > 0 &&
-						entry.agentId.length <= 256 &&
-						!hasControl(entry.agentId) &&
-						/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entry.head) &&
-						(entry.branch === null ||
-							(typeof entry.branch === "string" &&
-								entry.branch.length <= 256 &&
-								!hasControl(entry.branch))),
-				),
-			)
-			.slice(0, MAX_WATCHED)
-			.map(({ id, rootId, agentId, path, hash, head, branch, fact }) => ({
-				id,
-				rootId,
-				agentId,
-				path,
-				hash,
-				head,
-				branch,
-				...(analysis.exportInventory &&
-				safeFeedText(fact) &&
-				feedPayloadBytes(fact) <= FEED_EVENT_BYTES &&
-				fact.startsWith("Saved exports ")
-					? { fact }
-					: {}),
-			}));
-	}
+	const pending = restoredTransitions(before?.pendingTransitions, analysis.exportInventory);
 	const observations = store.readObservations({ cohort });
-	for (const observation of observations) {
-		for (const path of observation.paths) {
-			if (!watched.some((entry) => entry.rootId === observation.rootId && entry.path === path))
-				watched.push({ rootId: observation.rootId, path, sampledAt: 0 });
-		}
-	}
+	addObservedWatches(watched, observations);
 	const selected = watched.slice(-MAX_WATCHED);
 	gap = trimWatches(selected) || gap;
-	const pendingEdit = (entry: WatchedPath) =>
-		[...observations]
-			.reverse()
-			.find(
-				(observation) =>
-					observation.kind === "edit" &&
-					observation.rootId === entry.rootId &&
-					observation.paths.includes(entry.path) &&
-					observation.createdAt > entry.sampledAt,
-			);
-	const cursor = Number.isSafeInteger(before?.cursor) ? Number(before?.cursor) : 0;
-	const rotated = selected.length
-		? [...selected.slice(cursor % selected.length), ...selected.slice(0, cursor % selected.length)]
-		: [];
-	const ordered = [...selected.filter(pendingEdit), ...rotated];
-	const paths = [...new Set(ordered.map((entry) => entry.path))].slice(0, BATCH_SIZE);
+	const pendingEdit = (entry: WatchedPath) => latestEdit(observations, entry);
+	const cursor = savedCursor(before);
+	const paths = samplePaths(selected, pendingEdit, cursor);
 	if (performance.now() >= deadline) return;
 	const sampledAt = now();
 	const capture = await captureWatchedExportInventories({
@@ -965,7 +1029,159 @@ async function prepareUpdates(
 		...analysis,
 	});
 	if (!capture || !current() || performance.now() >= deadline) return;
-	const { hashes, inventories, raced, provenanceDeadline } = capture;
+	const pass: ProducerPass = {
+		cohort,
+		signIn,
+		authorizationIdentity,
+		store,
+		revision,
+		current,
+		previewCurrent,
+		deadline,
+		selected,
+		pending,
+		observations,
+		pendingEdit,
+		paths,
+		cursor,
+		sampledAt,
+		gap,
+	};
+	applySample(
+		pass,
+		capture,
+		recheckRevision(provenance, checkout, pass, capture.provenanceDeadline),
+	);
+}
+
+function branchMoved(
+	before: ReturnType<ReturnType<typeof createFeedStore>["readProducerState"]>,
+	revision: FeedProvenance,
+): boolean {
+	return Object.hasOwn(before ?? {}, "branch") && before?.branch !== revision.branch;
+}
+
+/** Saved watches, keeping an export receipt only while it still matches this head and sign-in. */
+function restoredWatches(
+	before: ReturnType<ReturnType<typeof createFeedStore>["readProducerState"]>,
+	analysis: Pick<WatchedCapture, "exportInventory">,
+	authorizationIdentity: string,
+	head: string,
+	now: () => number,
+): WatchedPath[] {
+	const watched = watchers(before?.watched);
+	const baselineTime = now();
+	for (const entry of watched) {
+		if (
+			!analysis.exportInventory ||
+			!exportReceipt(entry, authorizationIdentity, head, baselineTime)
+		)
+			delete entry.inventory;
+	}
+	return watched;
+}
+
+/** Saved transitions that still parse; a preview fact survives only with an export analyzer. */
+function restoredTransitions(
+	value: unknown,
+	exportInventory: WatchedCapture["exportInventory"],
+): PendingTransition[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.filter(isPendingTransition)
+		.slice(0, MAX_WATCHED)
+		.map(({ id, rootId, agentId, path, hash, head, branch, fact }) => ({
+			id,
+			rootId,
+			agentId,
+			path,
+			hash,
+			head,
+			branch,
+			...(exportInventory &&
+			safeFeedText(fact) &&
+			feedPayloadBytes(fact) <= FEED_EVENT_BYTES &&
+			fact.startsWith("Saved exports ")
+				? { fact }
+				: {}),
+		}));
+}
+
+function isPendingTransition(entry: PendingTransition): entry is PendingTransition {
+	return Boolean(
+		entry &&
+			/^[a-f0-9-]{36}$/.test(entry.id) &&
+			(entry.hash === null ||
+				(typeof entry.hash === "string" && /^[a-f0-9]{64}$/.test(entry.hash))) &&
+			watchers([{ path: entry.path, rootId: entry.rootId, hash: entry.hash, sampledAt: 0 }])
+				.length === 1 &&
+			validAgentId(entry.agentId) &&
+			/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entry.head) &&
+			validBranch(entry.branch),
+	);
+}
+
+function validAgentId(agentId: unknown): boolean {
+	return (
+		typeof agentId === "string" &&
+		agentId.length > 0 &&
+		agentId.length <= 256 &&
+		!hasControl(agentId)
+	);
+}
+
+function validBranch(branch: unknown): boolean {
+	return (
+		branch === null || (typeof branch === "string" && branch.length <= 256 && !hasControl(branch))
+	);
+}
+
+function addObservedWatches(watched: WatchedPath[], observations: FeedObservation[]) {
+	for (const observation of observations) {
+		for (const path of observation.paths) {
+			if (!watched.some((entry) => entry.rootId === observation.rootId && entry.path === path))
+				watched.push({ rootId: observation.rootId, path, sampledAt: 0 });
+		}
+	}
+}
+
+/** The newest edit of a watch that came after its last sample. */
+function latestEdit(observations: FeedObservation[], entry: WatchedPath) {
+	return [...observations]
+		.reverse()
+		.find(
+			(observation) =>
+				observation.kind === "edit" &&
+				observation.rootId === entry.rootId &&
+				observation.paths.includes(entry.path) &&
+				observation.createdAt > entry.sampledAt,
+		);
+}
+
+function savedCursor(before: ReturnType<ReturnType<typeof createFeedStore>["readProducerState"]>) {
+	return Number.isSafeInteger(before?.cursor) ? Number(before?.cursor) : 0;
+}
+
+/** Up to a batch of paths: pending edits first, then the watches in rotation from the cursor. */
+function samplePaths(
+	selected: WatchedPath[],
+	pendingEdit: (entry: WatchedPath) => FeedObservation | undefined,
+	cursor: number,
+): string[] {
+	const rotated = selected.length
+		? [...selected.slice(cursor % selected.length), ...selected.slice(0, cursor % selected.length)]
+		: [];
+	const ordered = [...selected.filter(pendingEdit), ...rotated];
+	return [...new Set(ordered.map((entry) => entry.path))].slice(0, BATCH_SIZE);
+}
+
+/** After the capture: whether the checkout still has the sampled revision. Undefined when unknown. */
+function recheckRevision(
+	provenance: NonNullable<FeedMaintenanceOptions["provenance"]>,
+	checkout: VerifiedCheckout,
+	{ revision, current, deadline }: ProducerPass,
+	provenanceDeadline: number | undefined,
+): "same" | "moved" | undefined {
 	const recheckUntil = provenanceDeadline ?? deadline;
 	if (performance.now() >= recheckUntil) return;
 	const afterRevision = provenance(checkout, recheckUntil);
@@ -976,129 +1192,176 @@ async function prepareUpdates(
 		!afterRevision ||
 		afterRevision.branch !== revision.branch ||
 		afterRevision.head !== revision.head
-	) {
-		store.clearFeedScope({ cohort, authorizationIdentity });
+	)
+		return "moved";
+	return "same";
+}
+
+/** Record the sample's transitions and baselines, persist them, publish, then acknowledge reads. */
+function applySample(
+	pass: ProducerPass,
+	capture: NonNullable<Awaited<ReturnType<typeof captureWatchedExportInventories>>>,
+	recheck: "same" | "moved" | undefined,
+) {
+	if (!recheck) return;
+	if (recheck === "moved") {
+		pass.store.clearFeedScope({
+			cohort: pass.cohort,
+			authorizationIdentity: pass.authorizationIdentity,
+		});
 		return;
 	}
+	const { hashes, inventories, raced } = capture;
 	const discardPreview = () => {
-		for (const entry of selected) delete entry.inventory;
-		for (const transition of pending) delete transition.fact;
+		for (const entry of pass.selected) delete entry.inventory;
+		for (const transition of pass.pending) delete transition.fact;
 	};
-	if (!previewCurrent()) {
+	if (!pass.previewCurrent()) {
 		inventories.clear();
 		discardPreview();
 	}
-	for (const entry of selected) {
+	recordTransitions(pass, hashes, inventories);
+	pass.gap = trimWatches(pass.selected) || pass.gap;
+	const persist = () => persistProducerState(pass, discardPreview);
+	if (!persist() || !publishTransitions(pass, persist)) return;
+	acknowledgeSettled(pass, hashes, raced);
+}
+
+/** Queue a transition for each changed watch and move its baseline to this sample. */
+function recordTransitions(
+	pass: ProducerPass,
+	hashes: Map<string, string | null>,
+	inventories: Map<string, LocalExportResult>,
+) {
+	for (const entry of pass.selected) {
 		if (!hashes.has(entry.path)) continue;
 		const hash = hashes.get(entry.path);
 		if (hash === undefined) continue;
-		const edit = pendingEdit(entry);
+		const edit = pass.pendingEdit(entry);
 		const next = inventories.get(entry.path);
-		const previous = entry.inventory?.result;
 		if (entry.hash !== undefined ? entry.hash !== hash : Boolean(edit)) {
-			if (pending.length >= MAX_WATCHED) {
-				gap = true;
-				continue;
-			}
-			const transition: PendingTransition = {
-				id: randomUUID(),
-				rootId: entry.rootId,
-				agentId: edit?.agentId ?? "unknown",
-				path: entry.path,
-				hash,
-				head: revision.head,
-				branch: revision.branch,
-			};
-			if (previous?.status === "complete" && next?.status === "complete") {
-				const fact = exportChanges(previous.exports, next.exports);
-				if (fact && safeFeedText(fact)) transition.fact = fact;
-			}
-			if (
-				transition.fact &&
-				!fitsTransition(transition, cohort, authorizationIdentity, transition.fact)
-			)
-				delete transition.fact;
-			if (!fitsTransition(transition, cohort, authorizationIdentity)) {
-				// An impossible packet is a coverage gap, not a perpetually retrying item.
-				gap = true;
-			} else if (
-				Buffer.byteLength(JSON.stringify([...pending, transition]), "utf8") > PRODUCER_PART_BYTES
-			) {
-				gap = true;
-				continue;
-			} else pending.push(transition);
+			const queued = queueTransition(pass, entry, hash, edit, next);
+			if (queued !== "queued") pass.gap = true;
+			if (queued === "deferred") continue;
 		}
 		if (hash !== entry.hash) delete entry.inventory;
 		if (next)
 			entry.inventory = {
 				version: 1,
-				authorizationIdentity,
-				head: revision.head,
-				capturedAt: sampledAt,
+				authorizationIdentity: pass.authorizationIdentity,
+				head: pass.revision.head,
+				capturedAt: pass.sampledAt,
 				result: next,
 			};
 		entry.hash = hash;
-		entry.sampledAt = sampledAt;
+		entry.sampledAt = pass.sampledAt;
 	}
-	gap = trimWatches(selected) || gap;
-	// A transition and its new baseline persist together before publication. Its
-	// stable attempt ID survives failure, but a later recurrence gets a new ID.
-	const persist = () => {
-		if (!current() || performance.now() >= deadline) return false;
-		if (!previewCurrent()) discardPreview();
-		return store.updateProducerState({
-			cohort,
-			signIn,
-			authorizationIdentity,
-			state: {
-				version: 1,
-				branch: revision.branch,
-				head: revision.head,
-				watched: selected,
-				cursor: (cursor + BATCH_SIZE) % Math.max(selected.length, 1),
-				pendingTransitions: pending,
-				publicationGap: gap,
-			},
-		});
+}
+
+/** "deferred" keeps the old baseline so the change is seen again; "gap" moves it on. */
+function queueTransition(
+	pass: ProducerPass,
+	entry: WatchedPath,
+	hash: string | null,
+	edit: FeedObservation | undefined,
+	next: LocalExportResult | undefined,
+): "queued" | "gap" | "deferred" {
+	if (pass.pending.length >= MAX_WATCHED) return "deferred";
+	const transition: PendingTransition = {
+		id: randomUUID(),
+		rootId: entry.rootId,
+		agentId: edit?.agentId ?? "unknown",
+		path: entry.path,
+		hash,
+		head: pass.revision.head,
+		branch: pass.revision.branch,
 	};
-	if (!persist()) return;
-	for (const transition of [...pending]) {
-		if (!current() || performance.now() >= deadline) return;
-		const invalidation = store.publishFinding(
-			transitionFinding(transition, cohort, authorizationIdentity),
-		);
-		if (!invalidation) continue;
-		if (transition.fact && previewCurrent()) {
-			if (!current() || performance.now() >= deadline) return;
-			const enriched = store.publishFinding(
-				transitionFinding(transition, cohort, authorizationIdentity, transition.fact),
-			);
-			if (!enriched) continue;
-		}
-		pending = pending.filter((entry) => entry.id !== transition.id);
-		if (!persist()) return;
+	const fact = exportFact(entry.inventory?.result, next);
+	if (fact) transition.fact = fact;
+	if (
+		transition.fact &&
+		!fitsTransition(transition, pass.cohort, pass.authorizationIdentity, transition.fact)
+	)
+		delete transition.fact;
+	// An impossible packet is a coverage gap, not a perpetually retrying item.
+	if (!fitsTransition(transition, pass.cohort, pass.authorizationIdentity)) return "gap";
+	if (
+		Buffer.byteLength(JSON.stringify([...pass.pending, transition]), "utf8") > PRODUCER_PART_BYTES
+	)
+		return "deferred";
+	pass.pending.push(transition);
+	return "queued";
+}
+
+function exportFact(
+	previous: LocalExportResult | undefined,
+	next: LocalExportResult | undefined,
+): string | undefined {
+	if (previous?.status !== "complete" || next?.status !== "complete") return;
+	const fact = exportChanges(previous.exports, next.exports);
+	return fact && safeFeedText(fact) ? fact : undefined;
+}
+
+// A transition and its new baseline persist together before publication. Its
+// stable attempt ID survives failure, but a later recurrence gets a new ID.
+function persistProducerState(pass: ProducerPass, discardPreview: () => void) {
+	if (!pass.current() || performance.now() >= pass.deadline) return false;
+	if (!pass.previewCurrent()) discardPreview();
+	return pass.store.updateProducerState({
+		cohort: pass.cohort,
+		signIn: pass.signIn,
+		authorizationIdentity: pass.authorizationIdentity,
+		state: {
+			version: 1,
+			branch: pass.revision.branch,
+			head: pass.revision.head,
+			watched: pass.selected,
+			cursor: (pass.cursor + BATCH_SIZE) % Math.max(pass.selected.length, 1),
+			pendingTransitions: pass.pending,
+			publicationGap: pass.gap,
+		},
+	});
+}
+
+/** Publish pending transitions in order. False when the pass must stop. */
+function publishTransitions(pass: ProducerPass, persist: () => boolean): boolean {
+	for (const transition of [...pass.pending]) {
+		if (!pass.current() || performance.now() >= pass.deadline) return false;
+		const published = publishTransition(pass, transition);
+		if (published === "stop") return false;
+		if (!published) continue;
+		pass.pending = pass.pending.filter((entry) => entry.id !== transition.id);
+		if (!persist()) return false;
 	}
-	const settledReads = previewCurrent()
-		? deriveOverlapNotices(selected, paths, hashes, raced, observations, (read, path, hash) => {
-				if (!current() || !previewCurrent() || performance.now() >= deadline) return false;
-				return (
-					store.publishOverlap({
-						cohort,
-						rootId: read.rootId,
-						agentId: read.agentId,
-						observationId: read.id,
-						path,
-						provenance: {
-							head: revision.head,
-							branch: revision.branch ?? undefined,
-							fingerprint: hash,
-						},
-						authorizationIdentity,
-					}) !== "retry"
-				);
-			})
+	return true;
+}
+
+/** The invalidation, then its preview fact. True once both that apply are published. */
+function publishTransition(pass: ProducerPass, transition: PendingTransition): boolean | "stop" {
+	const { cohort, authorizationIdentity } = pass;
+	if (!pass.store.publishFinding(transitionFinding(transition, cohort, authorizationIdentity)))
+		return false;
+	if (!transition.fact || !pass.previewCurrent()) return true;
+	if (!pass.current() || performance.now() >= pass.deadline) return "stop";
+	return Boolean(
+		pass.store.publishFinding(
+			transitionFinding(transition, cohort, authorizationIdentity, transition.fact),
+		),
+	);
+}
+
+function acknowledgeSettled(
+	pass: ProducerPass,
+	hashes: Map<string, string | null>,
+	raced: Set<string>,
+) {
+	const { selected, observations } = pass;
+	const settledReads = pass.previewCurrent()
+		? deriveOverlapNotices(selected, pass.paths, hashes, raced, observations, (read, path, hash) =>
+				publishOverlap(pass, read, path, hash),
+			)
 		: null;
-	if (!current()) return;
+	if (!pass.current()) return;
 	// Base reads only register bounded interests. Preview reads also need a terminal
 	// overlap outcome, while an edit needs evidence from a non-raced sample.
 	const completed = observations.filter((observation) =>
@@ -1115,11 +1378,35 @@ async function prepareUpdates(
 						),
 				),
 	);
-	store.acknowledgeObservations({
-		cohort,
-		authorizationIdentity,
+	pass.store.acknowledgeObservations({
+		cohort: pass.cohort,
+		authorizationIdentity: pass.authorizationIdentity,
 		ids: completed.map((entry) => entry.id),
 	});
+}
+
+function publishOverlap(
+	pass: ProducerPass,
+	read: FeedObservation,
+	path: string,
+	hash: string,
+): boolean {
+	if (!pass.current() || !pass.previewCurrent() || performance.now() >= pass.deadline) return false;
+	return (
+		pass.store.publishOverlap({
+			cohort: pass.cohort,
+			rootId: read.rootId,
+			agentId: read.agentId,
+			observationId: read.id,
+			path,
+			provenance: {
+				head: pass.revision.head,
+				branch: pass.revision.branch ?? undefined,
+				fingerprint: hash,
+			},
+			authorizationIdentity: pass.authorizationIdentity,
+		}) !== "retry"
+	);
 }
 
 function fitsTransition(
@@ -1140,6 +1427,23 @@ function fitsTransition(
 	);
 }
 
+/** A maintenance run's admitted scope, shared by its steps. */
+interface MaintenanceRun {
+	job: FeedMaintenanceJob;
+	options: FeedMaintenanceOptions;
+	deadline: number;
+	now: () => number;
+	credentialsPath: string;
+	scopeOptions: { home?: string; credentialsPath: string; now: () => number };
+	signIn: string;
+	issuer: string;
+	cohort: string;
+	checkoutIdentity: string;
+	current: () => boolean;
+}
+
+type Analyzer = ReturnType<typeof installedLocalAnalyzer>;
+
 /**
  * Refresh one checkout's short-lived authorization and prepare at most four
  * confined hashes. Failure is quiet and cannot restore a replaced sign-in.
@@ -1154,189 +1458,26 @@ export async function runFeedMaintenance(
 	const deadline = Math.min(options.deadline ?? Infinity, performance.now() + RUN_MS);
 	let root: string | undefined;
 	let admission: ReturnType<typeof claimRun> = null;
-	let disposeRequest: (() => void) | undefined;
+	const request: { dispose?: () => void } = {};
 	const now = options.now ?? Date.now;
 	try {
-		if (!validJob(job) || performance.now() >= deadline || options.signal?.aborted) return false;
-		const credentialsPath =
-			job.credentialsPath ?? join(job.home ?? homedir(), ".pharaoh", "credentials.json");
-		const scopeOptions = { home: job.home, credentialsPath, now };
-		const signIn = readFeedSignInGeneration(scopeOptions);
-		const issuer = feedServerOrigin(job.server);
-		if (
-			!signIn ||
-			signIn !== job.signIn ||
-			!issuer ||
-			resolveFeedCheckout(job.checkout) !== job.checkout
-		)
-			return false;
-		const cohort = deriveFeedCohortKey({ ...job, signIn });
-		if (!cohort || cohort !== job.cohort) return false;
-		const checkoutIdentity = feedCheckoutIdentity(job.checkout);
-		if (!checkoutIdentity) return false;
-		root = ensureFeedRoot(scopeOptions);
-		const current = () =>
-			performance.now() < deadline &&
-			readFeedSignInGeneration(scopeOptions) === signIn &&
-			feedCheckoutIdentity(job.checkout) === checkoutIdentity &&
-			feedServerOrigin(readCredentials(credentialsPath)?.sse_url) === issuer &&
-			!options.signal?.aborted &&
-			resolveFeedProfile({
-				...scopeOptions,
-				client: job.client,
-				registration: job.registration,
-				cohort,
-				event: "PostToolUse",
-				now: now(),
-			}).admit;
-		if (!current()) return false;
-		const store = options.store ?? createFeedStore(scopeOptions);
-		let priorProof = store.readAccessProof({ cohort });
-		const priorAuthorization = store.currentAuthorizationIdentity({ cohort });
-		if (priorProof && priorProof.checkoutIdentity !== checkoutIdentity) {
-			if (priorAuthorization)
-				store.clearFeedScope({ cohort, authorizationIdentity: priorAuthorization });
-			priorProof = null;
-		}
-		admission = claimRun(
-			root,
-			cohort,
-			signIn,
-			!priorProof || priorProof.expiresAt - now() <= REFRESH_MS,
-			now(),
-		);
+		const admitted = admittedJob(job, options, deadline, now);
+		if (!admitted) return false;
+		root = ensureFeedRoot(admitted.scopeOptions);
+		const run: MaintenanceRun = { ...admitted, current: currentCheck(admitted) };
+		if (!run.current()) return false;
+		const store = feedStore(run);
+		const prior = priorAccess(run, store);
+		admission = claimMaintenance(root, run, prior.proof);
 		if (!admission) return false;
 		const owned = admission.entry;
 		const leaseCurrent = () => root !== undefined && ownsRun(root, owned, now());
-		const analyzer =
-			options.resolveCheckout && options.fingerprint ? undefined : installedLocalAnalyzer();
-		const resolveCheckout: NonNullable<FeedMaintenanceOptions["resolveCheckout"]> =
-			options.resolveCheckout ??
-			((cwd: string) => {
-				if (!analyzer) return null;
-				const evidence = resolveLocalCheckout(cwd, analyzer.reader, deadline);
-				return evidence.kind === "checkout" ? evidence.checkout : null;
-			});
-		const checkout = resolveCheckout(job.checkout);
-		if (!checkout || checkout.root !== job.checkout || !SLUG.test(checkout.repoSlug) || !current())
-			return true;
-		if (priorProof && priorProof.repo.toLowerCase() !== checkout.repoSlug.toLowerCase()) {
-			if (priorAuthorization)
-				store.clearFeedScope({ cohort, authorizationIdentity: priorAuthorization });
-			return true;
-		}
-		if (admission.refresh) {
-			const credentials = readCredentials(credentialsPath);
-			if (!credentials || !current() || performance.now() >= deadline) return true;
-			const requestStartedAt = now();
-			const expectedRevision = store.readScopeRevision({ cohort });
-			if (!expectedRevision) return true;
-			const request = requestSignal(
-				options.signal,
-				Math.max(1, Math.min(2_000, Math.floor(deadline - performance.now()))),
-			);
-			const signal = request.signal;
-			disposeRequest = request.dispose;
-			const response = await (options.fetch ?? fetch)(
-				new URL("/api/local/v1/feed-access", issuer),
-				{
-					method: "POST",
-					headers: {
-						Authorization: `Bearer ${credentials.access_token}`,
-						"Content-Type": "application/json",
-					},
-					body: JSON.stringify({ version: 1, repoSlug: checkout.repoSlug }),
-					redirect: "error",
-					cache: "no-store",
-					signal,
-				},
-			);
-			if (!current() || !leaseCurrent() || store.readScopeRevision({ cohort }) !== expectedRevision)
-				return true;
-			if ([401, 402, 403, 409, 410].includes(response.status)) {
-				void response.body?.cancel().catch(() => {});
-				store.clearFeedScope({ cohort, expectedRevision });
-				return true;
-			}
-			if (response.status === 200) {
-				const access = parseAccess(await boundedResponse(response), checkout.repoSlug);
-				if (!current() || !leaseCurrent() || !access || now() >= requestStartedAt + PROOF_MS)
-					return true;
-				const published = store.putAccessProof({
-					cohort,
-					expectedRevision,
-					proof: {
-						version: 1,
-						...access,
-						issuer,
-						signIn,
-						checkout: checkout.root,
-						checkoutIdentity,
-						requestedAt: requestStartedAt,
-						expiresAt: requestStartedAt + PROOF_MS,
-					},
-				});
-				if (!published) return true;
-			} else void response.body?.cancel().catch(() => {});
-		}
-		const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
-		const proof = store.readAccessProof({ cohort });
-		if (
-			!current() ||
-			!proof ||
-			proof.checkoutIdentity !== checkoutIdentity ||
-			proof.repo.toLowerCase() !== checkout.repoSlug.toLowerCase() ||
-			!authorizationIdentity
-		)
-			return true;
-		const currentScope = () =>
-			current() &&
-			leaseCurrent() &&
-			store.currentAuthorizationIdentity({ cohort }) === authorizationIdentity;
-		const fingerprint: NonNullable<FeedMaintenanceOptions["fingerprint"]> =
-			options.fingerprint ??
-			((verified, paths, until, visit) =>
-				analyzer
-					? fingerprintLocalSources(verified, analyzer.reader, paths, until, visit)
-					: undefined);
-		const previewCurrent = () => nativeFeedPreviewEnabled(job.client, scopeOptions);
-		const exportInventory =
-			options.exportInventory ??
-			(analyzer?.savedExportInventoryV1
-				? (files: LocalExportInput[], signal: AbortSignal) =>
-						runLocalExportInventory(analyzer, files, signal)
-				: undefined);
-		await prepareUpdates(
-			cohort,
-			signIn,
-			authorizationIdentity,
-			checkout,
-			store,
-			fingerprint,
-			options.provenance ?? readProvenance,
-			now,
-			currentScope,
-			deadline,
-			previewCurrent,
-			{ exportInventory, signal: options.signal },
-		);
-		await refreshWatchedPublication({
-			job,
-			root,
-			credentialsPath,
-			proof,
-			authorizationIdentity,
-			store,
-			deadline,
-			current: currentScope,
-			now,
-			options,
-		});
+		await maintainCheckout(run, store, prior, admission.refresh, leaseCurrent, request, root);
 		return true;
 	} catch {
 		return false;
 	} finally {
-		disposeRequest?.();
+		request.dispose?.();
 		if (root && admission) {
 			try {
 				releaseRun(root, admission.entry, now());
@@ -1345,4 +1486,314 @@ export async function runFeedMaintenance(
 			}
 		}
 	}
+}
+
+/** The job's scope once its sign-in, server, checkout and cohort still match; otherwise null. */
+function admittedJob(
+	job: FeedMaintenanceJob,
+	options: FeedMaintenanceOptions,
+	deadline: number,
+	now: () => number,
+): Omit<MaintenanceRun, "current"> | null {
+	if (blocked(job, options, deadline)) return null;
+	const credentialsPath = credentialsFile(job);
+	const scopeOptions = { home: job.home, credentialsPath, now };
+	const signIn = readFeedSignInGeneration(scopeOptions);
+	const issuer = feedServerOrigin(job.server);
+	if (
+		!signIn ||
+		signIn !== job.signIn ||
+		!issuer ||
+		resolveFeedCheckout(job.checkout) !== job.checkout
+	)
+		return null;
+	const cohort = deriveFeedCohortKey({ ...job, signIn });
+	if (!cohort || cohort !== job.cohort) return null;
+	const checkoutIdentity = feedCheckoutIdentity(job.checkout);
+	if (!checkoutIdentity) return null;
+	return {
+		job,
+		options,
+		deadline,
+		now,
+		credentialsPath,
+		scopeOptions,
+		signIn,
+		issuer,
+		cohort,
+		checkoutIdentity,
+	};
+}
+
+function blocked(
+	job: FeedMaintenanceJob,
+	options: FeedMaintenanceOptions,
+	deadline: number,
+): boolean {
+	return !validJob(job) || performance.now() >= deadline || Boolean(options.signal?.aborted);
+}
+
+function feedStore({ options, scopeOptions }: MaintenanceRun) {
+	return options.store ?? createFeedStore(scopeOptions);
+}
+
+/** Take the run's lease; it may refresh access when no proof is saved or it is due to expire. */
+function claimMaintenance(
+	root: string,
+	{ cohort, signIn, now }: MaintenanceRun,
+	proof: FeedAccessProof | null,
+) {
+	return claimRun(root, cohort, signIn, !proof || proof.expiresAt - now() <= REFRESH_MS, now());
+}
+
+function credentialsFile(job: FeedMaintenanceJob): string {
+	return job.credentialsPath ?? join(job.home ?? homedir(), ".pharaoh", "credentials.json");
+}
+
+/** Whether the run may still act: time, sign-in, checkout, server, cancellation and profile. */
+function currentCheck(run: Omit<MaintenanceRun, "current">): () => boolean {
+	const { job, options, deadline, now, credentialsPath, scopeOptions, signIn, issuer } = run;
+	return () =>
+		performance.now() < deadline &&
+		readFeedSignInGeneration(scopeOptions) === signIn &&
+		feedCheckoutIdentity(job.checkout) === run.checkoutIdentity &&
+		feedServerOrigin(readCredentials(credentialsPath)?.sse_url) === issuer &&
+		!options.signal?.aborted &&
+		resolveFeedProfile({
+			...scopeOptions,
+			client: job.client,
+			registration: job.registration,
+			cohort: run.cohort,
+			event: "PostToolUse",
+			now: now(),
+		}).admit;
+}
+
+/** The saved proof and authorization; a proof for another checkout identity clears its scope. */
+function priorAccess(
+	{ cohort, checkoutIdentity }: MaintenanceRun,
+	store: ReturnType<typeof createFeedStore>,
+) {
+	let proof = store.readAccessProof({ cohort });
+	const authorization = store.currentAuthorizationIdentity({ cohort });
+	if (proof && proof.checkoutIdentity !== checkoutIdentity) {
+		if (authorization) store.clearFeedScope({ cohort, authorizationIdentity: authorization });
+		proof = null;
+	}
+	return { proof, authorization };
+}
+
+/** Verify the checkout, refresh access when admitted to, then produce from current proof. */
+async function maintainCheckout(
+	run: MaintenanceRun,
+	store: ReturnType<typeof createFeedStore>,
+	prior: ReturnType<typeof priorAccess>,
+	refresh: boolean,
+	leaseCurrent: () => boolean,
+	request: { dispose?: () => void },
+	root: string,
+) {
+	const analyzer =
+		run.options.resolveCheckout && run.options.fingerprint ? undefined : installedLocalAnalyzer();
+	const checkout = verifiedCheckout(run, analyzer);
+	if (!checkout || !run.current()) return;
+	if (priorRepoMoved(run, store, prior, checkout)) return;
+	if (refresh && !(await refreshAccess(run, store, checkout, leaseCurrent, request))) return;
+	const access = currentProof(run, store, checkout);
+	if (!access) return;
+	await produce(run, store, checkout, analyzer, access, leaseCurrent, root);
+}
+
+function verifiedCheckout(run: MaintenanceRun, analyzer: Analyzer) {
+	const resolveCheckout: NonNullable<FeedMaintenanceOptions["resolveCheckout"]> =
+		run.options.resolveCheckout ??
+		((cwd: string) => {
+			if (!analyzer) return null;
+			const evidence = resolveLocalCheckout(cwd, analyzer.reader, run.deadline);
+			return evidence.kind === "checkout" ? evidence.checkout : null;
+		});
+	const checkout = resolveCheckout(run.job.checkout);
+	if (!checkout || checkout.root !== run.job.checkout || !SLUG.test(checkout.repoSlug)) return null;
+	return checkout;
+}
+
+/** A saved proof for another repository clears its scope and ends the run. */
+function priorRepoMoved(
+	{ cohort }: MaintenanceRun,
+	store: ReturnType<typeof createFeedStore>,
+	prior: ReturnType<typeof priorAccess>,
+	checkout: VerifiedCheckout,
+): boolean {
+	if (!prior.proof || prior.proof.repo.toLowerCase() === checkout.repoSlug.toLowerCase())
+		return false;
+	if (prior.authorization)
+		store.clearFeedScope({ cohort, authorizationIdentity: prior.authorization });
+	return true;
+}
+
+/** Ask Pharaoh for fresh access proof. False when the run must stop. */
+async function refreshAccess(
+	run: MaintenanceRun,
+	store: ReturnType<typeof createFeedStore>,
+	checkout: VerifiedCheckout,
+	leaseCurrent: () => boolean,
+	request: { dispose?: () => void },
+): Promise<boolean> {
+	const { cohort, current, deadline } = run;
+	const credentials = readCredentials(run.credentialsPath);
+	if (!credentials || !current() || performance.now() >= deadline) return false;
+	const requestStartedAt = run.now();
+	const expectedRevision = store.readScopeRevision({ cohort });
+	if (!expectedRevision) return false;
+	const signalled = requestSignal(
+		run.options.signal,
+		Math.max(1, Math.min(2_000, Math.floor(deadline - performance.now()))),
+	);
+	request.dispose = signalled.dispose;
+	const response = await postFeedAccess(run, credentials.access_token, checkout, signalled.signal);
+	if (!current() || !leaseCurrent() || store.readScopeRevision({ cohort }) !== expectedRevision)
+		return false;
+	if ([401, 402, 403, 409, 410].includes(response.status)) {
+		void response.body?.cancel().catch(() => {});
+		store.clearFeedScope({ cohort, expectedRevision });
+		return false;
+	}
+	if (response.status !== 200) {
+		void response.body?.cancel().catch(() => {});
+		return true;
+	}
+	return publishAccess(
+		run,
+		store,
+		checkout,
+		response,
+		requestStartedAt,
+		expectedRevision,
+		leaseCurrent,
+	);
+}
+
+function postFeedAccess(
+	{ issuer, options }: MaintenanceRun,
+	accessToken: string,
+	checkout: VerifiedCheckout,
+	signal: AbortSignal,
+) {
+	return (options.fetch ?? fetch)(new URL("/api/local/v1/feed-access", issuer), {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ version: 1, repoSlug: checkout.repoSlug }),
+		redirect: "error",
+		cache: "no-store",
+		signal,
+	});
+}
+
+/** Save the access Pharaoh answered as proof. False when the run must stop. */
+async function publishAccess(
+	run: MaintenanceRun,
+	store: ReturnType<typeof createFeedStore>,
+	checkout: VerifiedCheckout,
+	response: Response,
+	requestStartedAt: number,
+	expectedRevision: string,
+	leaseCurrent: () => boolean,
+): Promise<boolean> {
+	const access = parseAccess(await boundedResponse(response), checkout.repoSlug);
+	if (!run.current() || !leaseCurrent() || !access || run.now() >= requestStartedAt + PROOF_MS)
+		return false;
+	return Boolean(
+		store.putAccessProof({
+			cohort: run.cohort,
+			expectedRevision,
+			proof: {
+				version: 1,
+				...access,
+				issuer: run.issuer,
+				signIn: run.signIn,
+				checkout: checkout.root,
+				checkoutIdentity: run.checkoutIdentity,
+				requestedAt: requestStartedAt,
+				expiresAt: requestStartedAt + PROOF_MS,
+			},
+		}),
+	);
+}
+
+/** The proof and authorization this run produces under, or null when either no longer holds. */
+function currentProof(
+	{ cohort, current, checkoutIdentity }: MaintenanceRun,
+	store: ReturnType<typeof createFeedStore>,
+	checkout: VerifiedCheckout,
+) {
+	const authorizationIdentity = store.currentAuthorizationIdentity({ cohort });
+	const proof = store.readAccessProof({ cohort });
+	if (
+		!current() ||
+		!proof ||
+		proof.checkoutIdentity !== checkoutIdentity ||
+		proof.repo.toLowerCase() !== checkout.repoSlug.toLowerCase() ||
+		!authorizationIdentity
+	)
+		return null;
+	return { proof, authorizationIdentity };
+}
+
+/** Prepare saved-file updates, then refresh watched hosted publications. */
+async function produce(
+	run: MaintenanceRun,
+	store: ReturnType<typeof createFeedStore>,
+	checkout: VerifiedCheckout,
+	analyzer: Analyzer,
+	{ proof, authorizationIdentity }: NonNullable<ReturnType<typeof currentProof>>,
+	leaseCurrent: () => boolean,
+	root: string,
+) {
+	const { job, options, cohort, now, deadline } = run;
+	const currentScope = () =>
+		run.current() &&
+		leaseCurrent() &&
+		store.currentAuthorizationIdentity({ cohort }) === authorizationIdentity;
+	const fingerprint: NonNullable<FeedMaintenanceOptions["fingerprint"]> =
+		options.fingerprint ??
+		((verified, paths, until, visit) =>
+			analyzer
+				? fingerprintLocalSources(verified, analyzer.reader, paths, until, visit)
+				: undefined);
+	const previewCurrent = () => nativeFeedPreviewEnabled(job.client, run.scopeOptions);
+	const exportInventory =
+		options.exportInventory ??
+		(analyzer?.savedExportInventoryV1
+			? (files: LocalExportInput[], signal: AbortSignal) =>
+					runLocalExportInventory(analyzer, files, signal)
+			: undefined);
+	await prepareUpdates(
+		cohort,
+		run.signIn,
+		authorizationIdentity,
+		checkout,
+		store,
+		fingerprint,
+		options.provenance ?? readProvenance,
+		now,
+		currentScope,
+		deadline,
+		previewCurrent,
+		{ exportInventory, signal: options.signal },
+	);
+	await refreshWatchedPublication({
+		job,
+		root,
+		credentialsPath: run.credentialsPath,
+		proof,
+		authorizationIdentity,
+		store,
+		deadline,
+		current: currentScope,
+		now,
+		options,
+	});
 }

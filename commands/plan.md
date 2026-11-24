@@ -8,6 +8,8 @@ Architecture-aware plan review before implementation. Adapted from [Garry Tan's 
 
 **This is a review: make no code changes during it. Think, evaluate, and present decisions.**
 
+Before changing a UI file, call `design_context` with the repository-relative target when it appears in the installed tool list. From a shell in the checkout, run `pharaoh-mcp design context --target <file>`. Use its declarations, callers, and tokens with the reported coverage and approval status.
+
 ## When to Use
 
 Before any multi-step implementation or architectural change. When given a PRD, spec, or plan document to evaluate before writing code.

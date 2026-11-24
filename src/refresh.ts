@@ -30,6 +30,8 @@ import {
  * or the sse_url — those are carried over from existing credentials.
  */
 interface RefreshGrantResponse {
+	audience?: string;
+	scope?: string;
 	access_token: string;
 	refresh_token: string;
 	expires_in: number;
@@ -229,6 +231,16 @@ async function requestRefresh(
 			};
 		}
 		const now = Date.now();
+		if (
+			creds.designScope &&
+			(token.audience !== "pharaoh-design" || token.scope !== creds.designScope)
+		) {
+			return {
+				ok: false,
+				action: "preserve",
+				message: "The refreshed design grant did not match the original sign-in.",
+			};
+		}
 		const newCreds: Credentials = {
 			...creds,
 			access_token: token.access_token,

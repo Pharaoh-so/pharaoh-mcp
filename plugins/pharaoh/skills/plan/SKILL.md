@@ -9,6 +9,8 @@ Architecture-aware plan review before implementation.
 
 **This is a review: make no code changes during it. Think, evaluate, and present decisions.**
 
+For a UI change in a checkout with the Pharaoh CLI installed, run `pharaoh-mcp design context --target <file>` there to find reusable components and styles. Use the reported coverage and approval status.
+
 ## When to Use
 
 Before any multi-step implementation or architectural change. When given a PRD, spec, or plan document to evaluate before writing code.

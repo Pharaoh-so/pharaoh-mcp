@@ -7,6 +7,8 @@ description: "Safe refactoring workflow using Pharaoh codebase knowledge graph. 
 
 Step-by-step workflow to safely refactor a function or module with full blast radius awareness. Six steps map the detected callers, find the affected tests, flag unreachable code, and warn about high-risk downstream paths before a single line changes.
 
+For a UI change in a checkout with the Pharaoh CLI installed, run `pharaoh-mcp design context --target <file>` there to find reusable components and styles. Use the reported coverage and approval status.
+
 ## When to Use
 
 Invoke before refactoring a function, module, or file in a repo Pharaoh maps — especially shared utilities, exports used across multiple modules, or anything with an unclear caller graph. Use it whenever the blast radius of a change is unknown.

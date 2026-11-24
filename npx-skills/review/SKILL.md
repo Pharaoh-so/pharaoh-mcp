@@ -15,6 +15,8 @@ A review always reaches a verdict. When a phase needs something your client does
 
 Final verdict: **SHIP** / **SHIP WITH CHANGES** / **BLOCK**
 
+Before changing a UI file, call `design_context` with the repository-relative target when it appears in the installed tool list. From a shell in the checkout, run `pharaoh-mcp design context --target <file>`. Use its declarations, callers, and tokens with the reported coverage and approval status.
+
 ## When to Use
 
 Before merging any branch. Before opening any PR. When reviewing changes that touch shared modules, export new functions, modify core data flows, or claim to implement a spec.

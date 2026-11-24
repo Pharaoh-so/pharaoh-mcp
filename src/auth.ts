@@ -19,6 +19,8 @@ export interface DeviceCodeResponse {
 /** Successful response from POST /device/token. */
 export interface TokenResponse {
 	access_token: string;
+	audience?: string;
+	scope?: string;
 	token_type: string;
 	expires_in: number;
 	/**
@@ -71,12 +73,17 @@ export type PollResult =
 export async function requestDeviceCode(
 	baseUrl: string,
 	runtimeInstallations: readonly RuntimeEnrollmentIntent[] = [],
+	designScope?: "design:read" | "design:draft",
 ): Promise<DeviceCodeResponse> {
 	const res = await fetch(`${baseUrl}/device`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(
-			runtimeInstallations.length ? { runtime_installations: runtimeInstallations } : {},
+			designScope
+				? { client_id: "pharaoh-design", audience: "pharaoh-design", scope: designScope }
+				: runtimeInstallations.length
+					? { runtime_installations: runtimeInstallations }
+					: {},
 		),
 		redirect: "error",
 	});

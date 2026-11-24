@@ -371,6 +371,7 @@ export class ProxyServer {
 		private readonly installScope?: InstallScope,
 		private readonly managedHookClients?: () => readonly string[],
 		private readonly nativeFeed?: NativeFeedRuntime,
+		private readonly designServer = "https://mcp.pharaoh.so",
 	) {
 		this.deferHosted =
 			localBlast?.invocation.kind === "checkout" || localBlast?.canDeferHostedStartup?.() === true;
@@ -449,7 +450,16 @@ export class ProxyServer {
 				this.backend.name === "auth-required"
 					? await this.backend.listTools({ signal: extra.signal })
 					: await this.catalogDiscovery.discoverTools(extra.signal);
-			const tools = [...catalog];
+			// Only the installed transport can read a checkout. Drop any legacy hosted placeholder.
+			const tools = catalog.filter((tool) => tool.name !== "design_context");
+			const { DESIGN_CONTEXT_TOOL, localDesignCheckout } = await import("./design-evaluate.js");
+			try {
+				const { checkout } = localDesignCheckout();
+				if (this.installScope?.kind !== "local" || this.installScope.root === checkout.root)
+					tools.push(DESIGN_CONTEXT_TOOL);
+			} catch {
+				// ALLOWED-CATCH: absence of a verified checkout removes this optional local capability.
+			}
 			if (this.nativeFeed?.available()) tools.push(NATIVE_SHARE_TOOL);
 			return {
 				tools: this.localBlast?.canCheckReadiness?.() ? [...tools, LOCAL_READINESS] : tools,
@@ -459,6 +469,32 @@ export class ProxyServer {
 			extra.signal.throwIfAborted();
 			const { name } = req.params;
 			let args = req.params.arguments ?? {};
+			if (name === "design_context") {
+				const { localDesignCheckout, readDesignContext } = await import("./design-evaluate.js");
+				const { safeDesignError } = await import("./design-cli.js");
+				try {
+					const { checkout, analyzer } = localDesignCheckout();
+					if (this.installScope?.kind === "local" && this.installScope.root !== checkout.root)
+						return localRefusal("unverified_worktree");
+					if (
+						typeof args.target !== "string" ||
+						(args.search !== undefined && typeof args.search !== "string") ||
+						Object.keys(args).some((key) => key !== "target" && key !== "search")
+					)
+						return localRefusal("invalid_local_request");
+					const context = await readDesignContext(
+						this.designServer,
+						checkout,
+						analyzer,
+						args.target,
+						args.search,
+						extra.signal,
+					);
+					return { content: [{ type: "text", text: JSON.stringify(context) }] };
+				} catch (e) {
+					return { isError: true, content: [{ type: "text", text: safeDesignError(e).message }] };
+				}
+			}
 			if (name === NATIVE_SHARE_TOOL.name)
 				return this.nativeFeed?.share(args) ?? localRefusal("local_unavailable");
 			if (name === LOCAL_READINESS.name)
@@ -873,6 +909,7 @@ export async function startInAuthRequiredMode(
 		opts.scope,
 		() => host.managedClients(),
 		opts.nativeFeed,
+		server,
 	);
 	await proxy.start();
 	return { proxy, gateway };
@@ -895,6 +932,7 @@ export async function startInSseMode(
 		scope,
 		() => host.managedClients(),
 		nativeFeed,
+		new URL(creds.sse_url).origin,
 	);
 	await proxy.start();
 	return proxy;

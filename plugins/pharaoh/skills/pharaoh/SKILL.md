@@ -7,6 +7,8 @@ description: "Which Pharaoh tool answers which structural question about a mappe
 
 Pharaoh maps codebases into queryable knowledge graphs — functions, dependencies, modules, connections. No source code stored.
 
+For a UI change in a checkout with the Pharaoh CLI installed, run `pharaoh-mcp design context --target <file>` there to find reusable components and styles. Use the reported coverage and approval status.
+
 ## Pick the tool by the question
 
 | Question | Tool |
