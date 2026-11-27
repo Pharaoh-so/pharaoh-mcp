@@ -1,8 +1,8 @@
 {
   "version": 1,
   "repository": "Pharaoh-so/pharaoh",
-  "commit": "26075932f965133923b473f15245f9d0fa702a8d",
-  "payloadSha256": "5a66f4ca1b3fefcfa611c2bbc1592c6a649cb5abfae87d614ad948d90b35294c",
+  "commit": "23eb0bb143259bed271270da2837ad70ec639dbb",
+  "payloadSha256": "9bfad72b7602131b695eb6d0f6125a598b618b50a7cb42c8254d74c4557f03a6",
   "files": [
     {
       "path": ".claude-plugin/plugin.json",
@@ -11,7 +11,7 @@
     },
     {
       "path": ".mcp.json",
-      "sha256": "a2aa078894811f50dd0668b86740a32378f8e3cf4714c5ec52492e235770e60f",
+      "sha256": "cec6dc21a03e167f883116020a318505b6c2e7813ece72cd04c421aa444c3b44",
       "mode": "100644"
     },
     {
@@ -101,7 +101,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "e66680c2a602e6391d1381fd4f24d578f2a8919c1bf631f1bc20384831cb8751",
+      "sha256": "9f49e31df54474ee6180a0eaa099f69a9ac108bbd8532409626691351a91e334",
       "mode": "100644"
     },
     {
@@ -111,7 +111,7 @@
     },
     {
       "path": "plugins/pharaoh/.claude-plugin/plugin.json",
-      "sha256": "ba704d5f24e5152ed780ad5aa31c187562a9304aa3c4db595ea4f248220e787c",
+      "sha256": "5afcac63958450dee595db071d615e40429a2d801a368b21e9d9a09345f1ea7c",
       "mode": "100644"
     },
     {
@@ -576,7 +576,7 @@
     },
     {
       "path": "src/design-cli.ts",
-      "sha256": "66a55aaf5d5a83b16151e6b59f2d959814f83930edb536a989922d644eaec79d",
+      "sha256": "41420eabe339dbad674938dc6f4ed2fda376a0d4c23f42334be67f84e39a4d99",
       "mode": "100644"
     },
     {
@@ -596,7 +596,7 @@
     },
     {
       "path": "src/design-wiring.ts",
-      "sha256": "c624fb2b3b2238ef80dde808c989ace302768b7378beb6ef86ee3510ab1b8f0b",
+      "sha256": "5d0184d1966b268e005234adcbc0757f860377cdad524ead5847fe7b2e8fa061",
       "mode": "100644"
     },
     {
@@ -791,7 +791,7 @@
     },
     {
       "path": "tests/design-lint.test.ts",
-      "sha256": "9ef54a8c66722e50a85ffa09ae43bca96ddf65b44922d7e50591e2a313d96c63",
+      "sha256": "7d8f6cb5b03a8807f1e434fc7659ce21400d287c27e9ebf2927dd19f727a1216",
       "mode": "100644"
     },
     {
