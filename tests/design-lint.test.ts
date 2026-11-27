@@ -5,6 +5,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	symlinkSync,
@@ -15,6 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { runDesignCommand } from "../src/design-cli.js";
 import { designOrigin, verifyProjection } from "../src/design-projection.js";
 import { callerWorkflow } from "../src/design-wiring.js";
 
@@ -112,6 +114,28 @@ describe("signed design evaluation boundary", () => {
 		expect(() => callerWorkflow("main", false)).toThrow();
 	});
 });
+describe("design command arguments", () => {
+	it.each([
+		[["--help"], 0, "log", "pharaoh-mcp design context --target"],
+		[[], 0, "log", "pharaoh-mcp design context --target"],
+		[["lint", "extra"], 2, "error", "pharaoh-mcp design context --target"],
+		[["lint", "--bogus"], 2, "error", "Could not complete design analysis"],
+		[["lint", "--server", "ftp://pharaoh.so"], 2, "error", "HTTPS"],
+	])("answers %j with exit %i and its line on console.%s", async (argv, code, stream, line) => {
+		const out = vi.spyOn(console, "log").mockImplementation(() => {});
+		const err = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			expect(await runDesignCommand(argv)).toBe(code);
+			const [used, other] = stream === "log" ? [out, err] : [err, out];
+			expect(used.mock.calls.flat().join("\n")).toContain(line);
+			expect(other).not.toHaveBeenCalled();
+		} finally {
+			out.mockRestore();
+			err.mockRestore();
+		}
+	});
+});
+
 describe("opt-in native ESLint", () => {
 	it("preserves native errors and emits the approved overlay only in the managed run", () => {
 		const require = createRequire(import.meta.url);
@@ -183,10 +207,13 @@ describe("authorized checkout wiring", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
-	it("refuses opaque native configs before creating any managed files", async () => {
+	it.each([
+		["an opaque native config", [".eslintrc"]],
+		["a pnpm checkout", ["eslint.config.js", "pnpm-lock.yaml"]],
+	])("refuses managed ESLint in %s before creating any managed files", async (_name, files) => {
 		const root = mkdtempSync(join(tmpdir(), "pharaoh-design-legacy-"));
 		writeFileSync(join(root, "package.json"), '{"private":true}');
-		writeFileSync(join(root, ".eslintrc"), "{}");
+		for (const file of files) writeFileSync(join(root, file), "{}");
 		try {
 			const { wireDesignCheckout } = await import("../src/design-wiring.js");
 			await expect(
@@ -202,9 +229,17 @@ describe("authorized checkout wiring", () => {
 });
 
 it.each([
-	"written",
-	"rolled-back",
-])("recovers an interrupted install with the manifest %s and preserves a competing workflow edit", async (stage) => {
+	{ stage: "written", live: false, recoveryRequired: false },
+	{ stage: "rolled-back", live: false, recoveryRequired: false },
+	// A recovery journal never waits on its PID, even one that is still running.
+	{ stage: "written", live: true, recoveryRequired: true },
+	// A live owner without that flag is mid-install: nothing is touched.
+	{ stage: "written", live: true, recoveryRequired: false },
+])("handles an interrupted install with the manifest $stage (live owner: $live, recovery: $recoveryRequired)", async ({
+	stage,
+	live,
+	recoveryRequired,
+}) => {
 	const root = mkdtempSync(join(tmpdir(), "pharaoh-design-interrupted-"));
 	const home = join(root, "home");
 	vi.stubEnv("HOME", home);
@@ -224,7 +259,8 @@ it.each([
 		writeFileSync(
 			join(journalDir, `${digest(root)}.json`),
 			JSON.stringify({
-				pid: 1000000000,
+				pid: live ? process.pid : 1000000000,
+				...(recoveryRequired && { recoveryRequired }),
 				original: previous.toString("base64"),
 				desired: digest(interrupted),
 				manager: "npm",
@@ -234,9 +270,15 @@ it.each([
 				nextWorkflow: digest("generated version"),
 			}),
 		);
-		await expect(
-			wireDesignCheckout(root, "bootstrap", { eslint: false, privateCi: false }),
-		).rejects.toThrow(/conflicts/);
+		const wiring = wireDesignCheckout(root, "bootstrap", { eslint: false, privateCi: false });
+		if (live && !recoveryRequired) {
+			await expect(wiring).rejects.toThrow(/Another Pharaoh process/);
+			expect(readFileSync(join(root, "package.json"))).toEqual(interrupted);
+			expect(readFileSync(join(root, "package-lock.json"), "utf8")).toBe("installed lock");
+			expect(readdirSync(journalDir)).toHaveLength(1);
+			return;
+		}
+		await expect(wiring).rejects.toThrow(/conflicts/);
 		expect(readFileSync(join(root, "package.json"))).toEqual(previous);
 		expect(readFileSync(join(root, "package-lock.json"), "utf8")).toBe("original lock");
 		expect(readFileSync(workflowPath, "utf8")).toBe("engineer edit");
